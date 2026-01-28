@@ -96,36 +96,24 @@ class MixDubbedAudioJob implements ShouldQueue
                 $delayMs = max(0, (int) round(((float) $seg->start_time) * 1000));
                 $label = "tts{$i}";
 
-                // Professional dubbing voice chain:
-                // 1. Resample and format
-                // 2. De-esser (reduce harsh sibilance from TTS)
-                // 3. Compressor (consistent dynamics like studio recording)
-                // 4. Multi-band EQ (shape voice to sound natural in scene)
-                // 5. Saturation/warmth (add analog-like character)
-                // 6. Room reverb (match scene acoustics)
-                // 7. Final volume adjustment
+                // PROFESSIONAL MOVIE DUBBING - clean, natural, clear
                 $filtersBase[] =
                     "[{$i}:a]"
                     . "aresample=48000,"
                     . "aformat=sample_fmts=fltp:channel_layouts=stereo,"
                     . "adelay={$delayMs}|{$delayMs},"
-                    // De-esser: reduce harsh 's' sounds (4-8kHz)
-                    . "highpass=f=80,"
-                    . "lowpass=f=12000,"
-                    . "equalizer=f=6000:t=q:w=2.0:g=-4,"    // de-ess
-                    // Voice presence and warmth EQ
-                    . "equalizer=f=150:t=q:w=0.8:g=+2,"     // warmth/body
-                    . "equalizer=f=2500:t=q:w=1.2:g=+1.5,"  // presence
-                    . "equalizer=f=4500:t=q:w=1.5:g=-2,"    // reduce harshness
-                    . "equalizer=f=8000:t=q:w=1.0:g=-3,"    // reduce air/hiss
-                    // Compressor for consistent dynamics (like studio recorded voice)
-                    . "acompressor=threshold=-24dB:ratio=4:attack=5:release=100:makeup=3dB,"
-                    // Subtle saturation for analog warmth
-                    . "asubboost=dry=0.7:wet=0.3:decay=0.4:feedback=0.3:cutoff=100:slope=0.5:delay=20,"
-                    // Room reverb - sounds like recorded in scene, not a booth
-                    . "aecho=0.8:0.75:40|80|120:0.15|0.10|0.06,"
-                    // Final level - slightly hot for clarity over background
-                    . "volume=+3.5dB"
+                    // Clean up
+                    . "highpass=f=60,"
+                    . "lowpass=f=15000,"
+                    // Professional voice EQ - natural and clear
+                    . "equalizer=f=120:t=q:w=0.7:g=+2,"      // body/fullness
+                    . "equalizer=f=2800:t=q:w=1.0:g=+3,"     // clarity/intelligibility
+                    . "equalizer=f=5500:t=q:w=0.8:g=+2,"     // presence/air
+                    . "equalizer=f=7500:t=q:w=1.5:g=-1,"     // reduce harshness
+                    // Broadcast-style compression for consistent level
+                    . "acompressor=threshold=-20dB:ratio=3:attack=10:release=100:makeup=2dB,"
+                    // Voice level - prominent but natural
+                    . "volume=+4dB"
                     . "[{$label}]";
 
                 $ttsLabels[] = "[{$label}]";
@@ -176,37 +164,35 @@ class MixDubbedAudioJob implements ShouldQueue
             // Split ttsbus for two consumers: sidechain + mix
             $filtersMain[] = "[ttsbus]asplit=2[tts_sc][tts_mix]";
 
-            // Bed prep - keep more natural background, less aggressive filtering
-            // Real movie dubbing keeps music/ambience prominent
+            // PROFESSIONAL BACKGROUND - clear music/effects, natural ducking
             $filtersMain[] =
                 "[0:a]"
                 . "aresample=48000,"
                 . "aformat=sample_fmts=fltp:channel_layouts=stereo,"
-                . "highpass=f=40,"           // lower cutoff to keep more bass/rumble
-                . "lowpass=f=14000,"          // higher cutoff for more air/detail
-                . "equalizer=f=300:t=q:w=0.8:g=+1,"    // boost low-mids for fullness
-                . "equalizer=f=2000:t=q:w=1.0:g=-2,"   // slight cut where voice sits
-                . "equalizer=f=5000:t=q:w=1.5:g=+1,"   // boost high-mids for clarity
-                . "volume=-2.5dB"            // less reduction, keep background present
+                . "highpass=f=30,"
+                . "lowpass=f=16000,"
+                // Keep background full and clear
+                . "equalizer=f=80:t=q:w=0.6:g=+2,"     // bass punch
+                . "equalizer=f=2500:t=q:w=1.5:g=-3,"   // slight cut for voice space
+                . "equalizer=f=8000:t=q:w=1.0:g=+1,"   // clarity/detail
+                . "volume=-3dB"              // balanced level
                 . "[bed]";
 
-            // Duck bed using tts_sc - gentler, more natural ducking
-            // Like real dubbing: background dips but stays audible
+            // Natural ducking - like real movie dubbing
             $filtersMain[] =
                 "[bed][tts_sc]sidechaincompress="
-                . "threshold=0.02:"          // higher threshold = less aggressive
-                . "ratio=3.5:"               // gentler ratio (was 8:1)
-                . "attack=25:"               // slower attack = more natural fade
-                . "release=800:"             // longer release = smoother recovery
-                . "knee=6"                   // soft knee for gradual compression
+                . "threshold=0.015:"         // natural threshold
+                . "ratio=4:"                 // moderate ducking
+                . "attack=15:"               // smooth attack
+                . "release=500:"             // natural release
+                . "knee=6"                   // soft knee
                 . "[ducked]";
 
-            // Mix ducked bed + tts_mix with proper balance
-            // Voice should be clear but background still prominent
+            // Final mix - professional balance
             $filtersMain[] =
                 "[ducked][tts_mix]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,"
-                . "acompressor=threshold=-18dB:ratio=2:attack=20:release=200:makeup=1dB,"  // gentle bus compression
-                . "alimiter=limit=0.92"      // slightly lower limit for headroom
+                . "loudnorm=I=-14:TP=-1.5:LRA=11,"    // broadcast loudness standard
+                . "alimiter=limit=0.95"
                 . "[mixed]";
 
             $fc = implode(';', $filtersMain);

@@ -455,82 +455,73 @@ class GenerateTtsSegmentsJob implements ShouldQueue
 
     /**
      * Get emotion-specific audio processing filters.
-     * Each emotion has distinct sonic characteristics to make it clearly identifiable.
+     * CLEAR and DISTINCT - minimal processing, focus on clarity.
      */
     private function getEmotionAudioFilters(string $emotion): string
     {
         switch ($emotion) {
             case 'happy':
-                // Bright, warm, punchy - boost presence and air, gentle compression
+                // Bright and clear - boost clarity frequencies
                 return
-                    'equalizer=f=200:t=q:w=0.8:g=+2,' .      // warmth
-                    'equalizer=f=3000:t=q:w=1.2:g=+3,' .     // presence/clarity
-                    'equalizer=f=8000:t=q:w=1.0:g=+2,' .     // air/brightness
-                    'acompressor=threshold=-20dB:ratio=3:attack=10:release=80:makeup=2dB,';
+                    'equalizer=f=3500:t=q:w=1.5:g=+4,' .     // clarity boost
+                    'equalizer=f=7000:t=q:w=1.2:g=+2,' .     // brightness
+                    'acompressor=threshold=-24dB:ratio=2:attack=15:release=100:makeup=1dB,';
 
             case 'excited':
-                // Very bright, energetic, compressed - punchy and loud feel
+                // Very bright, energetic - strong clarity
                 return
-                    'equalizer=f=250:t=q:w=0.7:g=+3,' .      // body
-                    'equalizer=f=2500:t=q:w=1.5:g=+4,' .     // strong presence
-                    'equalizer=f=6000:t=q:w=1.2:g=+3,' .     // excitement/edge
-                    'equalizer=f=10000:t=q:w=1.0:g=+2,' .    // air
-                    'acompressor=threshold=-18dB:ratio=4:attack=5:release=60:makeup=3dB,';
+                    'equalizer=f=2500:t=q:w=1.2:g=+3,' .     // presence
+                    'equalizer=f=5000:t=q:w=1.5:g=+4,' .     // excitement
+                    'equalizer=f=8000:t=q:w=1.0:g=+2,' .     // air
+                    'acompressor=threshold=-22dB:ratio=2.5:attack=10:release=80:makeup=2dB,';
 
             case 'sad':
-                // Dark, muffled, spacious - rolled off highs, more reverb, less compression
+                // Softer, slightly darker but still CLEAR
                 return
-                    'equalizer=f=150:t=q:w=0.8:g=+2,' .      // low warmth
-                    'equalizer=f=500:t=q:w=1.0:g=+1,' .      // mid body
-                    'equalizer=f=3000:t=q:w=1.5:g=-3,' .     // reduced presence
-                    'equalizer=f=6000:t=q:w=1.0:g=-4,' .     // dark
-                    'equalizer=f=9000:t=q:w=1.5:g=-5,' .     // very dark
-                    'aecho=0.7:0.6:80|150:0.25|0.15,' .      // more reverb (lonely feel)
-                    'acompressor=threshold=-25dB:ratio=2:attack=30:release=200:makeup=1dB,';
+                    'equalizer=f=200:t=q:w=0.8:g=+2,' .      // warmth
+                    'equalizer=f=3000:t=q:w=1.2:g=+1,' .     // keep some clarity
+                    'equalizer=f=8000:t=q:w=1.0:g=-2,' .     // slightly darker
+                    'acompressor=threshold=-26dB:ratio=1.5:attack=25:release=150:makeup=1dB,';
 
             case 'angry':
-                // Aggressive, harsh, loud - boosted low-mids, harsh presence, hard compression
+                // Aggressive, punchy but CLEAR - boost mid presence
                 return
-                    'equalizer=f=120:t=q:w=0.6:g=+4,' .      // powerful bass
-                    'equalizer=f=400:t=q:w=0.8:g=+3,' .      // aggressive low-mids
-                    'equalizer=f=2000:t=q:w=1.5:g=+2,' .     // harsh mid
-                    'equalizer=f=4000:t=q:w=1.2:g=+3,' .     // cutting presence
-                    'equalizer=f=7000:t=q:w=1.0:g=-2,' .     // reduce harshness slightly
-                    'acompressor=threshold=-15dB:ratio=6:attack=3:release=40:makeup=4dB,'; // hard compression
+                    'equalizer=f=200:t=q:w=0.6:g=+3,' .      // power
+                    'equalizer=f=2500:t=q:w=1.5:g=+4,' .     // aggressive clarity
+                    'equalizer=f=5000:t=q:w=1.2:g=+2,' .     // bite
+                    'acompressor=threshold=-20dB:ratio=3:attack=5:release=50:makeup=3dB,';
 
             case 'frustration':
-                // Tense, strained - similar to angry but less extreme
+                // Tense but CLEAR
                 return
-                    'equalizer=f=200:t=q:w=0.7:g=+3,' .      // tense body
-                    'equalizer=f=800:t=q:w=1.0:g=+2,' .      // nasal/strained
-                    'equalizer=f=3500:t=q:w=1.3:g=+2,' .     // strained presence
-                    'acompressor=threshold=-18dB:ratio=4:attack=8:release=80:makeup=2dB,';
+                    'equalizer=f=250:t=q:w=0.7:g=+2,' .      // body
+                    'equalizer=f=3000:t=q:w=1.3:g=+3,' .     // clarity
+                    'equalizer=f=5000:t=q:w=1.0:g=+2,' .     // edge
+                    'acompressor=threshold=-20dB:ratio=2.5:attack=10:release=80:makeup=2dB,';
 
             case 'fear':
-                // Trembling, thin, urgent - boosted highs, slight tremolo, tight compression
+                // Urgent, higher pitch feel but CLEAR
                 return
-                    'equalizer=f=150:t=q:w=0.8:g=-2,' .      // thin (less bass)
-                    'equalizer=f=2500:t=q:w=1.2:g=+3,' .     // urgent presence
-                    'equalizer=f=5000:t=q:w=1.0:g=+4,' .     // bright/panic
-                    'equalizer=f=8000:t=q:w=1.0:g=+2,' .     // air
-                    'tremolo=f=6:d=0.15,' .                   // subtle trembling
-                    'acompressor=threshold=-16dB:ratio=5:attack=5:release=50:makeup=3dB,';
+                    'equalizer=f=3000:t=q:w=1.2:g=+4,' .     // urgent clarity
+                    'equalizer=f=6000:t=q:w=1.0:g=+3,' .     // bright/panic
+                    'equalizer=f=9000:t=q:w=1.0:g=+2,' .     // air
+                    'acompressor=threshold=-20dB:ratio=3:attack=8:release=60:makeup=2dB,';
 
             case 'surprise':
-                // Sudden, bright, wide - boosted everything, very bright
+                // Bright, sudden but CLEAR
                 return
-                    'equalizer=f=200:t=q:w=0.7:g=+2,' .      // body
-                    'equalizer=f=1500:t=q:w=1.0:g=+2,' .     // mid
-                    'equalizer=f=4000:t=q:w=1.2:g=+4,' .     // bright presence
-                    'equalizer=f=8000:t=q:w=1.0:g=+3,' .     // very bright
-                    'acompressor=threshold=-16dB:ratio=4:attack=3:release=60:makeup=3dB,';
+                    'equalizer=f=2500:t=q:w=1.0:g=+3,' .     // presence
+                    'equalizer=f=5000:t=q:w=1.2:g=+4,' .     // bright
+                    'equalizer=f=8000:t=q:w=1.0:g=+2,' .     // air
+                    'acompressor=threshold=-20dB:ratio=2.5:attack=5:release=70:makeup=2dB,';
 
             default:
-                // Neutral - clean, balanced processing
+                // Neutral - MAXIMUM CLARITY, minimal processing
                 return
-                    'equalizer=f=150:t=q:w=0.8:g=+1,' .      // slight warmth
-                    'equalizer=f=3000:t=q:w=1.0:g=+1,' .     // slight presence
-                    'acompressor=threshold=-22dB:ratio=2.5:attack=15:release=100:makeup=1dB,';
+                    'equalizer=f=180:t=q:w=0.7:g=+1,' .      // slight warmth
+                    'equalizer=f=3000:t=q:w=1.2:g=+3,' .     // CLARITY BOOST
+                    'equalizer=f=6000:t=q:w=1.0:g=+2,' .     // presence
+                    'acompressor=threshold=-24dB:ratio=2:attack=15:release=100:makeup=1dB,';
         }
     }
 }
