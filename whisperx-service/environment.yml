@@ -1,0 +1,12 @@
+name: whisperx
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - ffmpeg
+  - pytorch
+  - torchaudio
+  - numpy<2
+  - pip:
+      - pyannote.audio

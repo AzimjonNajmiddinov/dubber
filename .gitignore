@@ -1,0 +1,49 @@
+*.log
+.DS_Store
+.env
+.env.backup
+.env.production
+.env.local
+.phpactor.json
+.phpunit.result.cache
+/.fleet
+/.idea
+/.nova
+/.phpunit.cache
+/.vscode
+/.zed
+/auth.json
+/node_modules
+/public/build
+/public/hot
+/public/storage
+/storage/*.key
+/storage/pail
+/vendor
+Homestead.json
+Homestead.yaml
+Thumbs.db
+
+# Storage - user uploaded content
+/storage/app/videos/
+/storage/app/audio/
+/storage/app/public/
+
+# Keep storage structure
+!/storage/app/.gitkeep
+!/storage/app/videos/.gitkeep
+!/storage/app/audio/.gitkeep
+
+# Docker volumes (if local)
+/mysql_data/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Model caches (large files)
+*.pth
+*.pt
+*.bin
+*.safetensors
