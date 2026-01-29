@@ -40,7 +40,7 @@ class SegmentPlayerController extends Controller
     {
         $segments = $video->segments()->orderBy('start_time')->get();
 
-        $segmentData = $segments->map(function ($segment) {
+        $segmentData = $segments->map(function ($segment) use ($video) {
             return [
                 'id' => $segment->id,
                 'start_time' => $segment->start_time,

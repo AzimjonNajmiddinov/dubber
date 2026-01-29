@@ -331,6 +331,9 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
                 'external_key' => 'SPEAKER_0',
                 'label' => 'Speaker',
                 'gender' => 'unknown',
+                'tts_voice' => $this->getVoiceForLanguage($video->target_language),
+                'tts_rate' => '+0%',
+                'tts_pitch' => '+0Hz',
             ]);
         }
 
