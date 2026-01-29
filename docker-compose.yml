@@ -29,7 +29,7 @@ services:
       context: .
       dockerfile: docker/php/Dockerfile
     container_name: movie_dubber_queue
-    command: php artisan queue:work --sleep=3 --tries=1 --timeout=0
+    command: php artisan queue:work --queue=chunks,segment-processing,segment-generation,default --sleep=3 --tries=2 --timeout=600
     volumes:
       - .:/var/www
     depends_on:

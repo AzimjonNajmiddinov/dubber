@@ -10,15 +10,33 @@ use Symfony\Component\Process\Process;
 
 class SegmentVideoService
 {
-    private const LOCK_TIMEOUT = 120; // 2 minutes max for generation
+    private const LOCK_TIMEOUT = 120;
     private const PREFETCH_COUNT = 2;
 
     /**
      * Get storage path for a segment video clip.
+     * Supports both chunk-based (new) and segment-based (old) paths.
      */
     public function getSegmentPath(VideoSegment $segment): string
     {
+        // Check for chunk-based path first (new system)
+        $chunkPath = $this->getChunkPath($segment);
+        if (Storage::disk('local')->exists($chunkPath)) {
+            return $chunkPath;
+        }
+
+        // Fall back to segment-based path (old system)
         return "videos/segments/{$segment->video_id}/seg_{$segment->id}.mp4";
+    }
+
+    /**
+     * Get chunk-based path for a segment.
+     */
+    private function getChunkPath(VideoSegment $segment): string
+    {
+        // Find chunk index based on start_time (chunks are 12 seconds each)
+        $chunkIndex = (int) floor($segment->start_time / 12);
+        return "videos/chunks/{$segment->video_id}/seg_{$chunkIndex}.mp4";
     }
 
     /**
@@ -34,8 +52,15 @@ class SegmentVideoService
      */
     public function isSegmentReady(VideoSegment $segment): bool
     {
-        $path = $this->getSegmentPath($segment);
-        return Storage::disk('local')->exists($path);
+        // Check chunk path first
+        $chunkPath = $this->getChunkPath($segment);
+        if (Storage::disk('local')->exists($chunkPath)) {
+            return true;
+        }
+
+        // Check segment path
+        $segmentPath = "videos/segments/{$segment->video_id}/seg_{$segment->id}.mp4";
+        return Storage::disk('local')->exists($segmentPath);
     }
 
     /**
@@ -60,25 +85,31 @@ class SegmentVideoService
 
     /**
      * Get or generate a segment video.
-     * Returns the absolute path to the segment video, or null if generation fails.
+     * For chunk-based system, the video should already exist.
+     * For segment-based system, generate on demand.
      */
     public function getOrGenerateSegment(VideoSegment $segment): ?string
     {
-        $path = $this->getSegmentPath($segment);
-
-        // Check if already exists
-        if (Storage::disk('local')->exists($path)) {
-            return Storage::disk('local')->path($path);
+        // Check chunk path first (new system - already generated)
+        $chunkPath = $this->getChunkPath($segment);
+        if (Storage::disk('local')->exists($chunkPath)) {
+            return Storage::disk('local')->path($chunkPath);
         }
 
-        // Try to acquire lock and generate
+        // Check segment path (old system)
+        $segmentPath = "videos/segments/{$segment->video_id}/seg_{$segment->id}.mp4";
+        if (Storage::disk('local')->exists($segmentPath)) {
+            return Storage::disk('local')->path($segmentPath);
+        }
+
+        // Generate on demand (old system)
         $lock = Cache::lock($this->getLockKey($segment), self::LOCK_TIMEOUT);
 
         if ($lock->get()) {
             try {
                 // Double-check after acquiring lock
-                if (Storage::disk('local')->exists($path)) {
-                    return Storage::disk('local')->path($path);
+                if (Storage::disk('local')->exists($segmentPath)) {
+                    return Storage::disk('local')->path($segmentPath);
                 }
 
                 return $this->generateSegmentVideo($segment);
@@ -90,11 +121,11 @@ class SegmentVideoService
         // Lock not acquired, wait for generation
         $maxWait = self::LOCK_TIMEOUT;
         $waited = 0;
-        $interval = 500000; // 0.5 seconds in microseconds
+        $interval = 500000;
 
         while ($waited < $maxWait * 1000000) {
-            if (Storage::disk('local')->exists($path)) {
-                return Storage::disk('local')->path($path);
+            if (Storage::disk('local')->exists($segmentPath)) {
+                return Storage::disk('local')->path($segmentPath);
             }
             usleep($interval);
             $waited += $interval;
@@ -104,8 +135,7 @@ class SegmentVideoService
     }
 
     /**
-     * Generate a segment video using FFmpeg.
-     * Cuts the original video at segment timestamps and muxes with TTS audio.
+     * Generate a segment video using FFmpeg (for old segment-based system).
      */
     public function generateSegmentVideo(VideoSegment $segment): ?string
     {
@@ -125,21 +155,15 @@ class SegmentVideoService
             return null;
         }
 
-        // TTS audio is optional (segment might not have been dubbed yet)
         $ttsPath = null;
         if ($segment->tts_audio_path) {
             $ttsPath = Storage::disk('local')->path($segment->tts_audio_path);
             if (!file_exists($ttsPath)) {
-                Log::warning('TTS audio not found, using original audio', [
-                    'segment_id' => $segment->id,
-                    'tts_path' => $segment->tts_audio_path,
-                ]);
                 $ttsPath = null;
             }
         }
 
-        // Ensure output directory exists
-        $outputPath = $this->getSegmentPath($segment);
+        $outputPath = "videos/segments/{$segment->video_id}/seg_{$segment->id}.mp4";
         $outputDir = dirname(Storage::disk('local')->path($outputPath));
         if (!is_dir($outputDir)) {
             mkdir($outputDir, 0755, true);
@@ -149,9 +173,7 @@ class SegmentVideoService
         $startTime = $segment->start_time;
         $duration = $segment->end_time - $segment->start_time;
 
-        // Build FFmpeg command
         if ($ttsPath) {
-            // With TTS audio: cut video, replace audio
             $command = [
                 'ffmpeg', '-y',
                 '-ss', (string)$startTime,
@@ -168,7 +190,6 @@ class SegmentVideoService
                 $absoluteOutputPath,
             ];
         } else {
-            // Without TTS: just cut video segment with original audio
             $command = [
                 'ffmpeg', '-y',
                 '-ss', (string)$startTime,
@@ -206,7 +227,6 @@ class SegmentVideoService
                 'stderr' => $process->getErrorOutput(),
             ]);
 
-            // Clean up partial file
             if (file_exists($absoluteOutputPath)) {
                 unlink($absoluteOutputPath);
             }
@@ -233,7 +253,6 @@ class SegmentVideoService
             ->limit($count)
             ->get()
             ->filter(function ($segment) {
-                // Only prefetch segments that aren't ready and aren't being generated
                 return !$this->isSegmentReady($segment) && !$this->isSegmentGenerating($segment);
             })
             ->all();
@@ -244,9 +263,11 @@ class SegmentVideoService
      */
     public function clearVideoSegments(int $videoId): void
     {
-        $path = "videos/segments/{$videoId}";
-        if (Storage::disk('local')->exists($path)) {
-            Storage::disk('local')->deleteDirectory($path);
+        $paths = ["videos/segments/{$videoId}", "videos/chunks/{$videoId}"];
+        foreach ($paths as $path) {
+            if (Storage::disk('local')->exists($path)) {
+                Storage::disk('local')->deleteDirectory($path);
+            }
         }
     }
 }

@@ -2,11 +2,12 @@
 
 namespace App\Http\Controllers;
 
-use App\Jobs\DownloadVideoForStreamingJob;
+use App\Jobs\StartChunkProcessingJob;
 use App\Models\Video;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Storage;
 
 class LiveDubController extends Controller
 {
@@ -19,8 +20,7 @@ class LiveDubController extends Controller
     }
 
     /**
-     * Start live dubbing from URL.
-     * This triggers the streaming pipeline that processes segments one by one.
+     * Start live dubbing from URL using chunk-based processing.
      */
     public function start(Request $request): JsonResponse
     {
@@ -32,7 +32,7 @@ class LiveDubController extends Controller
         $url = $validated['url'];
         $targetLanguage = $validated['target_language'];
 
-        // Check if we already have this URL being processed with streaming
+        // Check if we already have this URL being processed
         $existing = Video::where('source_url', $url)
             ->where('target_language', $targetLanguage)
             ->whereNotIn('status', ['failed', 'download_failed'])
@@ -40,35 +40,32 @@ class LiveDubController extends Controller
             ->first();
 
         if ($existing) {
-            // Check if it has segments ready for streaming
-            $readySegments = $existing->segments()
-                ->whereNotNull('tts_audio_path')
-                ->count();
+            $readyChunks = $this->countReadyChunks($existing);
 
             return response()->json([
                 'video_id' => $existing->id,
                 'status' => $existing->status,
-                'message' => $readySegments > 0 ? 'Video has segments ready' : 'Video is being processed',
-                'ready_segments' => $readySegments,
+                'message' => $readyChunks > 0 ? 'Video has chunks ready' : 'Video is being processed',
+                'ready_chunks' => $readyChunks,
                 'player_url' => route('player.segments', $existing),
             ]);
         }
 
-        // Create new video record with streaming mode
+        // Create new video record
         $video = Video::create([
             'source_url' => $url,
             'target_language' => $targetLanguage,
             'status' => 'pending',
         ]);
 
-        Log::info('Starting live streaming dubbing', [
+        Log::info('Starting chunk-based live dubbing', [
             'video_id' => $video->id,
             'url' => $url,
             'target_language' => $targetLanguage,
         ]);
 
-        // Dispatch streaming download job (uses streaming pipeline)
-        DownloadVideoForStreamingJob::dispatch($video->id);
+        // Dispatch chunk processing pipeline
+        StartChunkProcessingJob::dispatch($video->id);
 
         return response()->json([
             'video_id' => $video->id,
@@ -79,51 +76,53 @@ class LiveDubController extends Controller
     }
 
     /**
-     * Get streaming status including segment readiness.
+     * Get streaming status including chunk readiness.
      */
     public function status(Video $video): JsonResponse
     {
-        $totalSegments = $video->segments()->count();
-        $readySegments = $video->segments()
-            ->whereNotNull('tts_audio_path')
-            ->count();
-        $translatedSegments = $video->segments()
-            ->whereNotNull('translated_text')
-            ->count();
+        $totalChunks = $video->segments()->count();
+        $readyChunks = $this->countReadyChunks($video);
 
-        // Calculate progress based on pipeline stages
-        $progress = $this->calculateProgress($video, $totalSegments, $translatedSegments, $readySegments);
+        // Calculate progress
+        $progress = $this->calculateProgress($video, $totalChunks, $readyChunks);
 
         return response()->json([
             'video_id' => $video->id,
             'status' => $video->status,
             'progress' => $progress,
-            'total_segments' => $totalSegments,
-            'translated_segments' => $translatedSegments,
-            'ready_segments' => $readySegments,
-            'can_play' => $readySegments > 0,
+            'total_segments' => $totalChunks,
+            'ready_segments' => $readyChunks,
+            'can_play' => $readyChunks > 0,
             'player_url' => route('player.segments', $video),
         ]);
     }
 
-    private function calculateProgress(Video $video, int $total, int $translated, int $ready): int
+    private function countReadyChunks(Video $video): int
     {
-        // Early stages (before segments exist)
+        // A chunk is ready if it has TTS audio OR if it's an empty segment (no speech)
+        return $video->segments()
+            ->where(function ($q) {
+                $q->whereNotNull('tts_audio_path')
+                  ->orWhere('text', '');
+            })
+            ->count();
+    }
+
+    private function calculateProgress(Video $video, int $total, int $ready): int
+    {
+        // Early stages
         if ($total === 0) {
             return match ($video->status) {
                 'pending' => 0,
-                'downloading' => 5,
-                'uploaded' => 10,
-                'audio_extracted' => 15,
-                'stems_separated' => 20,
-                'transcribing' => 25,
+                'downloading' => 10,
+                'uploaded' => 20,
+                'processing_chunks' => 25,
                 default => 0,
             };
         }
 
-        // After transcription: progress based on ready segments
-        // 30% = transcribed, 100% = all segments ready
-        $segmentProgress = $total > 0 ? ($ready / $total) * 70 : 0;
-        return (int) min(100, 30 + $segmentProgress);
+        // Progress based on ready chunks (25% for download, 75% for processing)
+        $chunkProgress = $total > 0 ? ($ready / $total) * 75 : 0;
+        return (int) min(100, 25 + $chunkProgress);
     }
 }
