@@ -7,6 +7,7 @@ use App\Models\Video;
 use App\Models\VideoSegment;
 use App\Services\SpeakerTuning;
 use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
@@ -17,12 +18,13 @@ use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 
-class TranscribeWithWhisperXJob implements ShouldQueue
+class TranscribeWithWhisperXJob implements ShouldQueue, ShouldBeUnique
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     public int $timeout = 1800;
     public int $tries = 3;
+    public int $uniqueFor = 1200;
 
     /**
      * Exponential backoff between retries (seconds).
@@ -30,6 +32,34 @@ class TranscribeWithWhisperXJob implements ShouldQueue
     public array $backoff = [30, 60, 120];
 
     public function __construct(public int $videoId) {}
+
+    public function uniqueId(): string
+    {
+        return (string) $this->videoId;
+    }
+
+    /**
+     * Handle job failure - mark video as failed.
+     */
+    public function failed(\Throwable $exception): void
+    {
+        Log::error('TranscribeWithWhisperXJob failed permanently', [
+            'video_id' => $this->videoId,
+            'error' => $exception->getMessage(),
+        ]);
+
+        try {
+            $video = Video::find($this->videoId);
+            if ($video) {
+                $video->update(['status' => 'transcription_failed']);
+            }
+        } catch (\Throwable $e) {
+            Log::error('Failed to update video status after TranscribeWithWhisperXJob failure', [
+                'video_id' => $this->videoId,
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
 
     public function handle(): void
     {

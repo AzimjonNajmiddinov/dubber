@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dubber</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      width: 320px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+      color: #fff;
+    }
+
+    .header {
+      padding: 20px;
+      text-align: center;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    }
+
+    .header h1 {
+      font-size: 24px;
+      font-weight: 700;
+      margin-bottom: 4px;
+    }
+
+    .header p {
+      font-size: 12px;
+      opacity: 0.9;
+    }
+
+    .content {
+      padding: 20px;
+    }
+
+    .status-card {
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 12px;
+      padding: 16px;
+      margin-bottom: 16px;
+    }
+
+    .status-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+
+    .status-row:last-child {
+      margin-bottom: 0;
+    }
+
+    .status-label {
+      font-size: 14px;
+      color: rgba(255, 255, 255, 0.7);
+    }
+
+    .status-value {
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .status-active {
+      color: #4ade80;
+    }
+
+    .status-inactive {
+      color: #f87171;
+    }
+
+    .toggle-switch {
+      position: relative;
+      width: 48px;
+      height: 26px;
+    }
+
+    .toggle-switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+
+    .toggle-slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background-color: rgba(255, 255, 255, 0.2);
+      transition: 0.3s;
+      border-radius: 26px;
+    }
+
+    .toggle-slider:before {
+      position: absolute;
+      content: "";
+      height: 20px;
+      width: 20px;
+      left: 3px;
+      bottom: 3px;
+      background-color: white;
+      transition: 0.3s;
+      border-radius: 50%;
+    }
+
+    input:checked + .toggle-slider {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    }
+
+    input:checked + .toggle-slider:before {
+      transform: translateX(22px);
+    }
+
+    .section-title {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: rgba(255, 255, 255, 0.5);
+      margin-bottom: 12px;
+    }
+
+    .form-group {
+      margin-bottom: 16px;
+    }
+
+    .form-label {
+      display: block;
+      font-size: 14px;
+      margin-bottom: 8px;
+      color: rgba(255, 255, 255, 0.8);
+    }
+
+    .form-select, .form-input {
+      width: 100%;
+      padding: 10px 12px;
+      background: rgba(255, 255, 255, 0.1);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      border-radius: 8px;
+      color: white;
+      font-size: 14px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    .form-select:focus, .form-input:focus {
+      border-color: #667eea;
+    }
+
+    .form-select option {
+      background: #1a1a2e;
+    }
+
+    .volume-control {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .volume-slider {
+      flex: 1;
+      -webkit-appearance: none;
+      height: 6px;
+      background: rgba(255, 255, 255, 0.2);
+      border-radius: 3px;
+      outline: none;
+    }
+
+    .volume-slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 16px;
+      height: 16px;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      border-radius: 50%;
+      cursor: pointer;
+    }
+
+    .volume-value {
+      min-width: 40px;
+      text-align: right;
+      font-size: 14px;
+    }
+
+    .action-button {
+      width: 100%;
+      padding: 14px;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      border: none;
+      border-radius: 10px;
+      color: white;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform 0.2s, box-shadow 0.2s;
+    }
+
+    .action-button:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
+    }
+
+    .action-button:active {
+      transform: translateY(0);
+    }
+
+    .action-button.stop {
+      background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+    }
+
+    .shortcut-hint {
+      text-align: center;
+      font-size: 12px;
+      color: rgba(255, 255, 255, 0.5);
+      margin-top: 12px;
+    }
+
+    .shortcut-key {
+      display: inline-block;
+      padding: 2px 6px;
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 4px;
+      font-family: monospace;
+    }
+
+    .footer {
+      padding: 12px 20px;
+      text-align: center;
+      font-size: 11px;
+      color: rgba(255, 255, 255, 0.4);
+      border-top: 1px solid rgba(255, 255, 255, 0.1);
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>🎬 Dubber</h1>
+    <p>Real-time video dubbing</p>
+  </div>
+
+  <div class="content">
+    <div class="status-card">
+      <div class="status-row">
+        <span class="status-label">Status</span>
+        <span class="status-value" id="status">Inactive</span>
+      </div>
+      <div class="status-row">
+        <span class="status-label">Enable Dubbing</span>
+        <label class="toggle-switch">
+          <input type="checkbox" id="enableToggle">
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+    </div>
+
+    <div class="section-title">Settings</div>
+
+    <div class="form-group">
+      <label class="form-label">Target Language</label>
+      <select class="form-select" id="targetLanguage">
+        <option value="uz">Uzbek (O'zbekcha)</option>
+        <option value="ru">Russian (Русский)</option>
+        <option value="en">English</option>
+        <option value="tr">Turkish (Türkçe)</option>
+        <option value="ar">Arabic (العربية)</option>
+        <option value="hi">Hindi (हिन्दी)</option>
+        <option value="zh">Chinese (中文)</option>
+        <option value="ja">Japanese (日本語)</option>
+        <option value="ko">Korean (한국어)</option>
+      </select>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">Voice Engine</label>
+      <select class="form-select" id="ttsDriver">
+        <option value="xtts">XTTS (Voice Cloning)</option>
+        <option value="elevenlabs">ElevenLabs (Premium)</option>
+        <option value="openai">OpenAI TTS</option>
+        <option value="edge">Edge TTS (Free)</option>
+      </select>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">Original Audio Volume</label>
+      <div class="volume-control">
+        <input type="range" class="volume-slider" id="originalVolume" min="0" max="100" value="20">
+        <span class="volume-value" id="originalVolumeValue">20%</span>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">Dubbed Audio Volume</label>
+      <div class="volume-control">
+        <input type="range" class="volume-slider" id="dubbedVolume" min="0" max="100" value="100">
+        <span class="volume-value" id="dubbedVolumeValue">100%</span>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label class="toggle-switch" style="display: flex; align-items: center; gap: 12px; cursor: pointer;">
+        <input type="checkbox" id="autoClone" checked>
+        <span class="toggle-slider"></span>
+        <span class="form-label" style="margin: 0;">Auto-clone speaker voices</span>
+      </label>
+    </div>
+
+    <button class="action-button" id="actionButton">
+      Start Dubbing
+    </button>
+
+    <p class="shortcut-hint">
+      Press <span class="shortcut-key">Alt</span> + <span class="shortcut-key">D</span> on any video
+    </p>
+  </div>
+
+  <div class="footer">
+    Powered by XTTS Voice Cloning
+  </div>
+
+  <script src="src/popup.js"></script>
+</body>
+</html>

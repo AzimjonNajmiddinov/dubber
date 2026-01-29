@@ -186,6 +186,37 @@ services:
           - demucs
           - demucs-service
 
+  xtts:
+    build: ./xtts-service
+    container_name: movie_dubber_xtts
+    ports:
+      - "8004:8000"
+    volumes:
+      - ./storage/app:/var/www/storage/app
+      - xtts_voices:/app/voices
+      - xtts_cache:/root/.cache
+    environment:
+      STORAGE_PATH: /var/www/storage/app
+      VOICES_PATH: /app/voices
+      OMP_NUM_THREADS: "2"
+      MKL_NUM_THREADS: "2"
+    mem_limit: 8g
+    restart: unless-stopped
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/health >/dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    networks:
+      dubber:
+        aliases:
+          - xtts
+          - xtts-service
+
 networks:
   dubber:
     name: dubber
@@ -196,3 +227,5 @@ volumes:
   whisperx_torch_cache:
   demucs_cache:
   lipsync_cache:
+  xtts_voices:
+  xtts_cache:

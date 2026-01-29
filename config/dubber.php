@@ -2,6 +2,33 @@
 
 return [
 
+    /*
+    |--------------------------------------------------------------------------
+    | TTS (Text-to-Speech) Configuration
+    |--------------------------------------------------------------------------
+    |
+    | Configure which TTS engine to use for dubbing. Available drivers:
+    | - edge: Free Microsoft Edge TTS (robotic, but free)
+    | - elevenlabs: High quality, emotional, supports voice cloning (paid)
+    | - openai: Natural sounding (paid)
+    | - xtts: Local voice cloning with Coqui XTTS (free, self-hosted)
+    |
+    */
+
+    'tts' => [
+        // Default TTS driver to use
+        'default' => env('TTS_DRIVER', 'xtts'),
+
+        // Fallback driver if primary fails
+        'fallback' => env('TTS_FALLBACK', 'edge'),
+
+        // Auto-clone voices for speakers (requires xtts or elevenlabs)
+        'auto_clone' => env('TTS_AUTO_CLONE', true),
+
+        // Preferred driver for voice cloning
+        'cloning_driver' => env('TTS_CLONING_DRIVER', 'xtts'),
+    ],
+
     // Uzbek Edge TTS voices available on your system:
     'voices' => [
         'uz' => [

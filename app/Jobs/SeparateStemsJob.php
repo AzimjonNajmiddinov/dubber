@@ -4,6 +4,7 @@ namespace App\Jobs;
 
 use App\Models\Video;
 use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
@@ -13,12 +14,13 @@ use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 
-class SeparateStemsJob implements ShouldQueue
+class SeparateStemsJob implements ShouldQueue, ShouldBeUnique
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     public int $timeout = 1800;
     public int $tries = 3;
+    public int $uniqueFor = 1800;
 
     /**
      * Exponential backoff between retries (seconds).
@@ -26,6 +28,22 @@ class SeparateStemsJob implements ShouldQueue
     public array $backoff = [30, 60, 120];
 
     public function __construct(public int $videoId) {}
+
+    public function uniqueId(): string
+    {
+        return (string) $this->videoId;
+    }
+
+    /**
+     * Handle job failure - log error (stem separation failure is recoverable).
+     */
+    public function failed(\Throwable $exception): void
+    {
+        Log::error('SeparateStemsJob failed permanently', [
+            'video_id' => $this->videoId,
+            'error' => $exception->getMessage(),
+        ]);
+    }
 
     public function handle(): void
     {

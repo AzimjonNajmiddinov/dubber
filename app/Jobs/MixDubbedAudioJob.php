@@ -5,6 +5,7 @@ namespace App\Jobs;
 use App\Models\Video;
 use App\Models\VideoSegment;
 use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
@@ -13,12 +14,13 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 
-class MixDubbedAudioJob implements ShouldQueue
+class MixDubbedAudioJob implements ShouldQueue, ShouldBeUnique
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     public int $timeout = 1800;
     public int $tries = 10;
+    public int $uniqueFor = 1800;
 
     /**
      * Backoff between retries (seconds).
@@ -27,6 +29,34 @@ class MixDubbedAudioJob implements ShouldQueue
     public array $backoff = [15, 30, 45, 60, 90, 120, 150, 180, 210, 240];
 
     public function __construct(public int $videoId) {}
+
+    public function uniqueId(): string
+    {
+        return (string) $this->videoId;
+    }
+
+    /**
+     * Handle job failure - mark video as failed.
+     */
+    public function failed(\Throwable $exception): void
+    {
+        Log::error('MixDubbedAudioJob failed permanently', [
+            'video_id' => $this->videoId,
+            'error' => $exception->getMessage(),
+        ]);
+
+        try {
+            $video = Video::find($this->videoId);
+            if ($video) {
+                $video->update(['status' => 'mix_failed']);
+            }
+        } catch (\Throwable $e) {
+            Log::error('Failed to update video status after MixDubbedAudioJob failure', [
+                'video_id' => $this->videoId,
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
 
     public function handle(): void
     {

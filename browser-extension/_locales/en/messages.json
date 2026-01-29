@@ -1,0 +1,10 @@
+{
+  "appName": {
+    "message": "Dubber - Real-time Video Dubbing",
+    "description": "Extension name"
+  },
+  "appDescription": {
+    "message": "Dub any online video into your language with natural, emotional voices",
+    "description": "Extension description"
+  }
+}

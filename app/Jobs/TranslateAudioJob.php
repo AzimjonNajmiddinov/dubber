@@ -5,6 +5,7 @@ namespace App\Jobs;
 use App\Models\Video;
 use App\Models\VideoSegment;
 use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
@@ -14,13 +15,14 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
-class TranslateAudioJob implements ShouldQueue
+class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
     use DetectsEnglish;
 
     public int $timeout = 1800;
     public int $tries = 3;
+    public int $uniqueFor = 1200;
 
     /**
      * Exponential backoff between retries (seconds).
@@ -28,6 +30,34 @@ class TranslateAudioJob implements ShouldQueue
     public array $backoff = [30, 60, 120];
 
     public function __construct(public int $videoId) {}
+
+    public function uniqueId(): string
+    {
+        return (string) $this->videoId;
+    }
+
+    /**
+     * Handle job failure - mark video as failed.
+     */
+    public function failed(\Throwable $exception): void
+    {
+        Log::error('TranslateAudioJob failed permanently', [
+            'video_id' => $this->videoId,
+            'error' => $exception->getMessage(),
+        ]);
+
+        try {
+            $video = Video::find($this->videoId);
+            if ($video) {
+                $video->update(['status' => 'translation_failed']);
+            }
+        } catch (\Throwable $e) {
+            Log::error('Failed to update video status after TranslateAudioJob failure', [
+                'video_id' => $this->videoId,
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
 
     public function handle(): void
     {

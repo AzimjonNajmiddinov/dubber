@@ -37,4 +37,12 @@ return [
     'openai' => [
         'key' => env('OPENAI_API_KEY'),
     ],
+
+    'elevenlabs' => [
+        'key' => env('ELEVENLABS_API_KEY'),
+    ],
+
+    'xtts' => [
+        'url' => env('XTTS_SERVICE_URL', 'http://xtts:8000'),
+    ],
 ];

@@ -4,6 +4,7 @@ namespace App\Jobs;
 
 use App\Models\Video;
 use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
@@ -14,12 +15,13 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 
-class LipSyncMainFaceJob implements ShouldQueue
+class LipSyncMainFaceJob implements ShouldQueue, ShouldBeUnique
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     public int $timeout = 3600;
     public int $tries = 2;
+    public int $uniqueFor = 3600;
 
     /**
      * Exponential backoff between retries (seconds).
@@ -27,6 +29,11 @@ class LipSyncMainFaceJob implements ShouldQueue
     public array $backoff = [60, 180];
 
     public function __construct(public int $videoId) {}
+
+    public function uniqueId(): string
+    {
+        return (string) $this->videoId;
+    }
 
     /**
      * Handle job failure - mark video as done without lipsync.
