@@ -18,14 +18,14 @@ class SegmentPlayerController extends Controller
 
     /**
      * Render the segment player page.
+     * For live streaming, allows rendering even when no segments exist yet.
      */
     public function player(Video $video)
     {
         $segments = $video->segments()->orderBy('start_time')->get();
 
-        if ($segments->isEmpty()) {
-            abort(404, 'No segments found for this video');
-        }
+        // For live streaming, we allow the player to load even with no segments
+        // The frontend will poll for status and segments
 
         return view('player.segments', [
             'video' => $video,

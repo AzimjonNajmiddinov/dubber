@@ -5,6 +5,7 @@ use App\Http\Controllers\VideoController;
 use App\Http\Controllers\RealtimeDubController;
 use App\Http\Controllers\StreamDubController;
 use App\Http\Controllers\SegmentPlayerController;
+use App\Http\Controllers\LiveDubController;
 
 Route::get('/', [VideoController::class, 'index'])->name('videos.index');
 
@@ -31,3 +32,6 @@ Route::get('/player/{video}', [StreamDubController::class, 'player'])->name('str
 
 // Segment-based progressive player
 Route::get('/player/{video}/segments', [SegmentPlayerController::class, 'player'])->name('player.segments');
+
+// Live streaming dubbing
+Route::get('/stream', [LiveDubController::class, 'index'])->name('stream.live');

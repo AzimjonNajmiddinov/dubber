@@ -4,6 +4,7 @@ use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\StreamDubController;
 use App\Http\Controllers\RealtimeDubController;
 use App\Http\Controllers\SegmentPlayerController;
+use App\Http\Controllers\LiveDubController;
 
 // URL-based video dubbing & streaming (no CSRF required)
 Route::prefix('stream')->group(function () {
@@ -27,4 +28,10 @@ Route::prefix('player')->group(function () {
     Route::get('/{video}/segment/{segment}', [SegmentPlayerController::class, 'streamSegment'])->name('api.player.segment');
     Route::post('/{video}/prefetch', [SegmentPlayerController::class, 'prefetch'])->name('api.player.prefetch');
     Route::get('/{video}/segment/{segment}/status', [SegmentPlayerController::class, 'segmentStatus'])->name('api.player.segment.status');
+});
+
+// Live streaming dubbing API
+Route::prefix('live')->group(function () {
+    Route::post('/start', [LiveDubController::class, 'start'])->name('api.live.start');
+    Route::get('/{video}/status', [LiveDubController::class, 'status'])->name('api.live.status');
 });
