@@ -4,6 +4,7 @@ use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\VideoController;
 use App\Http\Controllers\RealtimeDubController;
 use App\Http\Controllers\StreamDubController;
+use App\Http\Controllers\SegmentPlayerController;
 
 Route::get('/', [VideoController::class, 'index'])->name('videos.index');
 
@@ -27,3 +28,6 @@ Route::get('/videos/{video}/download-lipsynced', [VideoController::class, 'downl
 
 // Player page for testing (uses web middleware for session/views)
 Route::get('/player/{video}', [StreamDubController::class, 'player'])->name('stream.player');
+
+// Segment-based progressive player
+Route::get('/player/{video}/segments', [SegmentPlayerController::class, 'player'])->name('player.segments');

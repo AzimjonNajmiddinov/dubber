@@ -25,5 +25,10 @@ class VideoSegment extends Model
     {
         return $this->belongsTo(Speaker::class);
     }
+
+    public function video(): BelongsTo
+    {
+        return $this->belongsTo(Video::class);
+    }
 }
 
