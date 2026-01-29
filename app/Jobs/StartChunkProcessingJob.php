@@ -9,6 +9,7 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Facades\Storage;
@@ -60,7 +61,13 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
             throw new \RuntimeException('Video download failed');
         }
 
-        // Step 2: Get video duration
+        // Step 2: Extract full audio for stem separation
+        $this->extractFullAudio($video);
+
+        // Step 3: Separate vocals from background using Demucs
+        $this->separateStems($video);
+
+        // Step 4: Get video duration
         $videoPath = Storage::disk('local')->path($video->original_path);
         $duration = $this->getVideoDuration($videoPath);
 
@@ -74,7 +81,7 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
             'chunk_size' => self::CHUNK_DURATION,
         ]);
 
-        // Step 3: Calculate chunks and dispatch jobs
+        // Step 5: Calculate chunks and dispatch jobs
         $chunks = $this->calculateChunks($duration);
         $video->update(['status' => 'processing_chunks']);
 
@@ -100,6 +107,83 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
         ]);
     }
 
+    private function extractFullAudio(Video $video): void
+    {
+        $videoPath = Storage::disk('local')->path($video->original_path);
+
+        // Extract stereo audio for mixing
+        $audioRel = "audio/original/{$video->id}.wav";
+        Storage::disk('local')->makeDirectory('audio/original');
+        $audioPath = Storage::disk('local')->path($audioRel);
+
+        if (file_exists($audioPath)) {
+            Log::info('Full audio already extracted', ['video_id' => $video->id]);
+            return;
+        }
+
+        $result = Process::timeout(600)->run([
+            'ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
+            '-i', $videoPath,
+            '-vn', '-ac', '2', '-ar', '48000', '-c:a', 'pcm_s16le',
+            $audioPath,
+        ]);
+
+        if (!$result->successful() || !file_exists($audioPath)) {
+            Log::warning('Failed to extract full audio', ['video_id' => $video->id]);
+        } else {
+            Log::info('Full audio extracted', ['video_id' => $video->id, 'path' => $audioRel]);
+        }
+    }
+
+    private function separateStems(Video $video): void
+    {
+        $inputRel = "audio/original/{$video->id}.wav";
+
+        if (!Storage::disk('local')->exists($inputRel)) {
+            Log::warning('Cannot separate stems: original audio not found', ['video_id' => $video->id]);
+            return;
+        }
+
+        // Check if already separated
+        $noVocalsPath = "audio/stems/{$video->id}/no_vocals.wav";
+        if (Storage::disk('local')->exists($noVocalsPath)) {
+            Log::info('Stems already separated', ['video_id' => $video->id]);
+            return;
+        }
+
+        Log::info('Separating audio stems with Demucs', ['video_id' => $video->id]);
+
+        try {
+            $res = Http::timeout(1800)
+                ->retry(2, 2000)
+                ->post('http://demucs:8000/separate', [
+                    'video_id' => $video->id,
+                    'input_rel' => $inputRel,
+                    'model' => 'htdemucs',
+                    'two_stems' => 'vocals',
+                ]);
+
+            $data = $res->json();
+
+            if ($res->successful() && ($data['ok'] ?? false)) {
+                Log::info('Stem separation complete', [
+                    'video_id' => $video->id,
+                    'no_vocals' => $data['no_vocals_rel'] ?? 'unknown',
+                ]);
+            } else {
+                Log::warning('Stem separation failed, will use original audio', [
+                    'video_id' => $video->id,
+                    'response' => $data,
+                ]);
+            }
+        } catch (\Exception $e) {
+            Log::warning('Stem separation error, will use original audio', [
+                'video_id' => $video->id,
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
+
     private function downloadVideo(Video $video): void
     {
         if (!$video->source_url) {
@@ -113,8 +197,8 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
         $relativePath = "videos/originals/{$filename}";
         $absolutePath = Storage::disk('local')->path($relativePath);
 
-        // Try yt-dlp
-        $clients = ['web', 'android', 'ios'];
+        // Try yt-dlp with different clients (android_vr works best with recent YouTube changes)
+        $clients = ['android_vr', 'android', 'ios', 'web'];
         $downloaded = false;
 
         foreach ($clients as $client) {
@@ -122,7 +206,7 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
 
             $result = Process::timeout(1800)->run([
                 'yt-dlp',
-                '-f', 'bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4][height<=720]/best',
+                '-f', '136+140/bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4][height<=720]/best',
                 '--merge-output-format', 'mp4',
                 '-o', $absolutePath,
                 '--no-playlist',

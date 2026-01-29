@@ -5,6 +5,7 @@ namespace App\Jobs;
 use App\Models\Video;
 use App\Models\VideoSegment;
 use App\Models\Speaker;
+use App\Services\TextNormalizer;
 use App\Traits\DetectsEnglish;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldBeUnique;
@@ -201,18 +202,47 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
             throw new \RuntimeException('OpenAI API key required for translation');
         }
 
+        // Get previous segment for context
+        $previousContext = $this->getPreviousSegmentContext();
+
+        $systemPrompt = <<<PROMPT
+You are a professional movie dialogue translator specializing in voice dubbing. Translate to {$targetLanguage}.
+
+CRITICAL RULES:
+1. Output ONLY the translation - no explanations, no quotes, no meta text
+2. Preserve the EXACT meaning - do not lose any information or nuance
+3. Keep numbers as digits (e.g., "100" stays "100", "2,600" stays "2,600")
+4. Preserve names, places, and proper nouns exactly
+5. CAPTURE THE EMOTION: If the speaker is excited, angry, sad, motivational - reflect that in word choice
+6. Use natural spoken {$targetLanguage} - how a native speaker would actually say it
+7. Keep similar sentence length and rhythm for dubbing sync
+8. Maintain continuity with previous context if provided
+PROMPT;
+
+        $messages = [
+            ['role' => 'system', 'content' => $systemPrompt],
+        ];
+
+        // Add context from previous segment if available
+        if ($previousContext) {
+            $messages[] = [
+                'role' => 'user',
+                'content' => "Previous segment (for context only, don't translate): \"{$previousContext}\""
+            ];
+            $messages[] = [
+                'role' => 'assistant',
+                'content' => "Understood. I'll maintain continuity with the previous context."
+            ];
+        }
+
+        $messages[] = ['role' => 'user', 'content' => "Translate this: \"{$text}\""];
+
         $response = Http::withToken($apiKey)
             ->timeout(60)
             ->post('https://api.openai.com/v1/chat/completions', [
                 'model' => 'gpt-4o-mini',
-                'temperature' => 0.2,
-                'messages' => [
-                    [
-                        'role' => 'system',
-                        'content' => "Translate to {$targetLanguage}. Output ONLY the translation, nothing else. Keep it natural for voice dubbing."
-                    ],
-                    ['role' => 'user', 'content' => $text],
-                ],
+                'temperature' => 0.1,
+                'messages' => $messages,
             ]);
 
         if ($response->failed()) {
@@ -220,6 +250,26 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
         }
 
         return trim($response->json('choices.0.message.content') ?? '');
+    }
+
+    private function getPreviousSegmentContext(): ?string
+    {
+        if ($this->chunkIndex <= 0) {
+            return null;
+        }
+
+        // Get previous chunk's segment
+        $previousStartTime = ($this->chunkIndex - 1) * 12; // 12 seconds per chunk
+        $previousSegment = VideoSegment::where('video_id', $this->videoId)
+            ->where('start_time', $previousStartTime)
+            ->first();
+
+        if ($previousSegment && $previousSegment->text) {
+            // Return last 100 chars of previous segment for context
+            return mb_substr($previousSegment->text, -150);
+        }
+
+        return null;
     }
 
     private function generateTts(string $text, Video $video, string $outputDir): ?string
@@ -232,15 +282,26 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
             return null;
         }
 
+        // Normalize text - convert numbers to words for proper TTS pronunciation
+        $normalizedText = TextNormalizer::normalize($text, $video->target_language);
+
+        // Detect emotion and create SSML with prosody
+        $ssmlText = $this->createEmotionalSsml($normalizedText, $video->target_language);
+
+        Log::info('TTS with emotion', [
+            'chunk' => $this->chunkIndex,
+            'text' => mb_substr($normalizedText, 0, 80),
+        ]);
+
         $voice = $this->getVoiceForLanguage($video->target_language);
         $outputPath = "{$outputDir}/tts_{$this->chunkIndex}.wav";
         $rawPath = "{$outputDir}/tts_{$this->chunkIndex}.raw.mp3";
 
-        // Write text to temp file
-        $textFile = "/tmp/tts_chunk_{$this->videoId}_{$this->chunkIndex}.txt";
-        file_put_contents($textFile, $text);
+        // Write SSML to temp file
+        $textFile = "/tmp/tts_chunk_{$this->videoId}_{$this->chunkIndex}.ssml";
+        file_put_contents($textFile, $ssmlText);
 
-        // Generate TTS with edge-tts
+        // Generate TTS with edge-tts using SSML
         $cmd = sprintf(
             'edge-tts -f %s --voice %s --write-media %s 2>&1',
             escapeshellarg($textFile),
@@ -286,8 +347,49 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
             mkdir($outputDir, 0755, true);
         }
 
-        if ($ttsPath && file_exists($ttsPath)) {
-            // Mux video with TTS audio
+        // Check for background audio (no_vocals from Demucs)
+        $backgroundPath = $this->getBackgroundAudioPath();
+
+        if ($ttsPath && file_exists($ttsPath) && $backgroundPath) {
+            // Mix TTS with background audio, then mux with video
+            $mixedAudioPath = "{$outputDir}/mixed_{$this->chunkIndex}.wav";
+            $this->mixTtsWithBackground($ttsPath, $backgroundPath, $mixedAudioPath, $start, $duration);
+
+            if (file_exists($mixedAudioPath)) {
+                $result = Process::timeout(120)->run([
+                    'ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
+                    '-ss', (string)$start,
+                    '-i', $videoPath,
+                    '-i', $mixedAudioPath,
+                    '-t', (string)$duration,
+                    '-map', '0:v:0',
+                    '-map', '1:a:0',
+                    '-c:v', 'copy',
+                    '-c:a', 'aac', '-b:a', '192k',
+                    '-shortest',
+                    '-movflags', '+faststart',
+                    $outputAbs,
+                ]);
+                @unlink($mixedAudioPath);
+            } else {
+                // Fallback: just use TTS
+                $result = Process::timeout(120)->run([
+                    'ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
+                    '-ss', (string)$start,
+                    '-i', $videoPath,
+                    '-i', $ttsPath,
+                    '-t', (string)$duration,
+                    '-map', '0:v:0',
+                    '-map', '1:a:0',
+                    '-c:v', 'copy',
+                    '-c:a', 'aac', '-b:a', '128k',
+                    '-shortest',
+                    '-movflags', '+faststart',
+                    $outputAbs,
+                ]);
+            }
+        } elseif ($ttsPath && file_exists($ttsPath)) {
+            // No background available - just use TTS
             $result = Process::timeout(120)->run([
                 'ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
                 '-ss', (string)$start,
@@ -303,7 +405,7 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
                 $outputAbs,
             ]);
         } else {
-            // Just cut video segment with original audio
+            // No TTS - just cut video segment with original audio
             $result = Process::timeout(120)->run([
                 'ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
                 '-ss', (string)$start,
@@ -318,6 +420,79 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
 
         if (!$result->successful()) {
             throw new \RuntimeException("Failed to create dubbed chunk: " . $result->errorOutput());
+        }
+    }
+
+    /**
+     * Get path to background audio (no_vocals) if available.
+     */
+    private function getBackgroundAudioPath(): ?string
+    {
+        $basePath = "audio/stems/{$this->videoId}";
+
+        // Check for both .wav and .flac extensions (Demucs outputs either)
+        foreach (['wav', 'flac'] as $ext) {
+            $path = Storage::disk('local')->path("{$basePath}/no_vocals.{$ext}");
+            if (file_exists($path)) {
+                return $path;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Mix TTS audio with background audio.
+     */
+    private function mixTtsWithBackground(string $ttsPath, string $backgroundPath, string $outputPath, float $start, float $duration): void
+    {
+        // Extract background chunk at the same timestamp
+        $bgChunkPath = dirname($outputPath) . "/bg_{$this->chunkIndex}.wav";
+
+        // Extract background audio chunk
+        $extractResult = Process::timeout(60)->run([
+            'ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
+            '-ss', (string)$start,
+            '-i', $backgroundPath,
+            '-t', (string)$duration,
+            '-c:a', 'pcm_s16le',
+            '-ar', '48000',
+            '-ac', '2',
+            $bgChunkPath,
+        ]);
+
+        if (!$extractResult->successful() || !file_exists($bgChunkPath)) {
+            Log::warning('Failed to extract background chunk', [
+                'chunk' => $this->chunkIndex,
+                'error' => $extractResult->errorOutput(),
+            ]);
+            return;
+        }
+
+        // Mix TTS (louder) with background (quieter)
+        // TTS at 0dB, background at -12dB (music/ambient lower than speech)
+        $mixResult = Process::timeout(60)->run([
+            'ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
+            '-i', $ttsPath,
+            '-i', $bgChunkPath,
+            '-filter_complex',
+            '[0:a]volume=1.0,apad[tts];[1:a]volume=0.25[bg];[tts][bg]amix=inputs=2:duration=longest:dropout_transition=2,loudnorm=I=-16:TP=-1.5:LRA=11[out]',
+            '-map', '[out]',
+            '-c:a', 'pcm_s16le',
+            '-ar', '48000',
+            '-ac', '2',
+            $outputPath,
+        ]);
+
+        @unlink($bgChunkPath);
+
+        if (!$mixResult->successful()) {
+            Log::warning('Failed to mix audio', [
+                'chunk' => $this->chunkIndex,
+                'error' => $mixResult->errorOutput(),
+            ]);
+        } else {
+            Log::info('Mixed TTS with background audio', ['chunk' => $this->chunkIndex]);
         }
     }
 
@@ -359,6 +534,150 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
             'ru', 'russian' => 'Russian',
             'en', 'english' => 'English',
             default => $lang,
+        };
+    }
+
+    /**
+     * Create SSML with emotional prosody based on text analysis.
+     */
+    private function createEmotionalSsml(string $text, string $language): string
+    {
+        // Analyze text for emotional cues
+        $emotion = $this->detectEmotion($text);
+
+        // Get prosody settings based on emotion
+        $prosody = $this->getEmotionProsody($emotion);
+
+        // Build SSML
+        $ssml = '<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="' . $this->getLanguageCode($language) . '">';
+
+        // Split text into sentences for natural pauses
+        $sentences = preg_split('/(?<=[.!?])\s+/', $text, -1, PREG_SPLIT_NO_EMPTY);
+
+        foreach ($sentences as $i => $sentence) {
+            $sentence = trim($sentence);
+            if (empty($sentence)) continue;
+
+            // Detect sentence-level emotion
+            $sentenceEmotion = $this->detectEmotion($sentence);
+            $sentenceProsody = $this->getEmotionProsody($sentenceEmotion);
+
+            // Add prosody tags
+            $ssml .= sprintf(
+                '<prosody rate="%s" pitch="%s" volume="%s">%s</prosody>',
+                $sentenceProsody['rate'],
+                $sentenceProsody['pitch'],
+                $sentenceProsody['volume'],
+                htmlspecialchars($sentence, ENT_XML1)
+            );
+
+            // Add natural pause between sentences
+            if ($i < count($sentences) - 1) {
+                $ssml .= '<break time="300ms"/>';
+            }
+        }
+
+        $ssml .= '</speak>';
+
+        return $ssml;
+    }
+
+    /**
+     * Detect emotion from text.
+     */
+    private function detectEmotion(string $text): string
+    {
+        $text = mb_strtolower($text);
+
+        // Excitement/motivation markers
+        $excitedWords = ['!', 'wow', 'amazing', 'incredible', 'ajoyib', 'zo\'r', 'отлично', 'круто', 'yes', 'ha', 'да'];
+        foreach ($excitedWords as $word) {
+            if (mb_strpos($text, $word) !== false) {
+                return 'excited';
+            }
+        }
+
+        // Question markers
+        if (mb_strpos($text, '?') !== false) {
+            return 'questioning';
+        }
+
+        // Sad/serious markers
+        $sadWords = ['unfortunately', 'sad', 'fail', 'muvaffaqiyatsiz', 'xafa', 'к сожалению', 'грустно', 'lost', 'died'];
+        foreach ($sadWords as $word) {
+            if (mb_strpos($text, $word) !== false) {
+                return 'serious';
+            }
+        }
+
+        // Emphatic/important markers
+        $emphaticWords = ['remember', 'important', 'must', 'never', 'always', 'esla', 'muhim', 'помни', 'важно', 'kerak'];
+        foreach ($emphaticWords as $word) {
+            if (mb_strpos($text, $word) !== false) {
+                return 'emphatic';
+            }
+        }
+
+        // Motivational markers
+        $motivationalWords = ['can', 'will', 'believe', 'succeed', 'dream', 'goal', 'orzu', 'maqsad', 'мечта', 'цель', 'forward'];
+        foreach ($motivationalWords as $word) {
+            if (mb_strpos($text, $word) !== false) {
+                return 'motivational';
+            }
+        }
+
+        return 'neutral';
+    }
+
+    /**
+     * Get prosody settings for emotion.
+     */
+    private function getEmotionProsody(string $emotion): array
+    {
+        return match ($emotion) {
+            'excited' => [
+                'rate' => '+10%',
+                'pitch' => '+5%',
+                'volume' => '+10%',
+            ],
+            'questioning' => [
+                'rate' => '+0%',
+                'pitch' => '+10%',
+                'volume' => '+0%',
+            ],
+            'serious' => [
+                'rate' => '-5%',
+                'pitch' => '-5%',
+                'volume' => '-5%',
+            ],
+            'emphatic' => [
+                'rate' => '-5%',
+                'pitch' => '+0%',
+                'volume' => '+15%',
+            ],
+            'motivational' => [
+                'rate' => '+5%',
+                'pitch' => '+3%',
+                'volume' => '+5%',
+            ],
+            default => [
+                'rate' => '+0%',
+                'pitch' => '+0%',
+                'volume' => '+0%',
+            ],
+        };
+    }
+
+    /**
+     * Get language code for SSML.
+     */
+    private function getLanguageCode(string $language): string
+    {
+        return match (strtolower($language)) {
+            'uz', 'uzbek' => 'uz-UZ',
+            'ru', 'russian' => 'ru-RU',
+            'en', 'english' => 'en-US',
+            default => 'en-US',
         };
     }
 
