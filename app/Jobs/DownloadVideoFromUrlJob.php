@@ -96,36 +96,65 @@ class DownloadVideoFromUrlJob implements ShouldQueue, ShouldBeUnique
     {
         Log::info('Attempting yt-dlp download', ['url' => $url]);
 
-        // Use yt-dlp with best quality mp4
-        $result = Process::timeout(3600)->run([
-            'yt-dlp',
-            '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-            '--merge-output-format', 'mp4',
-            '-o', $outputPath,
-            '--no-playlist',
-            '--no-warnings',
-            $url,
-        ]);
+        // Try different client configurations to bypass 403 errors
+        $clients = [
+            'web',           // Default web client
+            'android',       // Android client (often bypasses restrictions)
+            'ios',           // iOS client
+            'tv_embedded',   // TV embedded client
+        ];
 
-        if ($result->successful() && file_exists($outputPath) && filesize($outputPath) > 10000) {
-            Log::info('yt-dlp download successful', [
-                'url' => $url,
-                'size' => filesize($outputPath),
+        foreach ($clients as $client) {
+            Log::info("Trying yt-dlp with client: {$client}", ['url' => $url]);
+
+            // Clean up any partial download
+            @unlink($outputPath);
+
+            $result = Process::timeout(3600)->run([
+                'yt-dlp',
+                '-f', 'bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4][height<=1080]/best[height<=1080]/best',
+                '--merge-output-format', 'mp4',
+                '-o', $outputPath,
+                '--no-playlist',
+                '--no-warnings',
+                '--extractor-args', "youtube:player_client={$client}",
+                '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                '--force-ipv4',
+                '--retries', '3',
+                '--fragment-retries', '3',
+                $url,
             ]);
-            return true;
-        }
 
-        Log::warning('yt-dlp download failed', [
-            'url' => $url,
-            'exit_code' => $result->exitCode(),
-            'stderr' => mb_substr($result->errorOutput(), 0, 2000),
-        ]);
+            if ($result->successful() && file_exists($outputPath) && filesize($outputPath) > 10000) {
+                Log::info('yt-dlp download successful', [
+                    'url' => $url,
+                    'client' => $client,
+                    'size' => filesize($outputPath),
+                ]);
+                return true;
+            }
+
+            Log::warning("yt-dlp download failed with client {$client}", [
+                'url' => $url,
+                'exit_code' => $result->exitCode(),
+                'stderr' => mb_substr($result->errorOutput(), 0, 500),
+            ]);
+        }
 
         return false;
     }
 
     private function tryDirectDownload(string $url, string $outputPath): bool
     {
+        // Skip direct download for known video platforms (they don't serve videos directly)
+        $skipDomains = ['youtube.com', 'youtu.be', 'vimeo.com', 'dailymotion.com', 'tiktok.com'];
+        foreach ($skipDomains as $domain) {
+            if (str_contains($url, $domain)) {
+                Log::info('Skipping direct download for video platform', ['url' => $url, 'domain' => $domain]);
+                return false;
+            }
+        }
+
         Log::info('Attempting direct HTTP download', ['url' => $url]);
 
         try {
