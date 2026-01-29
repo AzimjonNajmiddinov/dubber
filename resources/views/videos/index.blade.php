@@ -46,6 +46,27 @@ body { font-family: ui-sans-serif, system-ui, -apple-system; margin: 24px; }
 </div>
 
 <div class="card">
+    <h2 style="margin-top:0;">Dub from URL</h2>
+    <form id="urlForm">
+        <div class="row">
+            <input type="url" name="url" id="videoUrl" placeholder="Paste YouTube, Vimeo or video URL..." required style="flex:1; padding:8px; border:1px solid #ddd; border-radius:6px; min-width:300px;">
+            <select name="target_language" id="urlTargetLanguage" required>
+                <option value="uz">Uzbek</option>
+                <option value="en">English</option>
+                <option value="ru">Russian</option>
+            </select>
+            <button class="btn btn-primary" type="submit" id="urlSubmitBtn">Start Dubbing</button>
+        </div>
+        <div id="urlError" class="muted" style="color:#c00; margin-top:8px; display:none;"></div>
+        <div id="urlSuccess" style="margin-top:8px; display:none;">
+            <span style="color:#0a7a2f; font-weight:600;">Processing started!</span>
+            <a id="playerLink" href="#" class="btn" style="margin-left:10px;">Watch Progress</a>
+        </div>
+    </form>
+    <p class="muted" style="margin-bottom:0;">Supports YouTube, Vimeo, and direct video URLs. Best with videos containing speech.</p>
+</div>
+
+<div class="card">
     <h2 style="margin-top:0;">Recent videos</h2>
 
     @if($videos->isEmpty())
@@ -130,6 +151,60 @@ body { font-family: ui-sans-serif, system-ui, -apple-system; margin: 24px; }
 
     poll();
     setInterval(poll, 2000);
+
+    // URL form handling
+    document.getElementById('urlForm').addEventListener('submit', async function(e) {
+        e.preventDefault();
+
+        const urlInput = document.getElementById('videoUrl');
+        const langSelect = document.getElementById('urlTargetLanguage');
+        const submitBtn = document.getElementById('urlSubmitBtn');
+        const errorDiv = document.getElementById('urlError');
+        const successDiv = document.getElementById('urlSuccess');
+        const playerLink = document.getElementById('playerLink');
+
+        // Reset state
+        errorDiv.style.display = 'none';
+        successDiv.style.display = 'none';
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Starting...';
+
+        try {
+            const response = await fetch('/api/stream/dub', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                },
+                body: JSON.stringify({
+                    url: urlInput.value,
+                    target_language: langSelect.value,
+                }),
+            });
+
+            const data = await response.json();
+
+            if (!response.ok) {
+                throw new Error(data.message || 'Failed to start dubbing');
+            }
+
+            // Success - show link to player
+            successDiv.style.display = 'block';
+            playerLink.href = '/player/' + data.video_id;
+
+            // Auto-redirect to player after 1 second
+            setTimeout(() => {
+                window.location.href = '/player/' + data.video_id;
+            }, 1000);
+
+        } catch (err) {
+            errorDiv.textContent = err.message || 'An error occurred';
+            errorDiv.style.display = 'block';
+        } finally {
+            submitBtn.disabled = false;
+            submitBtn.textContent = 'Start Dubbing';
+        }
+    });
 </script>
 
 </body>

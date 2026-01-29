@@ -16,7 +16,8 @@ class Video extends Model
         'vocals_path',
         'music_path',
         'final_audio_path',
-        'lipsynced_path'
+        'lipsynced_path',
+        'source_url',
     ];
 
     public function speakers(): HasMany

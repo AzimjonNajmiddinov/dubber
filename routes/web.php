@@ -3,6 +3,7 @@
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\VideoController;
 use App\Http\Controllers\RealtimeDubController;
+use App\Http\Controllers\StreamDubController;
 
 Route::get('/', [VideoController::class, 'index'])->name('videos.index');
 
@@ -24,10 +25,5 @@ Route::post('/videos/{video}/regenerate', [VideoController::class, 'regenerateDu
 Route::get('/videos/{video}/download', [VideoController::class, 'download'])->name('videos.download');
 Route::get('/videos/{video}/download-lipsynced', [VideoController::class, 'downloadLipsynced'])->name('videos.download.lipsynced');
 
-// Real-time dubbing API (for browser extension)
-Route::prefix('api/realtime')->group(function () {
-    Route::post('/session', [RealtimeDubController::class, 'initSession'])->name('realtime.session');
-    Route::post('/session/{sessionId}/chunk', [RealtimeDubController::class, 'processChunk'])->name('realtime.chunk');
-    Route::post('/session/{sessionId}/clone-voice', [RealtimeDubController::class, 'cloneVoice'])->name('realtime.clone');
-    Route::get('/voices', [RealtimeDubController::class, 'getVoices'])->name('realtime.voices');
-});
+// Player page for testing (uses web middleware for session/views)
+Route::get('/player/{video}', [StreamDubController::class, 'player'])->name('stream.player');
