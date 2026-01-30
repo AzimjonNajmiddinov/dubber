@@ -8,6 +8,9 @@ use App\Models\VideoSegment;
 use App\Services\SegmentVideoService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Process;
+use Illuminate\Support\Facades\Storage;
+use Symfony\Component\HttpFoundation\BinaryFileResponse;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class SegmentPlayerController extends Controller
@@ -191,5 +194,205 @@ class SegmentPlayerController extends Controller
             'status' => $ready ? 'ready' : ($generating ? 'generating' : 'pending'),
             'stream_url' => $ready ? route('api.player.segment', [$video, $segment]) : null,
         ]);
+    }
+
+    /**
+     * Download a single chunk by index.
+     */
+    public function downloadChunk(Video $video, int $index): BinaryFileResponse|StreamedResponse|JsonResponse
+    {
+        $chunkPath = "videos/chunks/{$video->id}/seg_{$index}.mp4";
+
+        if (!Storage::disk('local')->exists($chunkPath)) {
+            return response()->json(['error' => 'Chunk not ready yet'], 404);
+        }
+
+        $absolutePath = Storage::disk('local')->path($chunkPath);
+        $fileSize = filesize($absolutePath);
+
+        // Support range requests for video streaming
+        $request = request();
+        $rangeHeader = $request->header('Range');
+
+        if (!$rangeHeader) {
+            // Full download
+            return response()->download($absolutePath, "chunk_{$index}.mp4", [
+                'Content-Type' => 'video/mp4',
+            ]);
+        }
+
+        // Partial content for streaming
+        $start = 0;
+        $end = $fileSize - 1;
+
+        preg_match('/bytes=(\d+)-(\d*)/', $rangeHeader, $matches);
+        $start = isset($matches[1]) ? (int)$matches[1] : 0;
+        $end = isset($matches[2]) && $matches[2] !== '' ? (int)$matches[2] : $fileSize - 1;
+
+        $start = max(0, min($start, $fileSize - 1));
+        $end = max($start, min($end, $fileSize - 1));
+        $length = $end - $start + 1;
+
+        $response = new StreamedResponse(function () use ($absolutePath, $start, $length) {
+            $handle = fopen($absolutePath, 'rb');
+            fseek($handle, $start);
+            $remaining = $length;
+            while ($remaining > 0 && !feof($handle)) {
+                $chunk = min(1024 * 1024, $remaining);
+                echo fread($handle, $chunk);
+                $remaining -= $chunk;
+                flush();
+            }
+            fclose($handle);
+        }, 206);
+
+        $response->headers->set('Content-Type', 'video/mp4');
+        $response->headers->set('Content-Length', $length);
+        $response->headers->set('Content-Range', "bytes {$start}-{$end}/{$fileSize}");
+        $response->headers->set('Accept-Ranges', 'bytes');
+        $response->headers->set('Access-Control-Allow-Origin', '*');
+
+        return $response;
+    }
+
+    /**
+     * Get download status - which chunks are ready.
+     */
+    public function downloadStatus(Video $video): JsonResponse
+    {
+        $segments = $video->segments()->orderBy('start_time')->get();
+        $totalChunks = $segments->count();
+        $readyChunks = 0;
+        $chunks = [];
+
+        // Check chunk files
+        $chunkIndex = 0;
+        foreach ($segments->groupBy(fn($s) => floor($s->start_time / 12)) as $group) {
+            $chunkPath = "videos/chunks/{$video->id}/seg_{$chunkIndex}.mp4";
+            $ready = Storage::disk('local')->exists($chunkPath);
+
+            if ($ready) $readyChunks++;
+
+            $chunks[] = [
+                'index' => $chunkIndex,
+                'ready' => $ready,
+                'download_url' => $ready ? route('api.player.chunk.download', [$video, $chunkIndex]) : null,
+            ];
+
+            $chunkIndex++;
+        }
+
+        // If no segments yet, estimate based on video duration
+        if ($totalChunks === 0) {
+            $totalChunks = $this->estimateChunkCount($video);
+        }
+
+        $canDownloadFull = $readyChunks > 0 && $readyChunks === count($chunks);
+
+        return response()->json([
+            'video_id' => $video->id,
+            'status' => $video->status,
+            'total_chunks' => count($chunks) ?: $totalChunks,
+            'ready_chunks' => $readyChunks,
+            'progress' => count($chunks) > 0 ? round(($readyChunks / count($chunks)) * 100) : 0,
+            'can_download_full' => $canDownloadFull,
+            'full_download_url' => $canDownloadFull ? route('api.player.download', $video) : null,
+            'chunks' => $chunks,
+        ]);
+    }
+
+    /**
+     * Download full concatenated video.
+     */
+    public function downloadFull(Video $video): BinaryFileResponse|JsonResponse
+    {
+        // Check if already concatenated
+        $outputPath = "videos/dubbed/{$video->id}_dubbed.mp4";
+
+        if (!Storage::disk('local')->exists($outputPath)) {
+            // Concatenate all chunks
+            $success = $this->concatenateChunks($video, $outputPath);
+
+            if (!$success) {
+                return response()->json(['error' => 'Failed to create full video'], 500);
+            }
+        }
+
+        $absolutePath = Storage::disk('local')->path($outputPath);
+
+        return response()->download(
+            $absolutePath,
+            "dubbed_video_{$video->id}.mp4",
+            ['Content-Type' => 'video/mp4']
+        );
+    }
+
+    /**
+     * Concatenate all chunks into a single video.
+     */
+    private function concatenateChunks(Video $video, string $outputPath): bool
+    {
+        Storage::disk('local')->makeDirectory('videos/dubbed');
+
+        // Find all chunk files
+        $chunkDir = "videos/chunks/{$video->id}";
+        $chunkDirAbs = Storage::disk('local')->path($chunkDir);
+
+        if (!is_dir($chunkDirAbs)) {
+            return false;
+        }
+
+        // Get chunks in order
+        $chunks = [];
+        $index = 0;
+        while (true) {
+            $chunkFile = "{$chunkDirAbs}/seg_{$index}.mp4";
+            if (!file_exists($chunkFile)) break;
+            $chunks[] = $chunkFile;
+            $index++;
+        }
+
+        if (empty($chunks)) {
+            return false;
+        }
+
+        // Create concat file
+        $concatFile = "{$chunkDirAbs}/concat.txt";
+        $content = implode("\n", array_map(fn($f) => "file '" . basename($f) . "'", $chunks));
+        file_put_contents($concatFile, $content);
+
+        // Concatenate with ffmpeg
+        $outputAbs = Storage::disk('local')->path($outputPath);
+
+        $result = Process::timeout(600)->path($chunkDirAbs)->run([
+            'ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
+            '-f', 'concat', '-safe', '0',
+            '-i', 'concat.txt',
+            '-c', 'copy',
+            '-movflags', '+faststart',
+            $outputAbs,
+        ]);
+
+        @unlink($concatFile);
+
+        return $result->successful() && file_exists($outputAbs);
+    }
+
+    private function estimateChunkCount(Video $video): int
+    {
+        if (!$video->original_path || !Storage::disk('local')->exists($video->original_path)) {
+            return 0;
+        }
+
+        $path = Storage::disk('local')->path($video->original_path);
+        $result = Process::timeout(10)->run([
+            'ffprobe', '-v', 'error',
+            '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            $path,
+        ]);
+
+        $duration = (float)trim($result->output());
+        return (int)ceil($duration / 12); // 12-second chunks
     }
 }

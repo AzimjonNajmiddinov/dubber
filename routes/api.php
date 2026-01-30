@@ -28,6 +28,11 @@ Route::prefix('player')->group(function () {
     Route::get('/{video}/segment/{segment}', [SegmentPlayerController::class, 'streamSegment'])->name('api.player.segment');
     Route::post('/{video}/prefetch', [SegmentPlayerController::class, 'prefetch'])->name('api.player.prefetch');
     Route::get('/{video}/segment/{segment}/status', [SegmentPlayerController::class, 'segmentStatus'])->name('api.player.segment.status');
+
+    // Download endpoints
+    Route::get('/{video}/download-status', [SegmentPlayerController::class, 'downloadStatus'])->name('api.player.download.status');
+    Route::get('/{video}/chunk/{index}/download', [SegmentPlayerController::class, 'downloadChunk'])->name('api.player.chunk.download');
+    Route::get('/{video}/download', [SegmentPlayerController::class, 'downloadFull'])->name('api.player.download');
 });
 
 // Live streaming dubbing API

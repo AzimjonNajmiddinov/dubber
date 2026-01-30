@@ -2,15 +2,16 @@
 <html lang="en">
 <head>
     <meta charset="utf-8">
-    <title>Live Dubbing - Video #{{ $video->id }}</title>
+    <title>Dubber - Video #{{ $video->id }}</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="csrf-token" content="{{ csrf_token() }}">
     <style>
         * { box-sizing: border-box; }
         body {
             font-family: ui-sans-serif, system-ui, -apple-system;
             margin: 0;
             padding: 20px;
-            background: #111;
+            background: #0a0a0a;
             color: #fff;
             min-height: 100vh;
         }
@@ -18,21 +19,36 @@
             max-width: 1200px;
             margin: 0 auto;
         }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+        }
         h1 {
             font-size: 20px;
-            margin: 0 0 16px 0;
+            margin: 0;
             color: #fff;
+        }
+        .lang-badge {
+            background: #22c55e;
+            color: #000;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
         }
         .video-wrapper {
             background: #000;
-            border-radius: 8px;
+            border-radius: 12px;
             overflow: hidden;
             position: relative;
-            min-height: 400px;
+            aspect-ratio: 16/9;
         }
         video {
             width: 100%;
-            max-height: 70vh;
+            height: 100%;
             display: block;
         }
         .subtitle-container {
@@ -45,585 +61,668 @@
         }
         .subtitle {
             display: inline-block;
-            background: rgba(0, 0, 0, 0.8);
+            background: rgba(0, 0, 0, 0.85);
             color: #fff;
-            padding: 8px 16px;
-            border-radius: 4px;
+            padding: 10px 20px;
+            border-radius: 6px;
             font-size: 18px;
             line-height: 1.4;
-            max-width: 80%;
+            max-width: 85%;
         }
-        /* Loading overlay */
+        .subtitle .speaker-name {
+            color: #22c55e;
+            font-weight: 600;
+            margin-right: 8px;
+        }
         .loading-overlay {
             position: absolute;
             top: 0;
             left: 0;
             right: 0;
             bottom: 0;
-            background: #000;
+            background: rgba(0,0,0,0.9);
             display: flex;
             flex-direction: column;
             align-items: center;
             justify-content: center;
             gap: 20px;
         }
-        .loading-overlay.hidden {
-            display: none;
-        }
+        .loading-overlay.hidden { display: none; }
         .spinner {
             width: 48px;
             height: 48px;
             border: 4px solid #333;
-            border-top-color: #fff;
+            border-top-color: #22c55e;
             border-radius: 50%;
             animation: spin 1s linear infinite;
         }
-        @keyframes spin {
-            to { transform: rotate(360deg); }
-        }
+        @keyframes spin { to { transform: rotate(360deg); } }
         .loading-text {
             color: #888;
             font-size: 16px;
             text-align: center;
         }
-        .loading-progress {
-            width: 200px;
-            height: 4px;
+        .progress-bar {
+            width: 240px;
+            height: 6px;
             background: #333;
-            border-radius: 2px;
+            border-radius: 3px;
             overflow: hidden;
         }
-        .loading-progress-bar {
+        .progress-fill {
             height: 100%;
-            background: #22c55e;
+            background: linear-gradient(90deg, #22c55e, #16a34a);
             width: 0%;
             transition: width 0.3s;
         }
-        .segment-indicators {
+        .timeline {
             display: flex;
-            gap: 4px;
-            padding: 12px 16px;
-            background: #1a1a1a;
-            border-radius: 0 0 8px 8px;
+            gap: 3px;
+            padding: 12px;
+            background: #111;
+            border-radius: 0 0 12px 12px;
             overflow-x: auto;
             justify-content: center;
             flex-wrap: wrap;
-            min-height: 36px;
         }
-        .segment-dot {
-            width: 12px;
-            height: 12px;
-            border-radius: 50%;
-            background: #444;
+        .chunk-dot {
+            width: 14px;
+            height: 14px;
+            border-radius: 3px;
+            background: #333;
             cursor: pointer;
             transition: all 0.2s;
             flex-shrink: 0;
         }
-        .segment-dot:hover {
-            transform: scale(1.2);
-        }
-        .segment-dot.ready {
-            background: #22c55e;
-        }
-        .segment-dot.generating {
-            background: #f97316;
-            animation: pulse 1s infinite;
-        }
-        .segment-dot.current {
-            background: #3b82f6;
-            transform: scale(1.3);
-        }
-        .segment-dot.pending {
-            background: #444;
-        }
-        @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.5; }
-        }
-        .info {
+        .chunk-dot:hover { transform: scale(1.2); }
+        .chunk-dot.ready { background: #22c55e; }
+        .chunk-dot.generating { background: #f97316; animation: pulse 1s infinite; }
+        .chunk-dot.current { background: #3b82f6; transform: scale(1.3); }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+        .panels {
+            display: grid;
+            grid-template-columns: 1fr 300px;
+            gap: 16px;
             margin-top: 16px;
-            padding: 12px 16px;
-            background: #222;
-            border-radius: 8px;
-            font-size: 14px;
         }
-        .info-row {
-            display: flex;
-            gap: 24px;
-            flex-wrap: wrap;
-            align-items: center;
+        @media (max-width: 900px) {
+            .panels { grid-template-columns: 1fr; }
+        }
+
+        .panel {
+            background: #151515;
+            border-radius: 12px;
+            padding: 16px;
+        }
+        .panel-title {
+            font-size: 14px;
+            color: #888;
+            margin: 0 0 12px 0;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .info-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 12px;
+        }
+        @media (max-width: 600px) {
+            .info-grid { grid-template-columns: repeat(2, 1fr); }
         }
         .info-item {
-            color: #888;
+            text-align: center;
         }
-        .info-item strong {
+        .info-value {
+            font-size: 24px;
+            font-weight: 600;
             color: #fff;
         }
-        .status-text {
-            font-size: 14px;
-            color: #888;
-        }
-        .status-text.loading {
-            color: #f97316;
-        }
-        .status-text.ready {
-            color: #22c55e;
-        }
-        .segment-text {
-            margin-top: 12px;
-            padding-top: 12px;
-            border-top: 1px solid #333;
-        }
-        .segment-text .original {
+        .info-label {
+            font-size: 12px;
             color: #666;
-            font-size: 13px;
-            margin-bottom: 4px;
+            margin-top: 2px;
         }
-        .segment-text .translated {
-            color: #fff;
-            font-size: 15px;
-        }
-        .actions {
+
+        .transcript {
             margin-top: 16px;
+            padding-top: 16px;
+            border-top: 1px solid #222;
+        }
+        .transcript-original {
+            color: #666;
+            font-size: 14px;
+            margin-bottom: 6px;
+        }
+        .transcript-translated {
+            color: #fff;
+            font-size: 16px;
+            line-height: 1.5;
+        }
+
+        .speakers-list {
             display: flex;
-            gap: 12px;
-            flex-wrap: wrap;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .speaker-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px;
+            background: #1a1a1a;
+            border-radius: 8px;
+        }
+        .speaker-avatar {
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 600;
+            font-size: 14px;
+        }
+        .speaker-avatar.male { background: #3b82f6; color: #fff; }
+        .speaker-avatar.female { background: #ec4899; color: #fff; }
+        .speaker-avatar.unknown { background: #6b7280; color: #fff; }
+        .speaker-info {
+            flex: 1;
+        }
+        .speaker-name {
+            font-weight: 500;
+            color: #fff;
+            font-size: 14px;
+        }
+        .speaker-voice {
+            font-size: 12px;
+            color: #666;
+        }
+
+        .controls {
+            display: flex;
+            gap: 8px;
+            margin-top: 16px;
+            padding-top: 16px;
+            border-top: 1px solid #222;
         }
         .btn {
-            display: inline-block;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
             padding: 10px 16px;
-            border-radius: 6px;
+            border-radius: 8px;
             border: none;
             text-decoration: none;
             font-size: 14px;
             cursor: pointer;
-            transition: opacity 0.2s;
+            transition: all 0.2s;
+            font-weight: 500;
         }
         .btn:hover { opacity: 0.9; }
-        .btn-primary {
-            background: #fff;
-            color: #111;
+        .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+        .btn-primary { background: #22c55e; color: #000; }
+        .btn-secondary { background: #222; color: #fff; }
+        .btn-sm { padding: 6px 10px; font-size: 12px; }
+
+        .download-section {
+            margin-top: 16px;
+            padding-top: 16px;
+            border-top: 1px solid #222;
         }
-        .btn-secondary {
-            background: #333;
-            color: #fff;
+        .download-progress {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 12px;
         }
-        .btn:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
+        .download-progress .progress-bar {
+            flex: 1;
+            height: 8px;
         }
-        .controls {
+        .download-progress .progress-text {
+            font-size: 14px;
+            color: #888;
+            min-width: 60px;
+            text-align: right;
+        }
+
+        .actions {
             display: flex;
             gap: 8px;
-            margin-top: 12px;
-        }
-        .controls .btn {
-            padding: 8px 12px;
-            font-size: 13px;
+            margin-top: 16px;
+            flex-wrap: wrap;
         }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>Live Dubbing - Video #{{ $video->id }}</h1>
+        <div class="header">
+            <h1>Movie Dubber</h1>
+            <span class="lang-badge">{{ strtoupper($video->target_language) }}</span>
+        </div>
 
         <div class="video-wrapper">
             <video id="player" controls>
                 <source id="video-source" src="" type="video/mp4">
-                Your browser does not support the video tag.
             </video>
             <div class="subtitle-container">
-                <div class="subtitle" id="subtitle" style="display: none;"></div>
+                <div class="subtitle" id="subtitle" style="display: none;">
+                    <span class="speaker-name" id="subtitle-speaker"></span>
+                    <span id="subtitle-text"></span>
+                </div>
             </div>
             <div class="loading-overlay" id="loading-overlay">
                 <div class="spinner"></div>
                 <div class="loading-text" id="loading-text">Preparing video...</div>
-                <div class="loading-progress">
-                    <div class="loading-progress-bar" id="loading-progress-bar"></div>
+                <div class="progress-bar">
+                    <div class="progress-fill" id="loading-progress"></div>
                 </div>
             </div>
         </div>
 
-        <div class="segment-indicators" id="indicators">
-            <!-- Populated dynamically -->
-        </div>
+        <div class="timeline" id="timeline"></div>
 
-        <div class="info">
-            <div class="info-row">
-                <div class="info-item">
-                    Segment: <strong id="current-segment">-</strong> / <strong id="total-segments">-</strong>
+        <div class="panels">
+            <div class="panel">
+                <h2 class="panel-title">Now Playing</h2>
+                <div class="info-grid">
+                    <div class="info-item">
+                        <div class="info-value" id="current-chunk">-</div>
+                        <div class="info-label">Chunk</div>
+                    </div>
+                    <div class="info-item">
+                        <div class="info-value" id="total-chunks">-</div>
+                        <div class="info-label">Total</div>
+                    </div>
+                    <div class="info-item">
+                        <div class="info-value" id="ready-chunks">0</div>
+                        <div class="info-label">Ready</div>
+                    </div>
+                    <div class="info-item">
+                        <div class="info-value" id="status-text">...</div>
+                        <div class="info-label">Status</div>
+                    </div>
                 </div>
-                <div class="info-item">
-                    Ready: <strong id="ready-segments">0</strong>
+
+                <div class="transcript" id="transcript-section">
+                    <div class="transcript-original" id="original-text"></div>
+                    <div class="transcript-translated" id="translated-text"></div>
                 </div>
-                <div class="info-item">
-                    Status: <span class="status-text" id="status">Initializing...</span>
+
+                <div class="controls">
+                    <button class="btn btn-secondary" id="prev-btn" disabled>Previous</button>
+                    <button class="btn btn-secondary" id="next-btn" disabled>Next</button>
+                    <button class="btn btn-secondary" id="autoplay-btn">Autoplay: ON</button>
                 </div>
-                <div class="info-item">
-                    Language: <strong>{{ strtoupper($video->target_language) }}</strong>
+
+                <div class="download-section">
+                    <h3 class="panel-title">Download</h3>
+                    <div class="download-progress">
+                        <div class="progress-bar">
+                            <div class="progress-fill" id="download-progress"></div>
+                        </div>
+                        <span class="progress-text" id="download-progress-text">0%</span>
+                    </div>
+                    <div style="display: flex; gap: 8px;">
+                        <button class="btn btn-primary" id="download-btn" disabled>
+                            Download Full Video
+                        </button>
+                        <button class="btn btn-secondary" id="download-chunk-btn" disabled>
+                            Download Current Chunk
+                        </button>
+                    </div>
                 </div>
             </div>
-            <div class="segment-text" id="segment-text">
-                <div class="original" id="original-text"></div>
-                <div class="translated" id="translated-text"></div>
-            </div>
-            <div class="controls">
-                <button class="btn btn-secondary" id="prev-btn" disabled>Previous</button>
-                <button class="btn btn-secondary" id="next-btn" disabled>Next</button>
-                <button class="btn btn-secondary" id="autoplay-btn">Autoplay: ON</button>
+
+            <div class="panel">
+                <h2 class="panel-title">Speakers</h2>
+                <div class="speakers-list" id="speakers-list">
+                    <div class="speaker-item">
+                        <div class="speaker-avatar unknown">?</div>
+                        <div class="speaker-info">
+                            <div class="speaker-name">Detecting speakers...</div>
+                            <div class="speaker-voice">Please wait</div>
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
 
         <div class="actions">
             <a href="{{ route('stream.live') }}" class="btn btn-secondary">New Video</a>
-            <a href="{{ route('videos.show', $video) }}" class="btn btn-secondary">Video Details</a>
+            <a href="{{ route('videos.show', $video) }}" class="btn btn-secondary">Details</a>
             <a href="{{ route('videos.index') }}" class="btn btn-secondary">All Videos</a>
         </div>
     </div>
 
     <script>
         const videoId = {{ $video->id }};
-        const manifestUrl = '/api/player/{{ $video->id }}/manifest';
-        const prefetchUrl = '/api/player/{{ $video->id }}/prefetch';
-        const statusUrl = '/api/live/{{ $video->id }}/status';
+        const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
 
-        let segments = [];
+        let chunks = [];
+        let speakers = {};
         let currentIndex = 0;
         let autoplay = true;
-        let prefetchInProgress = false;
-        let isPlaying = false;
-        let pollInterval = null;
+        let isInitialized = false;
 
         const player = document.getElementById('player');
         const videoSource = document.getElementById('video-source');
-        const indicators = document.getElementById('indicators');
-        const statusEl = document.getElementById('status');
-        const currentSegmentEl = document.getElementById('current-segment');
-        const totalSegmentsEl = document.getElementById('total-segments');
-        const readySegmentsEl = document.getElementById('ready-segments');
+        const timeline = document.getElementById('timeline');
+        const loadingOverlay = document.getElementById('loading-overlay');
+        const loadingText = document.getElementById('loading-text');
+        const loadingProgress = document.getElementById('loading-progress');
+        const subtitleEl = document.getElementById('subtitle');
+        const subtitleSpeaker = document.getElementById('subtitle-speaker');
+        const subtitleText = document.getElementById('subtitle-text');
+
+        // Status elements
+        const currentChunkEl = document.getElementById('current-chunk');
+        const totalChunksEl = document.getElementById('total-chunks');
+        const readyChunksEl = document.getElementById('ready-chunks');
+        const statusTextEl = document.getElementById('status-text');
         const originalTextEl = document.getElementById('original-text');
         const translatedTextEl = document.getElementById('translated-text');
-        const subtitleEl = document.getElementById('subtitle');
+
+        // Download elements
+        const downloadProgress = document.getElementById('download-progress');
+        const downloadProgressText = document.getElementById('download-progress-text');
+        const downloadBtn = document.getElementById('download-btn');
+        const downloadChunkBtn = document.getElementById('download-chunk-btn');
+
+        // Control buttons
         const prevBtn = document.getElementById('prev-btn');
         const nextBtn = document.getElementById('next-btn');
         const autoplayBtn = document.getElementById('autoplay-btn');
-        const loadingOverlay = document.getElementById('loading-overlay');
-        const loadingText = document.getElementById('loading-text');
-        const loadingProgressBar = document.getElementById('loading-progress-bar');
+        const speakersList = document.getElementById('speakers-list');
 
-        // Status messages for different pipeline stages
-        const statusMessages = {
-            'pending': 'Waiting to start...',
-            'downloading': 'Downloading video...',
-            'uploaded': 'Video downloaded',
-            'audio_extracted': 'Extracting audio...',
-            'transcribing': 'Transcribing speech...',
-            'transcribed': 'Processing segments...',
-            'streaming_ready': 'Ready to play',
-        };
-
-        // Initialize - poll for status until segments are ready
         async function initialize() {
-            loadingText.textContent = 'Checking video status...';
-
-            // Start polling for status
-            pollInterval = setInterval(checkStatus, 2000);
-            checkStatus();
+            loadingText.textContent = 'Checking status...';
+            await checkStatus();
         }
 
         async function checkStatus() {
             try {
-                const response = await fetch(statusUrl);
-                const data = await response.json();
+                const res = await fetch(`/api/live/${videoId}/status`);
+                const data = await res.json();
 
-                const statusText = statusMessages[data.status] || data.status;
-                loadingText.textContent = statusText;
-                loadingProgressBar.style.width = data.progress + '%';
+                loadingText.textContent = getStatusMessage(data.status);
+                loadingProgress.style.width = data.progress + '%';
+                totalChunksEl.textContent = data.total_segments || '-';
+                readyChunksEl.textContent = data.ready_segments || '0';
 
-                totalSegmentsEl.textContent = data.total_segments || '-';
-                readySegmentsEl.textContent = data.ready_segments || '0';
-
-                // If we have ready segments, load manifest and start playing
                 if (data.ready_segments > 0 || data.can_play) {
-                    clearInterval(pollInterval);
-                    loadManifest();
+                    await loadManifest();
+                } else {
+                    setTimeout(checkStatus, 2000);
                 }
-            } catch (error) {
-                console.error('Status check error:', error);
+            } catch (e) {
+                console.error('Status check error:', e);
+                setTimeout(checkStatus, 3000);
             }
         }
 
-        // Load manifest and start playing
+        function getStatusMessage(status) {
+            const messages = {
+                'pending': 'Starting...',
+                'downloading': 'Downloading video...',
+                'uploaded': 'Processing video...',
+                'processing_chunks': 'Dubbing in progress...',
+                'audio_extracted': 'Extracting audio...',
+            };
+            return messages[status] || status;
+        }
+
         async function loadManifest() {
             try {
-                const response = await fetch(manifestUrl);
-                const data = await response.json();
+                const res = await fetch(`/api/player/${videoId}/manifest`);
+                const data = await res.json();
 
-                segments = data.segments;
-                totalSegmentsEl.textContent = segments.length;
+                // Build chunks from segments (grouped by 12-second windows)
+                const segmentsByChunk = {};
+                data.segments.forEach(seg => {
+                    const chunkIdx = Math.floor(seg.start_time / 12);
+                    if (!segmentsByChunk[chunkIdx]) {
+                        segmentsByChunk[chunkIdx] = {
+                            index: chunkIdx,
+                            segments: [],
+                            ready: false,
+                        };
+                    }
+                    segmentsByChunk[chunkIdx].segments.push(seg);
+                    if (seg.has_tts || seg.ready) {
+                        segmentsByChunk[chunkIdx].ready = true;
+                    }
+                });
 
-                // Update indicators
-                renderIndicators();
-                updateIndicators();
+                chunks = Object.values(segmentsByChunk).sort((a, b) => a.index - b.index);
+                totalChunksEl.textContent = chunks.length;
 
-                // Find first ready segment
-                const firstReady = segments.findIndex(s => s.has_tts);
+                renderTimeline();
+                updateTimeline();
+                await loadSpeakers();
 
+                // Find first ready chunk
+                const firstReady = chunks.findIndex(c => c.ready);
                 if (firstReady >= 0) {
-                    // Hide loading, start playing
                     loadingOverlay.classList.add('hidden');
-                    loadSegment(firstReady);
+                    loadChunk(firstReady);
                     player.play();
-                    isPlaying = true;
-
-                    // Start polling for more segments
-                    startSegmentPolling();
+                    startPolling();
                 } else {
-                    // No ready segments yet, keep polling
-                    loadingText.textContent = 'Waiting for first segment...';
+                    loadingText.textContent = 'Waiting for first chunk...';
                     setTimeout(loadManifest, 2000);
                 }
-            } catch (error) {
-                console.error('Failed to load manifest:', error);
-                statusEl.textContent = 'Error loading manifest';
-                loadingText.textContent = 'Error: ' + error.message;
+            } catch (e) {
+                console.error('Manifest error:', e);
+                loadingText.textContent = 'Error loading video';
             }
         }
 
-        function renderIndicators() {
-            indicators.innerHTML = '';
-            segments.forEach((seg, index) => {
-                const dot = document.createElement('div');
-                dot.className = 'segment-dot';
-                dot.dataset.segmentId = seg.id;
-                dot.dataset.index = index;
-                dot.title = `Segment ${index + 1}`;
-                indicators.appendChild(dot);
-            });
+        async function loadSpeakers() {
+            try {
+                const res = await fetch(`/videos/${videoId}/speakers`);
+                const data = await res.json();
+
+                speakers = {};
+                data.forEach(s => {
+                    speakers[s.id] = s;
+                });
+
+                renderSpeakers(data);
+            } catch (e) {
+                console.error('Failed to load speakers:', e);
+            }
         }
 
-        function updateIndicators() {
-            const dots = indicators.querySelectorAll('.segment-dot');
+        function renderSpeakers(speakerList) {
+            if (speakerList.length === 0) {
+                speakersList.innerHTML = `
+                    <div class="speaker-item">
+                        <div class="speaker-avatar unknown">?</div>
+                        <div class="speaker-info">
+                            <div class="speaker-name">No speakers detected yet</div>
+                            <div class="speaker-voice">Processing...</div>
+                        </div>
+                    </div>
+                `;
+                return;
+            }
+
+            speakersList.innerHTML = speakerList.map(s => `
+                <div class="speaker-item">
+                    <div class="speaker-avatar ${s.gender || 'unknown'}">
+                        ${s.label ? s.label.charAt(0) : '?'}
+                    </div>
+                    <div class="speaker-info">
+                        <div class="speaker-name">${s.label || 'Unknown'}</div>
+                        <div class="speaker-voice">${s.tts_voice || 'Default voice'}</div>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function renderTimeline() {
+            timeline.innerHTML = chunks.map((chunk, i) => `
+                <div class="chunk-dot" data-index="${i}" title="Chunk ${i + 1}"></div>
+            `).join('');
+        }
+
+        function updateTimeline() {
+            const dots = timeline.querySelectorAll('.chunk-dot');
             let readyCount = 0;
 
-            dots.forEach((dot, index) => {
-                dot.classList.remove('ready', 'generating', 'current', 'pending');
-
-                if (index === currentIndex) {
+            dots.forEach((dot, i) => {
+                dot.classList.remove('ready', 'generating', 'current');
+                if (i === currentIndex) {
                     dot.classList.add('current');
-                } else if (segments[index]) {
-                    if (segments[index].has_tts || segments[index].ready) {
-                        dot.classList.add('ready');
-                        readyCount++;
-                    } else if (segments[index].generating) {
-                        dot.classList.add('generating');
-                    } else {
-                        dot.classList.add('pending');
-                    }
+                } else if (chunks[i]?.ready) {
+                    dot.classList.add('ready');
                 }
+                if (chunks[i]?.ready) readyCount++;
             });
 
-            // Also count current if ready
-            if (segments[currentIndex]?.has_tts || segments[currentIndex]?.ready) {
-                readyCount++;
-            }
+            readyChunksEl.textContent = readyCount;
 
-            readySegmentsEl.textContent = readyCount;
+            // Update download progress
+            const progress = chunks.length > 0 ? Math.round((readyCount / chunks.length) * 100) : 0;
+            downloadProgress.style.width = progress + '%';
+            downloadProgressText.textContent = progress + '%';
+            downloadBtn.disabled = progress < 100;
+            downloadChunkBtn.disabled = !chunks[currentIndex]?.ready;
         }
 
-        function startSegmentPolling() {
-            // Poll for segment status every 2 seconds
+        function loadChunk(index) {
+            if (index < 0 || index >= chunks.length) return;
+
+            currentIndex = index;
+            const chunk = chunks[index];
+
+            currentChunkEl.textContent = index + 1;
+            prevBtn.disabled = index === 0;
+            nextBtn.disabled = index === chunks.length - 1;
+            statusTextEl.textContent = chunk.ready ? 'Playing' : 'Loading';
+
+            updateTimeline();
+
+            // Get first segment text for display
+            const seg = chunk.segments[0];
+            if (seg) {
+                originalTextEl.textContent = seg.text || '';
+                translatedTextEl.textContent = seg.translated_text || '';
+            }
+
+            // Load video
+            const url = `/api/player/${videoId}/chunk/${index}/download`;
+            videoSource.src = url;
+            player.load();
+
+            player.oncanplay = () => {
+                statusTextEl.textContent = 'Playing';
+            };
+        }
+
+        function startPolling() {
             setInterval(async () => {
                 try {
-                    const response = await fetch(manifestUrl);
-                    const data = await response.json();
+                    const res = await fetch(`/api/player/${videoId}/manifest`);
+                    const data = await res.json();
 
-                    // Update segment status
-                    data.segments.forEach((newSeg, idx) => {
-                        if (segments[idx]) {
-                            segments[idx].has_tts = newSeg.has_tts;
-                            segments[idx].ready = newSeg.ready;
-                            segments[idx].generating = newSeg.generating;
-                            segments[idx].translated_text = newSeg.translated_text;
+                    // Update chunk ready status
+                    const segmentsByChunk = {};
+                    data.segments.forEach(seg => {
+                        const chunkIdx = Math.floor(seg.start_time / 12);
+                        if (!segmentsByChunk[chunkIdx]) {
+                            segmentsByChunk[chunkIdx] = { ready: false, segments: [] };
+                        }
+                        segmentsByChunk[chunkIdx].segments.push(seg);
+                        if (seg.has_tts || seg.ready) {
+                            segmentsByChunk[chunkIdx].ready = true;
                         }
                     });
 
-                    updateIndicators();
-
-                    // Also prefetch upcoming segments
-                    prefetchNext();
-                } catch (error) {
-                    console.error('Segment polling error:', error);
-                }
-            }, 2000);
-        }
-
-        async function loadSegment(index) {
-            if (index < 0 || index >= segments.length) return;
-
-            currentIndex = index;
-            const segment = segments[index];
-
-            // Update UI
-            currentSegmentEl.textContent = index + 1;
-            originalTextEl.textContent = segment.text || '';
-            translatedTextEl.textContent = segment.translated_text || '';
-
-            // Update buttons
-            prevBtn.disabled = index === 0;
-            nextBtn.disabled = index === segments.length - 1;
-
-            // Update indicators
-            updateIndicators();
-
-            // Check if segment is ready
-            if (!segment.has_tts && !segment.ready) {
-                statusEl.textContent = 'Waiting for segment...';
-                statusEl.classList.add('loading');
-
-                // Wait for segment to be ready
-                await waitForSegment(index);
-            }
-
-            statusEl.textContent = 'Loading...';
-            statusEl.classList.add('loading');
-
-            try {
-                videoSource.src = segment.stream_url;
-                player.load();
-
-                player.oncanplay = () => {
-                    statusEl.textContent = 'Playing';
-                    statusEl.classList.remove('loading');
-                    statusEl.classList.add('ready');
-                    segments[index].ready = true;
-                    updateIndicators();
-                };
-
-                player.onerror = () => {
-                    statusEl.textContent = 'Error loading segment';
-                    statusEl.classList.add('loading');
-                };
-
-                prefetchNext();
-            } catch (error) {
-                console.error('Failed to load segment:', error);
-                statusEl.textContent = 'Error: ' + error.message;
-            }
-        }
-
-        async function waitForSegment(index) {
-            return new Promise((resolve) => {
-                const check = setInterval(async () => {
-                    try {
-                        const response = await fetch(segments[index].status_url);
-                        const data = await response.json();
-
-                        if (data.ready) {
-                            segments[index].ready = true;
-                            segments[index].has_tts = true;
-                            clearInterval(check);
-                            resolve();
+                    Object.entries(segmentsByChunk).forEach(([idx, data]) => {
+                        if (chunks[idx]) {
+                            chunks[idx].ready = data.ready;
+                            chunks[idx].segments = data.segments;
                         }
-                    } catch (e) {
-                        // ignore
-                    }
-                }, 1000);
-            });
+                    });
+
+                    updateTimeline();
+                    await loadSpeakers();
+                } catch (e) {
+                    console.error('Polling error:', e);
+                }
+            }, 3000);
         }
 
-        async function prefetchNext() {
-            if (prefetchInProgress) return;
-            prefetchInProgress = true;
-
-            try {
-                const response = await fetch(prefetchUrl, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'X-CSRF-TOKEN': '{{ csrf_token() }}'
-                    },
-                    body: JSON.stringify({
-                        current_segment_id: segments[currentIndex]?.id
-                    })
-                });
-            } catch (error) {
-                console.error('Prefetch error:', error);
-            } finally {
-                prefetchInProgress = false;
-            }
-        }
-
-        // Handle video ended
+        // Event handlers
         player.addEventListener('ended', () => {
             subtitleEl.style.display = 'none';
-
-            if (autoplay && currentIndex < segments.length - 1) {
-                loadSegment(currentIndex + 1);
+            if (autoplay && currentIndex < chunks.length - 1) {
+                loadChunk(currentIndex + 1);
                 player.play();
-            } else if (currentIndex === segments.length - 1) {
-                statusEl.textContent = 'Playback complete';
-                statusEl.classList.remove('loading');
             }
         });
 
-        // Handle video playing - show subtitle
         player.addEventListener('play', () => {
-            const segment = segments[currentIndex];
-            if (segment && segment.translated_text) {
-                subtitleEl.textContent = segment.translated_text;
+            const chunk = chunks[currentIndex];
+            if (chunk?.segments[0]?.translated_text) {
+                subtitleText.textContent = chunk.segments[0].translated_text;
+                const speakerId = chunk.segments[0].speaker_id;
+                subtitleSpeaker.textContent = speakers[speakerId]?.label || '';
                 subtitleEl.style.display = 'inline-block';
             }
         });
 
-        // Navigation buttons
         prevBtn.addEventListener('click', () => {
             if (currentIndex > 0) {
-                loadSegment(currentIndex - 1);
+                loadChunk(currentIndex - 1);
                 player.play();
             }
         });
 
         nextBtn.addEventListener('click', () => {
-            if (currentIndex < segments.length - 1) {
-                loadSegment(currentIndex + 1);
+            if (currentIndex < chunks.length - 1) {
+                loadChunk(currentIndex + 1);
                 player.play();
             }
         });
 
-        // Autoplay toggle
         autoplayBtn.addEventListener('click', () => {
             autoplay = !autoplay;
             autoplayBtn.textContent = 'Autoplay: ' + (autoplay ? 'ON' : 'OFF');
         });
 
-        // Click on indicator dots
-        indicators.addEventListener('click', (e) => {
-            const dot = e.target.closest('.segment-dot');
+        timeline.addEventListener('click', (e) => {
+            const dot = e.target.closest('.chunk-dot');
             if (dot) {
                 const index = parseInt(dot.dataset.index);
-                loadSegment(index);
+                loadChunk(index);
                 player.play();
             }
         });
 
+        downloadBtn.addEventListener('click', () => {
+            window.location.href = `/api/player/${videoId}/download`;
+        });
+
+        downloadChunkBtn.addEventListener('click', () => {
+            window.location.href = `/api/player/${videoId}/chunk/${currentIndex}/download`;
+        });
+
         // Keyboard shortcuts
         document.addEventListener('keydown', (e) => {
-            if (e.key === 'ArrowLeft') {
-                prevBtn.click();
-            } else if (e.key === 'ArrowRight') {
-                nextBtn.click();
-            } else if (e.key === ' ') {
+            if (e.key === 'ArrowLeft') prevBtn.click();
+            else if (e.key === 'ArrowRight') nextBtn.click();
+            else if (e.key === ' ') {
                 e.preventDefault();
-                if (player.paused) {
-                    player.play();
-                } else {
-                    player.pause();
-                }
+                player.paused ? player.play() : player.pause();
             }
         });
 
-        // Initialize
+        // Start
         initialize();
     </script>
 </body>

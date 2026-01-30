@@ -16,8 +16,13 @@ use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 
 /**
- * Downloads video and dispatches chunk processing jobs.
- * Each chunk is processed independently for real-time playback.
+ * Downloads video and dispatches chunk processing jobs IMMEDIATELY.
+ * Demucs stem separation runs in background - chunks work without it if not ready.
+ *
+ * Optimized for fast processing of small segments from big movies:
+ * - Configurable chunk duration (smaller = faster per-chunk, larger = fewer jobs)
+ * - Prioritized first chunk dispatch
+ * - Background stem separation that chunks can leverage when ready
  */
 class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
 {
@@ -27,8 +32,11 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
     public int $tries = 2;
     public int $uniqueFor = 3600;
 
-    // Chunk duration in seconds
-    private const CHUNK_DURATION = 12;
+    // Chunk duration in seconds - configurable via environment
+    // Smaller = faster processing per chunk, but more overhead
+    // Larger = slower per chunk, but less overhead
+    // Recommended: 8-15 seconds for optimal balance
+    private const DEFAULT_CHUNK_DURATION = 10;
 
     public function __construct(public int $videoId) {}
 
@@ -61,13 +69,7 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
             throw new \RuntimeException('Video download failed');
         }
 
-        // Step 2: Extract full audio for stem separation
-        $this->extractFullAudio($video);
-
-        // Step 3: Separate vocals from background using Demucs
-        $this->separateStems($video);
-
-        // Step 4: Get video duration
+        // Step 2: Get video duration IMMEDIATELY
         $videoPath = Storage::disk('local')->path($video->original_path);
         $duration = $this->getVideoDuration($videoPath);
 
@@ -75,30 +77,44 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
             throw new \RuntimeException('Could not determine video duration');
         }
 
-        Log::info('Starting chunk processing', [
-            'video_id' => $video->id,
-            'duration' => $duration,
-            'chunk_size' => self::CHUNK_DURATION,
-        ]);
-
-        // Step 5: Calculate chunks and dispatch jobs
+        // Step 3: Calculate chunks
         $chunks = $this->calculateChunks($duration);
         $video->update(['status' => 'processing_chunks']);
 
+        Log::info('Starting chunk processing - dispatching immediately', [
+            'video_id' => $video->id,
+            'duration' => $duration,
+            'total_chunks' => count($chunks),
+        ]);
+
+        // Step 4: Dispatch FIRST chunk with HIGH priority (no delay)
+        if (!empty($chunks)) {
+            ProcessVideoChunkJob::dispatch(
+                $video->id,
+                0,
+                $chunks[0]['start'],
+                $chunks[0]['end']
+            )->onQueue('chunks');
+
+            Log::info('First chunk dispatched immediately', ['video_id' => $video->id]);
+        }
+
+        // Step 5: Start Demucs in background (non-blocking)
+        $this->startBackgroundStemSeparation($video);
+
+        // Step 6: Dispatch remaining chunks (they'll process in parallel)
         foreach ($chunks as $index => $chunk) {
+            if ($index === 0) continue; // Already dispatched
+
+            // Small delay for chunks 2+ to let first chunk get ahead
+            $delay = $index <= 3 ? $index * 2 : 5; // First few chunks staggered, rest same delay
+
             ProcessVideoChunkJob::dispatch(
                 $video->id,
                 $index,
                 $chunk['start'],
                 $chunk['end']
-            )->onQueue('chunks');
-
-            Log::info('Dispatched chunk job', [
-                'video_id' => $video->id,
-                'chunk' => $index,
-                'start' => $chunk['start'],
-                'end' => $chunk['end'],
-            ]);
+            )->onQueue('chunks')->delay(now()->addSeconds($delay));
         }
 
         Log::info('All chunk jobs dispatched', [
@@ -107,80 +123,40 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
         ]);
     }
 
+    /**
+     * Start stem separation in background - doesn't block chunk processing.
+     */
+    private function startBackgroundStemSeparation(Video $video): void
+    {
+        // Extract audio first (quick)
+        $this->extractFullAudio($video);
+
+        // Dispatch Demucs as separate background job
+        SeparateStemsJob::dispatch($video->id)->onQueue('default');
+
+        Log::info('Stem separation dispatched to background', ['video_id' => $video->id]);
+    }
+
     private function extractFullAudio(Video $video): void
     {
         $videoPath = Storage::disk('local')->path($video->original_path);
-
-        // Extract stereo audio for mixing
         $audioRel = "audio/original/{$video->id}.wav";
         Storage::disk('local')->makeDirectory('audio/original');
         $audioPath = Storage::disk('local')->path($audioRel);
 
         if (file_exists($audioPath)) {
-            Log::info('Full audio already extracted', ['video_id' => $video->id]);
             return;
         }
 
-        $result = Process::timeout(600)->run([
+        $result = Process::timeout(300)->run([
             'ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
             '-i', $videoPath,
             '-vn', '-ac', '2', '-ar', '48000', '-c:a', 'pcm_s16le',
             $audioPath,
         ]);
 
-        if (!$result->successful() || !file_exists($audioPath)) {
-            Log::warning('Failed to extract full audio', ['video_id' => $video->id]);
-        } else {
-            Log::info('Full audio extracted', ['video_id' => $video->id, 'path' => $audioRel]);
-        }
-    }
-
-    private function separateStems(Video $video): void
-    {
-        $inputRel = "audio/original/{$video->id}.wav";
-
-        if (!Storage::disk('local')->exists($inputRel)) {
-            Log::warning('Cannot separate stems: original audio not found', ['video_id' => $video->id]);
-            return;
-        }
-
-        // Check if already separated
-        $noVocalsPath = "audio/stems/{$video->id}/no_vocals.wav";
-        if (Storage::disk('local')->exists($noVocalsPath)) {
-            Log::info('Stems already separated', ['video_id' => $video->id]);
-            return;
-        }
-
-        Log::info('Separating audio stems with Demucs', ['video_id' => $video->id]);
-
-        try {
-            $res = Http::timeout(1800)
-                ->retry(2, 2000)
-                ->post('http://demucs:8000/separate', [
-                    'video_id' => $video->id,
-                    'input_rel' => $inputRel,
-                    'model' => 'htdemucs',
-                    'two_stems' => 'vocals',
-                ]);
-
-            $data = $res->json();
-
-            if ($res->successful() && ($data['ok'] ?? false)) {
-                Log::info('Stem separation complete', [
-                    'video_id' => $video->id,
-                    'no_vocals' => $data['no_vocals_rel'] ?? 'unknown',
-                ]);
-            } else {
-                Log::warning('Stem separation failed, will use original audio', [
-                    'video_id' => $video->id,
-                    'response' => $data,
-                ]);
-            }
-        } catch (\Exception $e) {
-            Log::warning('Stem separation error, will use original audio', [
-                'video_id' => $video->id,
-                'error' => $e->getMessage(),
-            ]);
+        if ($result->successful() && file_exists($audioPath)) {
+            Log::info('Full audio extracted', ['video_id' => $video->id]);
         }
     }
 
@@ -197,37 +173,93 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
         $relativePath = "videos/originals/{$filename}";
         $absolutePath = Storage::disk('local')->path($relativePath);
 
-        // Try yt-dlp with different clients (android_vr works best with recent YouTube changes)
-        $clients = ['android_vr', 'android', 'ios', 'web'];
-        $downloaded = false;
+        $url = $video->source_url;
+        $isYouTube = str_contains($url, 'youtube.com') || str_contains($url, 'youtu.be');
+        $isHLS = str_contains($url, '.m3u8');
 
-        foreach ($clients as $client) {
-            @unlink($absolutePath);
+        $downloaded = false;
+        $lastError = '';
+
+        if ($isYouTube) {
+            // YouTube: try different clients
+            $clients = ['android_vr', 'android', 'ios', 'web'];
+            foreach ($clients as $client) {
+                @unlink($absolutePath);
+
+                Log::info('Trying YouTube download', [
+                    'video_id' => $video->id,
+                    'client' => $client,
+                ]);
+
+                $result = Process::timeout(1800)->run([
+                    'yt-dlp',
+                    '-f', 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best',
+                    '--merge-output-format', 'mp4',
+                    '-o', $absolutePath,
+                    '--no-playlist',
+                    '--extractor-args', "youtube:player_client={$client}",
+                    $url,
+                ]);
+
+                if ($result->successful() && file_exists($absolutePath) && filesize($absolutePath) > 10000) {
+                    $downloaded = true;
+                    Log::info('Video downloaded', [
+                        'video_id' => $video->id,
+                        'client' => $client,
+                        'size' => filesize($absolutePath),
+                    ]);
+                    break;
+                }
+
+                $lastError = $result->errorOutput() ?: $result->output();
+            }
+        } elseif ($isHLS) {
+            // HLS stream: download best video + best audio and merge
+            Log::info('Downloading HLS stream', ['video_id' => $video->id]);
 
             $result = Process::timeout(1800)->run([
                 'yt-dlp',
-                '-f', '136+140/bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4][height<=720]/best',
+                '-f', 'bestvideo+bestaudio/best',
                 '--merge-output-format', 'mp4',
                 '-o', $absolutePath,
-                '--no-playlist',
-                '--extractor-args', "youtube:player_client={$client}",
-                $video->source_url,
+                $url,
+            ]);
+
+            if ($result->successful() && file_exists($absolutePath) && filesize($absolutePath) > 10000) {
+                $downloaded = true;
+                Log::info('HLS stream downloaded', [
+                    'video_id' => $video->id,
+                    'size' => filesize($absolutePath),
+                ]);
+            } else {
+                $lastError = $result->errorOutput() ?: $result->output();
+            }
+        } else {
+            // Generic URL: try simple download
+            Log::info('Downloading generic URL', ['video_id' => $video->id]);
+
+            $result = Process::timeout(1800)->run([
+                'yt-dlp',
+                '-f', 'bestvideo[height<=720]+bestaudio/best[height<=720]/best',
+                '--merge-output-format', 'mp4',
+                '-o', $absolutePath,
+                $url,
             ]);
 
             if ($result->successful() && file_exists($absolutePath) && filesize($absolutePath) > 10000) {
                 $downloaded = true;
                 Log::info('Video downloaded', [
                     'video_id' => $video->id,
-                    'client' => $client,
                     'size' => filesize($absolutePath),
                 ]);
-                break;
+            } else {
+                $lastError = $result->errorOutput() ?: $result->output();
             }
         }
 
         if (!$downloaded) {
             $video->update(['status' => 'download_failed']);
-            throw new \RuntimeException('Video download failed');
+            throw new \RuntimeException('Video download failed: ' . substr($lastError, -200));
         }
 
         $video->update([
@@ -246,29 +278,50 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
             $path,
         ]);
 
-        if (!$result->successful()) {
-            return 0;
-        }
-
-        return (float) trim($result->output());
+        return $result->successful() ? (float) trim($result->output()) : 0;
     }
 
     private function calculateChunks(float $duration): array
     {
         $chunks = [];
         $start = 0;
-        $index = 0;
+        $chunkDuration = $this->getChunkDuration($duration);
 
         while ($start < $duration) {
-            $end = min($start + self::CHUNK_DURATION, $duration);
-            $chunks[] = [
-                'start' => $start,
-                'end' => $end,
-            ];
+            $end = min($start + $chunkDuration, $duration);
+            $chunks[] = ['start' => $start, 'end' => $end];
             $start = $end;
-            $index++;
         }
 
         return $chunks;
+    }
+
+    /**
+     * Get optimal chunk duration based on video length and configuration.
+     * Shorter videos use smaller chunks for faster completion.
+     * Longer videos use slightly larger chunks to reduce job overhead.
+     */
+    private function getChunkDuration(float $totalDuration): float
+    {
+        // Environment override takes priority
+        $envDuration = env('DUBBER_CHUNK_DURATION');
+        if ($envDuration !== null && is_numeric($envDuration)) {
+            return max(5, min(30, (float)$envDuration));
+        }
+
+        // Adaptive chunk sizing based on video length
+        if ($totalDuration <= 60) {
+            // Short videos (< 1 min): 8 second chunks for fast processing
+            return 8;
+        } elseif ($totalDuration <= 300) {
+            // Medium videos (1-5 min): 10 second chunks
+            return 10;
+        } elseif ($totalDuration <= 1800) {
+            // Long videos (5-30 min): 12 second chunks
+            return 12;
+        } else {
+            // Very long videos (> 30 min): 15 second chunks to reduce overhead
+            return 15;
+        }
     }
 }

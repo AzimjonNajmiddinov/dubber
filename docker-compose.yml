@@ -50,6 +50,33 @@ services:
           - queue
     restart: unless-stopped
 
+  # Additional queue worker for parallel chunk processing
+  queue2:
+    build:
+      context: .
+      dockerfile: docker/php/Dockerfile
+    container_name: movie_dubber_queue2
+    command: php artisan queue:work --queue=chunks --sleep=3 --tries=2 --timeout=600
+    volumes:
+      - .:/var/www
+    depends_on:
+      redis:
+        condition: service_started
+      mysql:
+        condition: service_healthy
+      whisperx:
+        condition: service_started
+      demucs:
+        condition: service_healthy
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    networks:
+      dubber:
+        aliases:
+          - queue2
+    restart: unless-stopped
+
   nginx:
     image: nginx:alpine
     container_name: movie_dubber_nginx
@@ -167,10 +194,13 @@ services:
       - ./storage/app:/var/www/storage/app
       - demucs_cache:/root/.cache
     environment:
+      # Limit to 1 thread to reduce CPU usage
       OMP_NUM_THREADS: "1"
       MKL_NUM_THREADS: "1"
       OPENBLAS_NUM_THREADS: "1"
       NUMEXPR_NUM_THREADS: "1"
+    mem_limit: 4g
+    cpus: 1.5
     restart: unless-stopped
     dns:
       - 1.1.1.1
@@ -180,6 +210,7 @@ services:
       interval: 20s
       timeout: 10s
       retries: 10
+      start_period: 30s
     networks:
       dubber:
         aliases:

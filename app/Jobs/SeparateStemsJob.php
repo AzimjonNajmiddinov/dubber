@@ -35,11 +35,12 @@ class SeparateStemsJob implements ShouldQueue, ShouldBeUnique
     }
 
     /**
-     * Handle job failure - log error (stem separation failure is recoverable).
+     * Handle job failure - log warning (stem separation failure is recoverable).
+     * Chunks will continue with segment-based separation or original audio.
      */
     public function failed(\Throwable $exception): void
     {
-        Log::error('SeparateStemsJob failed permanently', [
+        Log::warning('SeparateStemsJob failed - chunks will use segment separation', [
             'video_id' => $this->videoId,
             'error' => $exception->getMessage(),
         ]);
@@ -47,8 +48,17 @@ class SeparateStemsJob implements ShouldQueue, ShouldBeUnique
 
     public function handle(): void
     {
+        // Check if stems already exist (skip if already done)
+        if ($this->stemsAlreadyExist()) {
+            Log::info('Stems already exist, skipping separation', ['video_id' => $this->videoId]);
+            return;
+        }
+
         $lock = Cache::lock("video:{$this->videoId}:stems", 1800);
-        if (! $lock->get()) return;
+        if (!$lock->get()) {
+            Log::debug('Could not acquire lock for stem separation', ['video_id' => $this->videoId]);
+            return;
+        }
 
         try {
             /** @var Video $video */
@@ -59,13 +69,18 @@ class SeparateStemsJob implements ShouldQueue, ShouldBeUnique
                 throw new \RuntimeException("Original WAV not found: {$inputRel} (run ExtractAudioJob first)");
             }
 
-            $url = "http://demucs:8000/separate";
+            // Check file size to estimate processing time
+            $fileSize = Storage::disk('local')->size($inputRel);
+            $estimatedDuration = $fileSize / (48000 * 2 * 2); // Rough estimate for 48kHz stereo 16-bit
 
-            Log::info('Demucs separation request', [
+            Log::info('Starting full stem separation', [
                 'video_id' => $video->id,
                 'input_rel' => $inputRel,
-                'url' => $url,
+                'file_size_mb' => round($fileSize / 1024 / 1024, 2),
+                'estimated_duration_sec' => round($estimatedDuration, 0),
             ]);
+
+            $url = "http://demucs:8000/separate";
 
             $res = Http::timeout(1800)
                 ->retry(2, 2000)
@@ -84,6 +99,7 @@ class SeparateStemsJob implements ShouldQueue, ShouldBeUnique
                     'http_status' => $res->status(),
                     'body' => mb_substr($res->body(), 0, 4000),
                     'json' => $data,
+                    'cached' => $data['cached'] ?? false,
                 ]);
                 throw new \RuntimeException("Demucs separation failed for video {$video->id}");
             }
@@ -93,13 +109,33 @@ class SeparateStemsJob implements ShouldQueue, ShouldBeUnique
                 throw new \RuntimeException("Demucs ok=true but no_vocals missing for video {$video->id}");
             }
 
-            Log::info('Demucs separation done', [
+            Log::info('Full stem separation complete', [
                 'video_id' => $video->id,
                 'no_vocals' => $noVocalsRel,
+                'cached' => $data['cached'] ?? false,
             ]);
 
         } finally {
             optional($lock)->release();
         }
+    }
+
+    /**
+     * Check if stems already exist for this video.
+     */
+    private function stemsAlreadyExist(): bool
+    {
+        $stemsDir = "audio/stems/{$this->videoId}";
+
+        foreach (['no_vocals.wav', 'no_vocals.flac'] as $filename) {
+            if (Storage::disk('local')->exists("{$stemsDir}/{$filename}")) {
+                $size = Storage::disk('local')->size("{$stemsDir}/{$filename}");
+                if ($size > 1000) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 }
