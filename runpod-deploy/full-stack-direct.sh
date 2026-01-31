@@ -143,8 +143,8 @@ else
     cd dubber
 fi
 
-# Install PHP dependencies
-composer install --no-dev --optimize-autoloader
+# Install PHP dependencies (update to match PHP version on server)
+composer update --no-dev --optimize-autoloader
 
 # Create .env
 cat > .env << 'ENVFILE'
