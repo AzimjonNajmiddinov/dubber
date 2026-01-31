@@ -50,14 +50,36 @@ echo "Redis ready!"
 # ============================================
 echo ""
 echo "=== Installing PHP 8.2 ==="
-add-apt-repository -y ppa:ondrej/php
+
+# Fix broken apt_pkg on RunPod
+apt-get install -y python3-apt 2>/dev/null || true
+
+# Add PHP repository manually (without add-apt-repository)
+echo "deb https://ppa.launchpadcontent.net/ondrej/php/ubuntu jammy main" > /etc/apt/sources.list.d/ondrej-php.list
+apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 4F4EA0AAE5267A6C 2>/dev/null || \
+    curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x4F4EA0AAE5267A6C" | apt-key add -
+
 apt-get update
 apt-get install -y php8.2-fpm php8.2-cli php8.2-mysql php8.2-redis php8.2-curl \
-    php8.2-gd php8.2-mbstring php8.2-xml php8.2-zip php8.2-bcmath php8.2-intl
+    php8.2-gd php8.2-mbstring php8.2-xml php8.2-zip php8.2-bcmath php8.2-intl || {
+    # Fallback: try PHP 8.1 from default repos
+    echo "PHP 8.2 failed, trying default PHP..."
+    apt-get install -y php-fpm php-cli php-mysql php-redis php-curl \
+        php-gd php-mbstring php-xml php-zip php-bcmath php-intl
+}
+
+# Find PHP version installed
+PHP_VERSION=$(php -v | head -1 | cut -d' ' -f2 | cut -d'.' -f1,2)
+echo "PHP ${PHP_VERSION} installed"
 
 # Configure PHP-FPM
-sed -i 's/listen = .*/listen = 127.0.0.1:9000/' /etc/php/8.2/fpm/pool.d/www.conf
-service php8.2-fpm start
+PHP_FPM_CONF=$(find /etc/php -name "www.conf" 2>/dev/null | head -1)
+if [ -n "$PHP_FPM_CONF" ]; then
+    sed -i 's/listen = .*/listen = 127.0.0.1:9000/' "$PHP_FPM_CONF"
+fi
+
+# Start PHP-FPM
+service php${PHP_VERSION}-fpm start 2>/dev/null || service php-fpm start 2>/dev/null || true
 echo "PHP ready!"
 
 # ============================================
@@ -230,7 +252,7 @@ echo "=== Starting All Services ==="
 
 service mysql restart
 service redis-server restart
-service php8.2-fpm restart
+service php${PHP_VERSION}-fpm restart 2>/dev/null || service php-fpm restart 2>/dev/null || true
 service nginx restart
 supervisorctl restart all
 
