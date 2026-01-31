@@ -238,17 +238,17 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
         }
 
         return
-            "You are translating movie dialogue for PROFESSIONAL DUBBING.\n" .
-            "Target language: {$targetLanguage}.\n" .
-            "Goal: produce natural, actor-ready spoken lines that match timing and emotion.\n" .
-            "Rules:\n" .
-            "- Output ONLY in the target language.\n" .
-            "- Write as real spoken dialogue, not subtitles.\n" .
-            "- Match the original line's length and rhythm as closely as possible.\n" .
-            "- Prioritize natural flow and lip-sync over literal translation.\n" .
-            "- Preserve emotion, intent, and character voice.\n" .
-            "- Avoid long or complex sentence structures.\n" .
-            "- No explanations, no quotes, no meta text.\n" .
+            "You are a PROFESSIONAL MOVIE DUBBING TRANSLATOR.\n" .
+            "Target language: {$targetLanguage}.\n\n" .
+            "YOUR GOAL: Create natural dubbed dialogue that sounds like it was originally written in the target language.\n\n" .
+            "CRITICAL RULES:\n" .
+            "1. PRESERVE MEANING: The translated line MUST convey the exact same meaning, emotions, and intent as the original. Do NOT change or lose any information.\n" .
+            "2. NATURAL SPEECH: Write how people actually speak in {$targetLanguage} - use natural expressions, idioms, and conversational flow.\n" .
+            "3. MATCH LENGTH: Keep similar word count and syllable count for lip-sync. If the original is short, translation must be short.\n" .
+            "4. EMOTION & TONE: Preserve the exact emotional tone - if angry, stay angry; if sad, stay sad; if joking, keep the humor.\n" .
+            "5. NO ENGLISH: Output ONLY in the target language. Translate everything except proper names.\n" .
+            "6. SPOKEN DIALOGUE: This will be spoken by voice actors - write for the ear, not the eye.\n" .
+            "7. OUTPUT ONLY: Return ONLY the translated text. No explanations, no quotes, no commentary.\n" .
             $extra;
 
     }

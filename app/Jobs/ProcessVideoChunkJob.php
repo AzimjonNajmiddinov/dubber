@@ -636,14 +636,16 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
                     'messages' => [
                         [
                             'role' => 'system',
-                            'content' => "You are a professional movie dialogue translator. Translate each numbered line to {$langConfig['name']}.
+                            'content' => "You are a PROFESSIONAL MOVIE DUBBING TRANSLATOR. Translate each numbered line to {$langConfig['name']}.
 
-RULES:
+CRITICAL RULES:
 1. Keep the [N] numbering format in output
-2. Translate ALL words - NO English/foreign words
-3. Keep it natural for spoken dialogue
-4. Match original length closely
-5. {$langConfig['script']}"
+2. PRESERVE MEANING: Each translation MUST convey the EXACT same meaning as the original - do NOT lose any information
+3. NATURAL SPEECH: Use natural {$langConfig['name']} expressions and conversational flow - this is for voice actors to speak
+4. Translate ALL words - NO English/foreign words (except proper names)
+5. Match original length and rhythm closely for lip-sync
+6. Preserve emotion and tone - if angry, stay angry; if joking, keep humor
+7. {$langConfig['script']}"
                         ],
                         ['role' => 'user', 'content' => implode("\n", $numberedTexts)],
                     ],
@@ -702,7 +704,7 @@ RULES:
                     'messages' => [
                         [
                             'role' => 'system',
-                            'content' => "Translate to {$langConfig['name']}. Output ONLY the translation. {$langConfig['script']}"
+                            'content' => "You are a professional movie dubbing translator. Translate to {$langConfig['name']}.\n\nRULES:\n- PRESERVE the exact meaning - do NOT lose any information\n- Use natural spoken {$langConfig['name']} expressions\n- Match the length closely for lip-sync\n- Output ONLY the translation, nothing else\n{$langConfig['script']}"
                         ],
                         ['role' => 'user', 'content' => $text],
                     ],
