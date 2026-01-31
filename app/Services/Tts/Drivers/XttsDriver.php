@@ -78,7 +78,8 @@ class XttsDriver implements TtsDriverInterface
         // Output path (relative to storage)
         $outputRel = "audio/tts/{$videoId}/seg_{$segmentId}.wav";
 
-        $response = Http::timeout(120)
+        // XTTS on CPU is slow - need longer timeout for long segments
+        $response = Http::timeout(600)
             ->post("{$this->baseUrl}/synthesize", [
                 'text' => $text,
                 'voice_id' => $voiceId,

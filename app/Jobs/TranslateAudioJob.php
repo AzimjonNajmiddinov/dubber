@@ -81,7 +81,7 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
 
             if ($segments->isEmpty()) {
                 $video->update(['status' => 'translated']);
-                GenerateTtsSegmentsJob::dispatch($video->id);
+                GenerateTtsSegmentsJobV2::dispatch($video->id);
                 return;
             }
 
@@ -192,7 +192,7 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
             }
 
             $video->update(['status' => 'translated']);
-            GenerateTtsSegmentsJob::dispatch($video->id);
+            GenerateTtsSegmentsJobV2::dispatch($video->id);
 
         } finally {
             optional($lock)->release();

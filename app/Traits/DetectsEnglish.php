@@ -19,21 +19,24 @@ trait DetectsEnglish
             return false;
         }
 
-        // Common English words that would indicate untranslated content
+        // High-confidence English words (excluding short words that overlap with Uzbek Latin)
+        // Avoiding: 'i', 'to', 'or', 'on', 'in', 'as', 'no', 'it' - too common in Uzbek Latin
         $commonEnglishWords = [
-            'the', 'and', 'you', 'your', 'i', 'we', 'they', 'is', 'are', 'was', 'were',
-            'to', 'of', 'in', 'that', 'this', 'it', 'on', 'for', 'with', 'as', 'not',
-            'do', 'does', 'did', 'have', 'has', 'what', 'why', 'when', 'where', 'how',
-            'yes', 'no', 'please', 'thanks', 'thank', 'hello', 'okay', 'just', 'but',
-            'can', 'will', 'would', 'could', 'should', 'been', 'being', 'from', 'or',
+            'the', 'and', 'you', 'your', 'they', 'are', 'was', 'were',
+            'that', 'this', 'for', 'with', 'not',
+            'does', 'did', 'have', 'has', 'what', 'why', 'when', 'where', 'how',
+            'yes', 'please', 'thanks', 'thank', 'hello', 'okay', 'just', 'but',
+            'can', 'will', 'would', 'could', 'should', 'been', 'being', 'from',
+            'here', 'there', 'about', 'because', 'going', 'want', 'know', 'think',
+            'really', 'very', 'something', 'anything', 'nothing', 'everything',
         ];
 
-        // Extract Latin-alphabet words (2+ chars)
-        preg_match_all('/[a-z]{2,}/i', $t, $matches);
+        // Extract Latin-alphabet words (3+ chars to avoid false positives)
+        preg_match_all('/[a-z]{3,}/i', $t, $matches);
         $words = array_map('mb_strtolower', $matches[0] ?? []);
 
-        // Short phrases need special handling - allow them through
-        if (count($words) < 4) {
+        // Short phrases - allow them through
+        if (count($words) < 5) {
             return false;
         }
 
@@ -45,7 +48,11 @@ trait DetectsEnglish
             }
         }
 
-        // If 2+ common English words found, likely English
-        return $hits >= 2;
+        // For longer texts, use ratio-based detection
+        // Text is considered English if >15% of words are common English words
+        $ratio = $hits / count($words);
+
+        // Minimum 5 hits AND >15% ratio for it to be considered English
+        return $hits >= 5 && $ratio > 0.15;
     }
 }

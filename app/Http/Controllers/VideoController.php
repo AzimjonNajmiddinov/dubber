@@ -3,7 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Jobs\ExtractAudioJob;
-use App\Jobs\GenerateTtsSegmentsJob;
+use App\Jobs\GenerateTtsSegmentsJobV2;
 use App\Jobs\MixDubbedAudioJob;
 use App\Jobs\ReplaceVideoAudioJob;
 use App\Models\Speaker;
@@ -226,7 +226,7 @@ class VideoController extends Controller
         // Reset status and dispatch TTS job
         $video->update(['status' => 'translated']);
 
-        GenerateTtsSegmentsJob::dispatch($video->id);
+        GenerateTtsSegmentsJobV2::dispatch($video->id);
 
         return response()->json([
             'success' => true,

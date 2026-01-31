@@ -24,12 +24,51 @@ class SpeakerTuning
         $emotion = strtolower((string) ($speaker->emotion ?? 'neutral'));
         $age     = strtolower((string) ($speaker->age_group ?? 'unknown'));
 
-        // Uzbek Edge voices (keep these stable; swapping voices mid-movie feels wrong)
-        $maleVoice   = 'uz-UZ-SardorNeural';
-        $femaleVoice = 'uz-UZ-MadinaNeural';
+        // Get speaker index for this video to assign different voices
+        $speakerIndex = $this->getSpeakerIndex($video, $speaker, $gender);
 
-        // Voice selection
-        $speaker->tts_voice = ($gender === 'female') ? $femaleVoice : $maleVoice;
+        // Voice pools by language and gender - different speakers get different voices
+        $voicePools = [
+            'uz' => [
+                'male' => [
+                    'uz-UZ-SardorNeural',
+                ],
+                'female' => [
+                    'uz-UZ-MadinaNeural',
+                ],
+            ],
+            'ru' => [
+                'male' => [
+                    'ru-RU-DmitryNeural',
+                ],
+                'female' => [
+                    'ru-RU-SvetlanaNeural',
+                ],
+            ],
+            'en' => [
+                'male' => [
+                    'en-US-GuyNeural',
+                    'en-US-ChristopherNeural',
+                    'en-GB-RyanNeural',
+                    'en-AU-WilliamMultilingualNeural',
+                ],
+                'female' => [
+                    'en-US-JennyNeural',
+                    'en-US-AriaNeural',
+                    'en-GB-SoniaNeural',
+                    'en-AU-NatashaNeural',
+                ],
+            ],
+        ];
+
+        // Determine language pool
+        $lang = $this->isUzbek($target) ? 'uz' : ($this->isRussian($target) ? 'ru' : 'en');
+        $genderKey = ($gender === 'female') ? 'female' : 'male';
+
+        $voices = $voicePools[$lang][$genderKey] ?? $voicePools['en'][$genderKey];
+
+        // Assign voice by cycling through available voices for variety
+        $speaker->tts_voice = $voices[$speakerIndex % count($voices)];
 
         /**
          * Baseline "cinema" cadence:
@@ -40,27 +79,26 @@ class SpeakerTuning
         $pitch = '+0Hz';
         $gain  = 0.0;
 
-        // Gender-based micro tuning (very mild)
+        // Gender-based micro tuning (very mild to avoid unnatural high pitches)
         if ($gender === 'female') {
-            $pitch = '+10Hz';
+            $pitch = '+3Hz';   // Reduced from +10Hz - more natural
             $gain  = 0.3;
         } elseif ($gender === 'male') {
-            $pitch = '-5Hz';
+            $pitch = '-3Hz';   // Reduced from -5Hz
             $gain  = 0.0;
         }
 
-        // Age adjustments (still mild; big deltas sound fake)
-        // You can adapt labels to your whisperx meta if needed.
+        // Age adjustments (mild values to keep it natural, avoid ultrasound-like high pitches)
         if (in_array($age, ['child', 'kid'], true)) {
-            $rate  = '+6%';
-            $pitch = '+35Hz';
+            $rate  = '+4%';
+            $pitch = '+12Hz';  // Reduced from +35Hz - much more natural
             $gain += 0.2;
         } elseif (in_array($age, ['young_adult', 'young'], true)) {
             $rate  = '+1%';
-            $pitch = ($gender === 'female') ? '+12Hz' : '+2Hz';
+            $pitch = ($gender === 'female') ? '+5Hz' : '+2Hz';  // Reduced female pitch
         } elseif (in_array($age, ['senior', 'old'], true)) {
             $rate  = '-3%';
-            $pitch = ($gender === 'female') ? '+5Hz' : '-10Hz';
+            $pitch = ($gender === 'female') ? '+3Hz' : '-6Hz';  // Less extreme
             $gain -= 0.2;
         }
 
@@ -72,31 +110,31 @@ class SpeakerTuning
             case 'angry':
             case 'frustration':
                 $rate = $this->mergeRate($rate, '+3%');
-                $pitch = $this->mergePitchHz($pitch, -5);
+                $pitch = $this->mergePitchHz($pitch, -3);  // Reduced from -5
                 $gain += 0.6;
                 break;
 
             case 'fear':
                 $rate = $this->mergeRate($rate, '+2%');
-                $pitch = $this->mergePitchHz($pitch, +6);
+                $pitch = $this->mergePitchHz($pitch, +4);  // Reduced from +6
                 $gain += 0.2;
                 break;
 
             case 'happy':
                 $rate = $this->mergeRate($rate, '+2%');
-                $pitch = $this->mergePitchHz($pitch, +10);
+                $pitch = $this->mergePitchHz($pitch, +5);  // Reduced from +10
                 $gain += 0.3;
                 break;
 
             case 'excited':
                 $rate = $this->mergeRate($rate, '+4%');
-                $pitch = $this->mergePitchHz($pitch, +14);
+                $pitch = $this->mergePitchHz($pitch, +8);  // Reduced from +14
                 $gain += 0.6;
                 break;
 
             case 'sad':
                 $rate = $this->mergeRate($rate, '-2%');
-                $pitch = $this->mergePitchHz($pitch, -8);
+                $pitch = $this->mergePitchHz($pitch, -5);  // Reduced from -8
                 $gain -= 0.4;
                 break;
 
@@ -105,9 +143,9 @@ class SpeakerTuning
                 break;
         }
 
-        // Clamp to safe ranges (Edge-TTS can get weird outside these)
+        // Clamp to safe ranges (avoid ultrasound-like high pitches)
         $rate = $this->clampRate($rate, -10, +12);      // percent
-        $pitch = $this->clampPitchHz($pitch, -40, +60); // Hz
+        $pitch = $this->clampPitchHz($pitch, -20, +20); // Hz - reduced from -40/+60 to avoid unnatural sound
         $gain = $this->clampFloat($gain, -3.0, +3.0);   // dB
 
         $speaker->tts_rate = $rate;
@@ -119,6 +157,28 @@ class SpeakerTuning
     {
         if ($t === '') return true;
         return str_contains($t, 'uz') || str_contains($t, 'uzbek') || str_contains($t, 'uz-uz') || str_contains($t, 'ўз') || str_contains($t, 'уз');
+    }
+
+    private function isRussian(string $t): bool
+    {
+        return str_contains($t, 'ru') || str_contains($t, 'russian') || str_contains($t, 'рус');
+    }
+
+    /**
+     * Get the index of this speaker among same-gender speakers in the video.
+     * This allows cycling through different voices for variety.
+     */
+    private function getSpeakerIndex(Video $video, Speaker $speaker, string $gender): int
+    {
+        $sameGenderSpeakers = $video->speakers()
+            ->where('gender', $gender)
+            ->orderBy('id')
+            ->pluck('id')
+            ->toArray();
+
+        $index = array_search($speaker->id, $sameGenderSpeakers);
+
+        return $index !== false ? $index : 0;
     }
 
     private function mergeRate(string $base, string $adj): string

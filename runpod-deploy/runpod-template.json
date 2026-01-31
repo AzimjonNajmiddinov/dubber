@@ -1,0 +1,13 @@
+{
+  "name": "XTTS Voice Cloning GPU",
+  "description": "GPU-accelerated XTTS voice cloning service for movie dubbing",
+  "dockerImage": "pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime",
+  "containerDiskInGb": 20,
+  "volumeInGb": 10,
+  "ports": "8000/http",
+  "env": [
+    {"key": "COQUI_TOS_AGREED", "value": "1"},
+    {"key": "PYTHONUNBUFFERED", "value": "1"}
+  ],
+  "startScript": "pip install fastapi uvicorn python-multipart pydantic transformers TTS torchaudio && cd /workspace && if [ ! -f app.py ]; then curl -O https://raw.githubusercontent.com/YOUR_USERNAME/dubber/main/xtts-service/app.py; fi && uvicorn app:app --host 0.0.0.0 --port 8000"
+}

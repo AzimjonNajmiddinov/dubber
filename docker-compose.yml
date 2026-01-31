@@ -231,7 +231,9 @@ services:
       VOICES_PATH: /app/voices
       OMP_NUM_THREADS: "2"
       MKL_NUM_THREADS: "2"
+      COQUI_TOS_AGREED: "1"
     mem_limit: 8g
+    cpus: 2
     restart: unless-stopped
     dns:
       - 1.1.1.1

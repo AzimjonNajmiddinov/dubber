@@ -1,36 +1,27 @@
-FROM python:3.11-slim
+FROM pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime
 
 WORKDIR /app
 
-# Install system dependencies including Rust for TTS build
+# Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     libsndfile1 \
     git \
     curl \
     build-essential \
-    rustc \
-    cargo \
     && rm -rf /var/lib/apt/lists/*
 
 # Upgrade pip
 RUN pip install --upgrade pip setuptools wheel
 
-# Install PyTorch CPU first (lighter)
-RUN pip install --no-cache-dir \
-    --index-url https://download.pytorch.org/whl/cpu \
-    torch==2.2.2 \
-    torchaudio==2.2.2
-
-# Install other dependencies
+# Install dependencies
 RUN pip install --no-cache-dir \
     fastapi==0.109.0 \
     uvicorn[standard]==0.27.0 \
     python-multipart==0.0.6 \
     pydantic==2.5.3
 
-# Install TTS with compatible transformers version
-# TTS requires transformers<4.46 due to BeamSearchScorer import changes
+# Install TTS with compatible transformers
 RUN pip install --no-cache-dir "transformers>=4.33.0,<4.46.0"
 RUN pip install --no-cache-dir TTS>=0.22.0
 
@@ -38,13 +29,14 @@ RUN pip install --no-cache-dir TTS>=0.22.0
 COPY app.py .
 
 # Create directories
-RUN mkdir -p /app/voices /app/cache
+RUN mkdir -p /app/voices /app/cache /var/www/storage/app
 
 # Environment
 ENV PYTHONUNBUFFERED=1
 ENV STORAGE_PATH=/var/www/storage/app
 ENV VOICES_PATH=/app/voices
 ENV CACHE_PATH=/app/cache
+ENV COQUI_TOS_AGREED=1
 
 EXPOSE 8000
 

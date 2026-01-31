@@ -57,6 +57,85 @@ class ReplaceVideoAudioJob implements ShouldQueue, ShouldBeUnique
         }
     }
 
+    /**
+     * Clean up original video and intermediate files after successful dubbing.
+     */
+    private function cleanupOriginalFiles(Video $video, string $origMp4Abs, string $finalWavAbs): void
+    {
+        $deletedFiles = [];
+        $deletedSize = 0;
+
+        try {
+            // 1. Delete original video file
+            if (file_exists($origMp4Abs)) {
+                $deletedSize += filesize($origMp4Abs);
+                @unlink($origMp4Abs);
+                $deletedFiles[] = $video->original_path;
+            }
+
+            // 2. Delete audio stems (vocals.wav, no_vocals.wav, etc.)
+            $stemsDir = Storage::disk('local')->path("audio/stems/{$video->id}");
+            if (is_dir($stemsDir)) {
+                $stemFiles = glob("{$stemsDir}/*");
+                foreach ($stemFiles as $file) {
+                    if (is_file($file)) {
+                        $deletedSize += filesize($file);
+                        @unlink($file);
+                    }
+                }
+                @rmdir($stemsDir);
+                $deletedFiles[] = "audio/stems/{$video->id}/*";
+            }
+
+            // 3. Delete TTS audio files
+            $ttsDir = Storage::disk('local')->path("audio/tts/{$video->id}");
+            if (is_dir($ttsDir)) {
+                $ttsFiles = glob("{$ttsDir}/*");
+                foreach ($ttsFiles as $file) {
+                    if (is_file($file)) {
+                        $deletedSize += filesize($file);
+                        @unlink($file);
+                    }
+                }
+                @rmdir($ttsDir);
+                $deletedFiles[] = "audio/tts/{$video->id}/*";
+            }
+
+            // 4. Delete final mixed audio
+            if (file_exists($finalWavAbs)) {
+                $deletedSize += filesize($finalWavAbs);
+                @unlink($finalWavAbs);
+                $deletedFiles[] = $video->final_audio_path;
+            }
+
+            // 5. Delete extracted audio file
+            $extractedAudio = Storage::disk('local')->path("audio/extracted/{$video->id}.wav");
+            if (file_exists($extractedAudio)) {
+                $deletedSize += filesize($extractedAudio);
+                @unlink($extractedAudio);
+                $deletedFiles[] = "audio/extracted/{$video->id}.wav";
+            }
+
+            // 6. Clear video paths in database (keep dubbed_path)
+            $video->update([
+                'original_path' => null,
+                'final_audio_path' => null,
+            ]);
+
+            Log::info('Cleanup after dubbing complete', [
+                'video_id' => $video->id,
+                'deleted_files' => $deletedFiles,
+                'freed_space_mb' => round($deletedSize / 1024 / 1024, 2),
+            ]);
+
+        } catch (\Throwable $e) {
+            Log::warning('Cleanup after dubbing failed (non-fatal)', [
+                'video_id' => $video->id,
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
+
     public function handle(): void
     {
         $lock = Cache::lock("video:{$this->videoId}:replace_audio", 1800);
@@ -191,9 +270,13 @@ class ReplaceVideoAudioJob implements ShouldQueue, ShouldBeUnique
                 'dubbed_path' => $outRel,
                 'status' => 'dubbed_complete',
             ]);
+
+            // Auto-delete original video and intermediate files to save storage
+            if (config('dubber.cleanup.delete_after_dubbing', true)) {
+                $this->cleanupOriginalFiles($video, $origMp4Abs, $finalWavAbs);
+            }
         } finally {
             optional($lock)->release();
-
         }
     }
 }
