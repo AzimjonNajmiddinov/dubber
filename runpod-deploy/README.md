@@ -2,9 +2,7 @@
 
 Deploy your dubbing app with GPU-accelerated XTTS voice cloning.
 
-## Quick Start (Test XTTS Only)
-
-The fastest way to test GPU performance is to deploy just the XTTS service:
+## Quick Start - One Command Deployment
 
 ### 1. Create RunPod Account
 1. Go to [runpod.io](https://runpod.io) and sign up
@@ -16,35 +14,46 @@ The fastest way to test GPU performance is to deploy just the XTTS service:
    - **RTX 4090** ($0.34/hr) - Best value for testing
    - **RTX 3090** ($0.22/hr) - Cheaper option
    - **A100** ($1.19/hr) - Production quality
-3. Select template: **RunPod Pytorch 2.1**
+3. Select template: **RunPod Pytorch 2.2** (important: has CUDA 12.1)
 4. Set container disk: **20GB** (for model storage)
 5. Click "Deploy"
 
-### 3. Connect and Setup
+### 3. Connect and Run
 
-SSH into your pod or use the web terminal:
+Open the web terminal (click "Connect" → "Connect to Web Terminal") and run:
 
 ```bash
-# Clone your repo
 cd /workspace
-git clone https://github.com/YOUR_USERNAME/dubber.git
-cd dubber
+git clone https://github.com/AzimjonNajmiddinov/dubber.git
+cd dubber/runpod-deploy
+chmod +x runpod-direct.sh
+./runpod-direct.sh
+```
 
-# Build and run XTTS with GPU
-cd xtts-service
-docker build -f Dockerfile.gpu -t xtts-gpu .
-docker run -d --gpus all -p 8000:8000 \
-  -v /workspace/voices:/app/voices \
-  -v /workspace/storage:/var/www/storage/app \
-  -e COQUI_TOS_AGREED=1 \
-  --name xtts \
-  xtts-gpu
+This will:
+- Install all dependencies
+- Download XTTS model (~1.8GB)
+- Start the XTTS API on port 8000
 
-# Wait for model to download (2-3 minutes)
-sleep 180
+### 4. Get Your API URL
 
-# Check GPU status
-curl http://localhost:8000/health
+After deployment, get your RunPod proxy URL:
+1. Go to your pod in RunPod dashboard
+2. Click "Connect" → "HTTP Service [Port 8000]"
+3. Copy the URL (looks like: `https://abc123-8000.proxy.runpod.net`)
+
+### 5. Connect Your Local App
+
+Update your local `.env` file:
+```
+XTTS_SERVICE_URL=https://YOUR_RUNPOD_ID-8000.proxy.runpod.net
+TTS_DRIVER=xtts
+TTS_AUTO_CLONE=true
+```
+
+Restart your queue worker:
+```bash
+docker restart dubber_queue
 ```
 
 ### 4. Test Speed
