@@ -347,12 +347,13 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
     private function tryExtractFromFullStems(string $localPath, float $duration): ?string
     {
         try {
-            $checkResponse = Http::timeout(5)->get("http://demucs:8000/stems-ready/{$this->videoId}");
+            $demucsUrl = config('services.demucs.url', 'http://demucs:8000');
+            $checkResponse = Http::timeout(5)->get("{$demucsUrl}/stems-ready/{$this->videoId}");
             if (!$checkResponse->successful() || !($checkResponse->json()['ready'] ?? false)) {
                 return null;
             }
 
-            $response = Http::timeout(30)->post('http://demucs:8000/extract-from-stems', [
+            $response = Http::timeout(30)->post("{$demucsUrl}/extract-from-stems", [
                 'video_id' => $this->videoId,
                 'start_time' => $this->startTime,
                 'duration' => $duration,
@@ -395,7 +396,8 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
                 return null;
             }
 
-            $response = Http::timeout(120)->post('http://demucs:8000/separate-segment', [
+            $demucsUrl = config('services.demucs.url', 'http://demucs:8000');
+            $response = Http::timeout(120)->post("{$demucsUrl}/separate-segment", [
                 'video_id' => $this->videoId,
                 'input_rel' => $originalAudioRel,
                 'start_time' => $this->startTime,
@@ -459,8 +461,9 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
     {
         try {
             $audioRel = str_replace(Storage::disk('local')->path(''), '', $audioPath);
+            $whisperxUrl = config('services.whisperx.url', 'http://whisperx:8000');
 
-            $response = Http::timeout(120)->post('http://whisperx:8000/analyze', [
+            $response = Http::timeout(120)->post("{$whisperxUrl}/analyze", [
                 'audio_path' => $audioRel,
                 'diarize' => true,
                 'min_speakers' => 1,

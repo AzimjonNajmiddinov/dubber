@@ -75,10 +75,11 @@ class TranscribeForStreamingJob implements ShouldQueue, ShouldBeUnique
             ]);
 
             // Call WhisperX service
+            $whisperxUrl = config('services.whisperx.url', 'http://whisperx:8000');
             $res = Http::timeout(300)
                 ->connectTimeout(5)
                 ->retry(3, 500)
-                ->post('http://whisperx:8000/analyze', [
+                ->post("{$whisperxUrl}/analyze", [
                     'audio_path' => $audioRel,
                 ]);
 

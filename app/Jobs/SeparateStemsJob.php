@@ -80,11 +80,11 @@ class SeparateStemsJob implements ShouldQueue, ShouldBeUnique
                 'estimated_duration_sec' => round($estimatedDuration, 0),
             ]);
 
-            $url = "http://demucs:8000/separate";
+            $demucsUrl = config('services.demucs.url', 'http://demucs:8000');
 
             $res = Http::timeout(1800)
                 ->retry(2, 2000)
-                ->post($url, [
+                ->post("{$demucsUrl}/separate", [
                     'video_id' => $video->id,
                     'input_rel' => $inputRel,
                     'model' => 'htdemucs',

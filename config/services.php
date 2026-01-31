@@ -45,4 +45,12 @@ return [
     'xtts' => [
         'url' => env('XTTS_SERVICE_URL', 'http://xtts:8000'),
     ],
+
+    'whisperx' => [
+        'url' => env('WHISPERX_SERVICE_URL', 'http://whisperx:8000'),
+    ],
+
+    'demucs' => [
+        'url' => env('DEMUCS_SERVICE_URL', 'http://demucs:8000'),
+    ],
 ];

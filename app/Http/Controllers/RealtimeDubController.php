@@ -199,10 +199,11 @@ class RealtimeDubController extends Controller
     {
         // Use WhisperX for transcription
         $audioRel = str_replace(storage_path('app/'), '', $audioPath);
+        $whisperxUrl = config('services.whisperx.url', 'http://whisperx:8000');
 
         try {
             $response = Http::timeout(30)
-                ->post('http://whisperx:8000/analyze', [
+                ->post("{$whisperxUrl}/analyze", [
                     'audio_path' => $audioRel,
                 ]);
 
