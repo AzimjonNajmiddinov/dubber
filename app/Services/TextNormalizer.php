@@ -14,11 +14,52 @@ class TextNormalizer
     {
         $lang = strtolower($language);
 
-        // Convert numbers to words
+        // Normalize Uzbek special characters (o', g') for TTS
+        if (in_array($lang, ['uz', 'uzbek'])) {
+            $text = self::normalizeUzbekCharacters($text);
+        }
+
+        // Expand units/abbreviations FIRST (while numbers are still digits)
+        $text = self::expandAbbreviations($text, $lang);
+
+        // Convert numbers to words AFTER abbreviations
         $text = self::convertNumbersToWords($text, $lang);
 
-        // Expand common abbreviations
-        $text = self::expandAbbreviations($text, $lang);
+        return $text;
+    }
+
+    /**
+     * Normalize Uzbek special characters for TTS.
+     *
+     * Uzbek Latin uses o' and g' for special sounds:
+     * - o' (oʻ) - open O sound
+     * - g' (gʻ) - voiced uvular fricative
+     *
+     * GPT and other sources may use different apostrophe characters:
+     * - U+0027 (') ASCII apostrophe
+     * - U+2019 (') right single quotation mark (curly quote)
+     * - U+02BB (ʻ) modifier letter turned comma
+     * - U+02BC (ʼ) modifier letter apostrophe
+     * - U+0060 (`) grave accent (backtick)
+     *
+     * Edge TTS Uzbek voices expect ASCII apostrophe (').
+     */
+    private static function normalizeUzbekCharacters(string $text): string
+    {
+        // Replace all apostrophe-like characters with ASCII apostrophe
+        // Using regex with Unicode character classes for reliability
+        $patterns = [
+            "/\x{2019}/u",  // RIGHT SINGLE QUOTATION MARK
+            "/\x{2018}/u",  // LEFT SINGLE QUOTATION MARK
+            "/\x{02BB}/u",  // MODIFIER LETTER TURNED COMMA
+            "/\x{02BC}/u",  // MODIFIER LETTER APOSTROPHE
+            "/\x{0060}/u",  // GRAVE ACCENT (backtick)
+            "/\x{00B4}/u",  // ACUTE ACCENT
+            "/\x{02C8}/u",  // MODIFIER LETTER VERTICAL LINE
+            "/\x{055A}/u",  // ARMENIAN APOSTROPHE
+        ];
+
+        $text = preg_replace($patterns, "'", $text);
 
         return $text;
     }
@@ -308,22 +349,29 @@ class TextNormalizer
             'uz', 'uzbek' => [
                 '/\bAQSh\b/i' => 'Amerika Qo\'shma Shtatlari',
                 '/\bBMT\b/i' => 'Birlashgan Millatlar Tashkiloti',
-                '/\bkm\b/' => 'kilometr',
-                '/\bm\b/' => 'metr',
-                '/\bkg\b/' => 'kilogramm',
+                '/(?<=\d)\s*km\b/' => ' kilometr',
+                '/(?<=\d)\s*m\b/' => ' metr',
+                '/(?<=\d)\s*kg\b/' => ' kilogramm',
+                '/(?<=\d)\s*sm\b/' => ' santimetr',
+                '/(?<=\d)\s*mm\b/' => ' millimetr',
             ],
             'ru', 'russian' => [
                 '/\bСША\b/i' => 'Соединённые Штаты Америки',
                 '/\bООН\b/i' => 'Организация Объединённых Наций',
-                '/\bкм\b/' => 'километров',
-                '/\bм\b/' => 'метров',
-                '/\bкг\b/' => 'килограмм',
+                '/(?<=\d)\s*км\b/' => ' километров',
+                '/(?<=\d)\s*м\b/' => ' метров',
+                '/(?<=\d)\s*кг\b/' => ' килограмм',
+                '/(?<=\d)\s*см\b/' => ' сантиметров',
+                '/(?<=\d)\s*мм\b/' => ' миллиметров',
             ],
             default => [
                 '/\bUSA\b/i' => 'United States of America',
                 '/\bUN\b/i' => 'United Nations',
-                '/\bkm\b/' => 'kilometers',
-                '/\bkg\b/' => 'kilograms',
+                '/(?<=\d)\s*km\b/' => ' kilometers',
+                '/(?<=\d)\s*kg\b/' => ' kilograms',
+                '/(?<=\d)\s*m\b/' => ' meters',
+                '/(?<=\d)\s*cm\b/' => ' centimeters',
+                '/(?<=\d)\s*mm\b/' => ' millimeters',
             ],
         };
 

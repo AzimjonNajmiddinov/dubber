@@ -5,6 +5,7 @@ namespace App\Services\Tts\Drivers;
 use App\Contracts\TtsDriverInterface;
 use App\Models\Speaker;
 use App\Models\VideoSegment;
+use App\Services\TextNormalizer;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
@@ -71,6 +72,9 @@ class XttsDriver implements TtsDriverInterface
         $language = $options['language'] ?? $segment->video->target_language ?? 'uz';
         $emotion = $options['emotion'] ?? $segment->emotion ?? $speaker->emotion ?? 'neutral';
         $speed = $options['speed'] ?? 1.0;
+
+        // Normalize text for TTS (converts numbers to words, normalizes apostrophes, etc.)
+        $text = TextNormalizer::normalize($text, $language);
 
         $videoId = $segment->video_id;
         $segmentId = $segment->id;

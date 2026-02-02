@@ -157,6 +157,34 @@ def get_speaker_embedding(voice_id: str):
     return gpt_cond_latent, speaker_embedding
 
 
+def normalize_uzbek_apostrophes(text: str) -> str:
+    """
+    Normalize Uzbek apostrophe characters for consistent TTS.
+
+    Uzbek Latin uses o' and g' for special sounds:
+    - o' (oʻ) - open O sound
+    - g' (gʻ) - voiced uvular fricative
+
+    Different sources may use different apostrophe characters.
+    Normalize all to ASCII apostrophe (').
+    """
+    apostrophe_variants = {
+        ''': "'",   # U+2019 RIGHT SINGLE QUOTATION MARK
+        ''': "'",   # U+2018 LEFT SINGLE QUOTATION MARK
+        'ʻ': "'",   # U+02BB MODIFIER LETTER TURNED COMMA
+        'ʼ': "'",   # U+02BC MODIFIER LETTER APOSTROPHE
+        '`': "'",   # U+0060 GRAVE ACCENT (backtick)
+        '´': "'",   # U+00B4 ACUTE ACCENT
+        'ˈ': "'",   # U+02C8 MODIFIER LETTER VERTICAL LINE
+        '՚': "'",   # U+055A ARMENIAN APOSTROPHE
+    }
+
+    for variant, replacement in apostrophe_variants.items():
+        text = text.replace(variant, replacement)
+
+    return text
+
+
 def split_text_into_chunks(text: str, max_chars: int = MAX_CHUNK_CHARS) -> List[str]:
     """Split text into smaller chunks for faster synthesis."""
     # Split by sentences first
@@ -407,8 +435,13 @@ async def synthesize(request: SynthesizeRequest):
         }
         language = lang_map.get(request.language, "en")
 
+        # Normalize Uzbek apostrophes for consistent pronunciation
+        text = request.text
+        if request.language == "uz":
+            text = normalize_uzbek_apostrophes(text)
+
         # Split into chunks
-        chunks = split_text_into_chunks(request.text)
+        chunks = split_text_into_chunks(text)
         logger.info(f"Synthesizing {len(chunks)} chunks for voice={request.voice_id}")
 
         # Synthesize each chunk with emotion

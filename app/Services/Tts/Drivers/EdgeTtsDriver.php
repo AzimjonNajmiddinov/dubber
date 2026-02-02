@@ -5,6 +5,7 @@ namespace App\Services\Tts\Drivers;
 use App\Contracts\TtsDriverInterface;
 use App\Models\Speaker;
 use App\Models\VideoSegment;
+use App\Services\TextNormalizer;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
@@ -134,6 +135,9 @@ class EdgeTtsDriver implements TtsDriverInterface
 
         @unlink($rawMp3);
         @unlink($outputWav);
+
+        // Normalize text for TTS (converts numbers to words, normalizes apostrophes, etc.)
+        $text = TextNormalizer::normalize($text, $language);
 
         // Write text to temp file to avoid shell escaping issues
         $tmpTxt = "/tmp/tts_{$videoId}_{$segmentId}_" . Str::random(8) . ".txt";
