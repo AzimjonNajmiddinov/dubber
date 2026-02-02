@@ -213,7 +213,11 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
             throw new \RuntimeException("Translated text looks English for segment {$seg->id}");
         }
 
-        $emotion = strtolower((string) ($seg->emotion ?: ($speaker?->emotion ?: 'neutral')));
+        // Detect emotion from segment, speaker, or text analysis
+        $emotion = strtolower((string) ($seg->emotion ?: ($speaker?->emotion ?: '')));
+        if (empty($emotion) || $emotion === 'neutral') {
+            $emotion = $this->detectEmotionFromText($seg->text ?? '', $text);
+        }
         $slotDuration = (float) $seg->end_time - (float) $seg->start_time;
 
         // Calculate speed adjustment
@@ -332,5 +336,54 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
             'xtts' => 'xtts_voice_id',
             default => 'tts_voice',
         };
+    }
+
+    /**
+     * Detect emotion from text using simple heuristics.
+     * Analyzes punctuation, keywords, and patterns to guess emotion.
+     */
+    protected function detectEmotionFromText(string $originalText, string $translatedText): string
+    {
+        $text = mb_strtolower($originalText . ' ' . $translatedText);
+
+        // Check for strong emotions first
+
+        // Angry indicators
+        if (preg_match('/[!]{2,}|!!/', $originalText) ||
+            preg_match('/\b(angry|furious|mad|hate|damn|hell|stop|shut up|get out)\b/i', $text)) {
+            return 'angry';
+        }
+
+        // Excited/Happy indicators
+        if (preg_match('/[!]{1,}.*[!]|wow|yay|great|amazing|wonderful|fantastic|love|happy|glad|excited/i', $text)) {
+            return 'happy';
+        }
+
+        // Question with surprise
+        if (preg_match('/\?{2,}|what\?|really\?|seriously\?/i', $text)) {
+            return 'surprise';
+        }
+
+        // Sad indicators
+        if (preg_match('/\b(sad|sorry|miss|cry|tears|lost|gone|died|dead|unfortunately|regret)\b/i', $text)) {
+            return 'sad';
+        }
+
+        // Fear indicators
+        if (preg_match('/\b(afraid|scared|fear|danger|help|run|careful|watch out|oh no)\b/i', $text)) {
+            return 'fear';
+        }
+
+        // Excitement from exclamation marks
+        if (substr_count($originalText, '!') >= 1) {
+            return 'excited';
+        }
+
+        // Questions are slightly varied
+        if (str_contains($originalText, '?')) {
+            return 'neutral'; // Questions stay neutral but could be curious
+        }
+
+        return 'neutral';
     }
 }
