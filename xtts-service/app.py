@@ -210,20 +210,56 @@ def split_text_into_chunks(text: str, max_chars: int = MAX_CHUNK_CHARS) -> List[
     return chunks if chunks else [text[:max_chars]]
 
 
-def synthesize_chunk(model, text: str, gpt_cond_latent, speaker_embedding, language: str, speed: float) -> torch.Tensor:
-    """Synthesize a single chunk of text."""
+def get_emotion_params(emotion: str) -> dict:
+    """Get synthesis parameters based on emotion for more expressive speech."""
+    emotion = emotion.lower() if emotion else "neutral"
+
+    # Base parameters
+    params = {
+        "temperature": 0.75,
+        "length_penalty": 1.0,
+        "repetition_penalty": 2.0,
+        "top_k": 50,
+        "top_p": 0.85,
+        "speed_mult": 1.0,  # Multiplier for base speed
+    }
+
+    # Adjust parameters based on emotion for more expressive speech
+    emotion_configs = {
+        "happy": {"temperature": 0.85, "top_p": 0.9, "speed_mult": 1.05, "length_penalty": 0.9},
+        "excited": {"temperature": 0.9, "top_p": 0.92, "speed_mult": 1.1, "length_penalty": 0.85},
+        "sad": {"temperature": 0.65, "top_p": 0.8, "speed_mult": 0.9, "length_penalty": 1.1},
+        "angry": {"temperature": 0.8, "top_p": 0.88, "speed_mult": 1.08, "repetition_penalty": 2.5},
+        "fear": {"temperature": 0.82, "top_p": 0.87, "speed_mult": 1.12, "length_penalty": 0.9},
+        "surprise": {"temperature": 0.88, "top_p": 0.9, "speed_mult": 1.05},
+        "disgust": {"temperature": 0.7, "top_p": 0.82, "speed_mult": 0.95},
+        "neutral": {"temperature": 0.75, "top_p": 0.85, "speed_mult": 1.0},
+    }
+
+    if emotion in emotion_configs:
+        params.update(emotion_configs[emotion])
+
+    return params
+
+
+def synthesize_chunk(model, text: str, gpt_cond_latent, speaker_embedding, language: str, speed: float, emotion: str = "neutral") -> torch.Tensor:
+    """Synthesize a single chunk of text with emotion-aware parameters."""
+    # Get emotion-specific parameters
+    emo_params = get_emotion_params(emotion)
+    final_speed = speed * emo_params["speed_mult"]
+
     with torch.inference_mode():
         out = model.inference(
             text=text,
             language=language,
             gpt_cond_latent=gpt_cond_latent,
             speaker_embedding=speaker_embedding,
-            speed=speed,
-            temperature=0.7,  # Slightly lower for speed
-            length_penalty=1.0,
-            repetition_penalty=2.0,
-            top_k=50,
-            top_p=0.85,
+            speed=final_speed,
+            temperature=emo_params["temperature"],
+            length_penalty=emo_params["length_penalty"],
+            repetition_penalty=emo_params["repetition_penalty"],
+            top_k=emo_params["top_k"],
+            top_p=emo_params["top_p"],
             enable_text_splitting=False,  # We handle splitting ourselves
         )
     wav = out["wav"]
@@ -375,13 +411,16 @@ async def synthesize(request: SynthesizeRequest):
         chunks = split_text_into_chunks(request.text)
         logger.info(f"Synthesizing {len(chunks)} chunks for voice={request.voice_id}")
 
-        # Synthesize each chunk
+        # Synthesize each chunk with emotion
         audio_segments = []
+        emotion = request.emotion or "neutral"
+        logger.info(f"Synthesizing with emotion: {emotion}")
+
         for i, chunk in enumerate(chunks):
             logger.info(f"  Chunk {i+1}/{len(chunks)}: {len(chunk)} chars")
             wav = synthesize_chunk(
                 model, chunk, gpt_cond_latent, speaker_embedding,
-                language, request.speed
+                language, request.speed, emotion
             )
             audio_segments.append(wav)
 
