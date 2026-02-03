@@ -446,12 +446,8 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
 
         $text = $this->transcribeOpenAI($audioPath);
         if (!empty($text)) {
-            return [[
-                'start' => 0,
-                'end' => $this->endTime - $this->startTime,
-                'text' => $text,
-                'speaker' => 'SPEAKER_00',
-            ]];
+            // Split text into sentences and distribute evenly across chunk duration
+            return $this->splitTextIntoSegments($text, $this->endTime - $this->startTime);
         }
 
         return [];
@@ -629,7 +625,7 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
             }
 
             $response = Http::withToken($apiKey)
-                ->timeout(60)
+                ->timeout(120)
                 ->post('https://api.openai.com/v1/chat/completions', [
                     'model' => 'gpt-4o-mini',
                     'temperature' => 0.3,
@@ -697,7 +693,7 @@ CRITICAL RULES:
 
         try {
             $response = Http::withToken($apiKey)
-                ->timeout(30)
+                ->timeout(120)
                 ->post('https://api.openai.com/v1/chat/completions', [
                     'model' => 'gpt-4o-mini',
                     'temperature' => 0.3,
@@ -1384,5 +1380,70 @@ CRITICAL RULES:
         ]);
 
         return (float)trim($result->output());
+    }
+
+    /**
+     * Split a block of text into sentence-based segments distributed across the duration.
+     * Used as fallback when WhisperX is unavailable and OpenAI returns a single text block.
+     */
+    private function splitTextIntoSegments(string $text, float $duration): array
+    {
+        // Split by sentence boundaries
+        $sentences = preg_split('/(?<=[.!?。])\s+/u', trim($text), -1, PREG_SPLIT_NO_EMPTY);
+
+        if (empty($sentences)) {
+            return [[
+                'start' => 0,
+                'end' => $duration,
+                'text' => $text,
+                'speaker' => 'SPEAKER_00',
+            ]];
+        }
+
+        // Group sentences so each segment has reasonable length (max ~200 chars)
+        $groups = [];
+        $current = '';
+        foreach ($sentences as $sentence) {
+            if (mb_strlen($current) > 0 && mb_strlen($current . ' ' . $sentence) > 200) {
+                $groups[] = trim($current);
+                $current = $sentence;
+            } else {
+                $current .= ($current ? ' ' : '') . $sentence;
+            }
+        }
+        if (mb_strlen($current) > 0) {
+            $groups[] = trim($current);
+        }
+
+        if (empty($groups)) {
+            return [[
+                'start' => 0,
+                'end' => $duration,
+                'text' => $text,
+                'speaker' => 'SPEAKER_00',
+            ]];
+        }
+
+        // Distribute time proportionally based on text length
+        $totalChars = array_sum(array_map('mb_strlen', $groups));
+        $segments = [];
+        $currentTime = 0.0;
+
+        foreach ($groups as $i => $group) {
+            $ratio = mb_strlen($group) / max(1, $totalChars);
+            $segDuration = $ratio * $duration;
+            $endTime = min($currentTime + $segDuration, $duration);
+
+            $segments[] = [
+                'start' => round($currentTime, 3),
+                'end' => round($endTime, 3),
+                'text' => $group,
+                'speaker' => 'SPEAKER_00',
+            ];
+
+            $currentTime = $endTime;
+        }
+
+        return $segments;
     }
 }
