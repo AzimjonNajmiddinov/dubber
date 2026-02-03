@@ -27,6 +27,9 @@ return [
 
         // Preferred driver for voice cloning
         'cloning_driver' => env('TTS_CLONING_DRIVER', 'xtts'),
+
+        // Use SSML markup for Edge-TTS (per-sentence prosody, breaks, intonation)
+        'edge_ssml' => env('TTS_EDGE_SSML', true),
     ],
 
     // Uzbek Edge TTS voices available on your system:

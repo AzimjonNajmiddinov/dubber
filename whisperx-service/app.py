@@ -1,5 +1,7 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
+import tempfile
+import shutil
 import logging
 
 import os
@@ -28,6 +30,15 @@ BASE_DIR = "/var/www/storage/app"
 HF_TOKEN = os.environ.get("HF_TOKEN")
 if not HF_TOKEN:
     raise RuntimeError("HF_TOKEN is required")
+
+# Login to HuggingFace Hub so all downloads use the token automatically
+# (avoids deprecated use_auth_token parameter)
+try:
+    from huggingface_hub import login as hf_login
+    hf_login(token=HF_TOKEN, add_to_git_credential=False)
+    logger.info("HuggingFace Hub login successful")
+except Exception as e:
+    logger.warning(f"HuggingFace Hub login failed: {e}")
 
 # You can override these via env if you want
 WHISPER_MODEL_NAME = os.environ.get("WHISPER_MODEL", "base")
@@ -160,11 +171,31 @@ def get_diarize_pipeline() -> Optional[DiarizationPipeline]:
         return _diarize_pipeline
     with _state_lock:
         if _diarize_pipeline is None:
-            _diarize_pipeline = DiarizationPipeline(
-                model_name=DIARIZATION_MODEL,
-                use_auth_token=HF_TOKEN,
-                device=DEVICE,
-            )
+            # Try standard init first, fall back to manual pipeline creation
+            # (newer huggingface_hub removed use_auth_token parameter)
+            try:
+                _diarize_pipeline = DiarizationPipeline(
+                    model_name=DIARIZATION_MODEL,
+                    use_auth_token=HF_TOKEN,
+                    device=DEVICE,
+                )
+            except TypeError:
+                logger.info("Falling back to manual diarization pipeline init (use_auth_token deprecated)")
+                try:
+                    from pyannote.audio import Pipeline as PyannotePipeline
+                    pipe = PyannotePipeline.from_pretrained(DIARIZATION_MODEL)
+                    pipe = pipe.to(torch.device(DEVICE))
+                    # Create DiarizationPipeline instance manually
+                    dp = object.__new__(DiarizationPipeline)
+                    dp.model = pipe
+                    dp.device = DEVICE
+                    _diarize_pipeline = dp
+                except Exception as e:
+                    logger.error(f"Diarization pipeline fallback also failed: {e}")
+                    return None
+            except Exception as e:
+                logger.error(f"Diarization pipeline init failed: {e}")
+                return None
     return _diarize_pipeline
 
 
@@ -321,25 +352,22 @@ def ready():
         return {"ok": False, "error": str(e)}
 
 
-@app.post("/analyze")
-def analyze(req: AnalyzeRequest):
-    # Lock prevents multiple jobs from loading models simultaneously (and spiking RAM).
-    with _analyze_lock:
+def _analyze_audio(audio_path: str) -> dict:
+    """Core analysis logic shared by path-based and upload endpoints."""
+    # 1) TRANSCRIBE
+    whisper_model = get_whisper_model()
+    whisper_segments, info = whisper_model.transcribe(audio_path, vad_filter=True)
+    segments = [
+        {"start": float(s.start), "end": float(s.end), "text": s.text.strip()}
+        for s in whisper_segments
+    ]
+
+    # 2) DIARIZE (optional - gracefully degrade if unavailable)
+    diar_rows = []
+    if ENABLE_DIARIZATION:
         try:
-            audio_path = resolve_audio_path(req.audio_path)
-
-            # 1) TRANSCRIBE
-            whisper_model = get_whisper_model()
-            whisper_segments, info = whisper_model.transcribe(audio_path, vad_filter=True)
-            segments = [
-                {"start": float(s.start), "end": float(s.end), "text": s.text.strip()}
-                for s in whisper_segments
-            ]
-
-            # 2) DIARIZE (optional)
-            diar_rows = []
-            if ENABLE_DIARIZATION:
-                diarize = get_diarize_pipeline()
+            diarize = get_diarize_pipeline()
+            if diarize is not None:
                 diarization_df = diarize(audio_path)
                 diar_rows = diarization_df.to_dict("records")
 
@@ -347,105 +375,78 @@ def analyze(req: AnalyzeRequest):
                 print(f"[DIARIZE] Found {len(diar_rows)} speaker segments", flush=True)
                 for i, row in enumerate(diar_rows[:30]):  # limit to 30 for readability
                     print(f"  Diar[{i}]: {row['start']:.2f}-{row['end']:.2f} -> {row['speaker']}", flush=True)
-
-            # 3) Assign speaker to each segment using overlap-based matching
-            final_segments = []
-            print(f"[WHISPER] Found {len(segments)} transcription segments", flush=True)
-            for i, seg in enumerate(segments[:30]):
-                print(f"  Seg[{i}]: {seg['start']:.2f}-{seg['end']:.2f} text='{seg['text'][:50]}...'", flush=True)
-
-            if diar_rows:
-                print(f"[ASSIGN] Assigning speakers to {len(segments)} transcription segments", flush=True)
-                for seg in segments:
-                    seg_start = float(seg["start"])
-                    seg_end = float(seg["end"])
-
-                    # Find speaker with maximum overlap
-                    best_speaker = "SPEAKER_UNKNOWN"
-                    best_overlap = 0.0
-
-                    for row in diar_rows:
-                        row_start = float(row["start"])
-                        row_end = float(row["end"])
-
-                        # Calculate overlap
-                        overlap_start = max(seg_start, row_start)
-                        overlap_end = min(seg_end, row_end)
-                        overlap = max(0.0, overlap_end - overlap_start)
-
-                        if overlap > best_overlap:
-                            best_overlap = overlap
-                            best_speaker = str(row["speaker"])
-
-                    # Fallback: if no overlap found, use closest speaker by midpoint
-                    if best_overlap == 0.0:
-                        seg_mid = (seg_start + seg_end) / 2
-                        min_dist = float("inf")
-                        for row in diar_rows:
-                            row_mid = (float(row["start"]) + float(row["end"])) / 2
-                            dist = abs(seg_mid - row_mid)
-                            if dist < min_dist:
-                                min_dist = dist
-                                best_speaker = str(row["speaker"])
-                        print(f"  [ASSIGN] Seg[{seg_start:.2f}-{seg_end:.2f}] NO OVERLAP, closest={best_speaker}, min_dist={min_dist:.2f}s", flush=True)
-                    else:
-                        print(f"  [ASSIGN] Seg[{seg_start:.2f}-{seg_end:.2f}] overlap={best_overlap:.2f}s -> {best_speaker}", flush=True)
-
-                    final_segments.append({**seg, "speaker": best_speaker})
             else:
-                print("[ASSIGN] No diarization rows - assigning all to SPEAKER_0", flush=True)
-                for seg in segments:
-                    final_segments.append({**seg, "speaker": "SPEAKER_0"})
+                print("[DIARIZE] Pipeline not available, skipping diarization", flush=True)
+        except Exception as e:
+            print(f"[DIARIZE] Failed: {e}, continuing without diarization", flush=True)
+            diar_rows = []
 
-            # 4) Speaker-level meta (optional / safe defaults)
-            speakers: Dict[str, Dict[str, Any]] = {}
-            if diar_rows:
-                full_y, sr = load_audio_mono_16k(audio_path)
+    # 3) Assign speaker to each segment using overlap-based matching
+    final_segments = []
+    print(f"[WHISPER] Found {len(segments)} transcription segments", flush=True)
+    for i, seg in enumerate(segments[:30]):
+        print(f"  Seg[{i}]: {seg['start']:.2f}-{seg['end']:.2f} text='{seg['text'][:50]}...'", flush=True)
 
-                by_spk: Dict[str, list] = {}
-                for r in diar_rows:
-                    spk = str(r.get("speaker", "SPEAKER_UNKNOWN"))
-                    by_spk.setdefault(spk, []).append({
-                        "start": float(r["start"]),
-                        "end": float(r["end"]),
-                    })
+    if diar_rows:
+        print(f"[ASSIGN] Assigning speakers to {len(segments)} transcription segments", flush=True)
+        for seg in segments:
+            seg_start = float(seg["start"])
+            seg_end = float(seg["end"])
 
-                for spk, rows in by_spk.items():
-                    y_spk = concat_speaker_audio(full_y, sr, rows)
-                    if y_spk is None:
-                        speakers[spk] = {
-                            "gender": "unknown",
-                            "gender_confidence": None,
-                            "age_group": "unknown",
-                            "pitch_median_hz": None,
-                            "emotion": "neutral",
-                            "emotion_confidence": None,
-                        }
-                        continue
+            # Find speaker with maximum overlap
+            best_speaker = "SPEAKER_UNKNOWN"
+            best_overlap = 0.0
 
-                    gender, gconf = predict_gender(y_spk, sr=sr) if ENABLE_GENDER else ("unknown", None)
-                    age_group, pitch_med = estimate_age_group_from_pitch(y_spk, sr=sr)
+            for row in diar_rows:
+                row_start = float(row["start"])
+                row_end = float(row["end"])
 
-                    emotion, econf = ("neutral", None)
-                    if ENABLE_EMOTION:
-                        tmp_path = f"/tmp/spk_{spk.replace('/', '_')}.wav"
-                        sf.write(tmp_path, y_spk, sr)
-                        emotion, econf = predict_emotion(tmp_path)
-                        try:
-                            os.remove(tmp_path)
-                        except Exception:
-                            pass
+                # Calculate overlap
+                overlap_start = max(seg_start, row_start)
+                overlap_end = min(seg_end, row_end)
+                overlap = max(0.0, overlap_end - overlap_start)
 
-                    speakers[spk] = {
-                        "gender": gender,
-                        "gender_confidence": gconf,
-                        "age_group": age_group,
-                        "pitch_median_hz": pitch_med,
-                        "emotion": emotion,
-                        "emotion_confidence": econf,
-                    }
+                if overlap > best_overlap:
+                    best_overlap = overlap
+                    best_speaker = str(row["speaker"])
+
+            # Fallback: if no overlap found, use closest speaker by midpoint
+            if best_overlap == 0.0:
+                seg_mid = (seg_start + seg_end) / 2
+                min_dist = float("inf")
+                for row in diar_rows:
+                    row_mid = (float(row["start"]) + float(row["end"])) / 2
+                    dist = abs(seg_mid - row_mid)
+                    if dist < min_dist:
+                        min_dist = dist
+                        best_speaker = str(row["speaker"])
+                print(f"  [ASSIGN] Seg[{seg_start:.2f}-{seg_end:.2f}] NO OVERLAP, closest={best_speaker}, min_dist={min_dist:.2f}s", flush=True)
             else:
-                speakers["SPEAKER_0"] = {
+                print(f"  [ASSIGN] Seg[{seg_start:.2f}-{seg_end:.2f}] overlap={best_overlap:.2f}s -> {best_speaker}", flush=True)
+
+            final_segments.append({**seg, "speaker": best_speaker})
+    else:
+        print("[ASSIGN] No diarization rows - assigning all to SPEAKER_0", flush=True)
+        for seg in segments:
+            final_segments.append({**seg, "speaker": "SPEAKER_0"})
+
+    # 4) Speaker-level meta (optional / safe defaults)
+    speakers: Dict[str, Dict[str, Any]] = {}
+    if diar_rows:
+        full_y, sr = load_audio_mono_16k(audio_path)
+
+        by_spk: Dict[str, list] = {}
+        for r in diar_rows:
+            spk = str(r.get("speaker", "SPEAKER_UNKNOWN"))
+            by_spk.setdefault(spk, []).append({
+                "start": float(r["start"]),
+                "end": float(r["end"]),
+            })
+
+        for spk, rows in by_spk.items():
+            y_spk = concat_speaker_audio(full_y, sr, rows)
+            if y_spk is None:
+                speakers[spk] = {
                     "gender": "unknown",
                     "gender_confidence": None,
                     "age_group": "unknown",
@@ -453,15 +454,82 @@ def analyze(req: AnalyzeRequest):
                     "emotion": "neutral",
                     "emotion_confidence": None,
                 }
+                continue
 
-            return {
-                "language": getattr(info, "language", None),
-                "segments": final_segments,
-                "speakers": speakers,
+            gender, gconf = predict_gender(y_spk, sr=sr) if ENABLE_GENDER else ("unknown", None)
+            age_group, pitch_med = estimate_age_group_from_pitch(y_spk, sr=sr)
+
+            emotion, econf = ("neutral", None)
+            if ENABLE_EMOTION:
+                tmp_path = f"/tmp/spk_{spk.replace('/', '_')}.wav"
+                sf.write(tmp_path, y_spk, sr)
+                emotion, econf = predict_emotion(tmp_path)
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+
+            speakers[spk] = {
+                "gender": gender,
+                "gender_confidence": gconf,
+                "age_group": age_group,
+                "pitch_median_hz": pitch_med,
+                "emotion": emotion,
+                "emotion_confidence": econf,
             }
+    else:
+        speakers["SPEAKER_0"] = {
+            "gender": "unknown",
+            "gender_confidence": None,
+            "age_group": "unknown",
+            "pitch_median_hz": None,
+            "emotion": "neutral",
+            "emotion_confidence": None,
+        }
 
+    return {
+        "language": getattr(info, "language", None),
+        "segments": final_segments,
+        "speakers": speakers,
+    }
+
+
+@app.post("/analyze")
+def analyze(req: AnalyzeRequest):
+    """Analyze audio by file path (requires shared filesystem)."""
+    with _analyze_lock:
+        try:
+            audio_path = resolve_audio_path(req.audio_path)
+            return _analyze_audio(audio_path)
         except HTTPException:
             raise
         except Exception as e:
             traceback.print_exc()
             return {"error": "whisperx_internal_error", "message": str(e)}
+
+
+@app.post("/analyze-upload")
+def analyze_upload(audio: UploadFile = File(...)):
+    """Analyze audio via file upload (for remote clients without shared filesystem)."""
+    with _analyze_lock:
+        tmp_path = None
+        try:
+            # Save uploaded file to temp location
+            suffix = os.path.splitext(audio.filename or "audio.wav")[1] or ".wav"
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix, dir="/tmp") as tmp:
+                shutil.copyfileobj(audio.file, tmp)
+                tmp_path = tmp.name
+
+            print(f"[UPLOAD] Received {audio.filename}, saved to {tmp_path} ({os.path.getsize(tmp_path)} bytes)", flush=True)
+            return _analyze_audio(tmp_path)
+        except HTTPException:
+            raise
+        except Exception as e:
+            traceback.print_exc()
+            return {"error": "whisperx_internal_error", "message": str(e)}
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass

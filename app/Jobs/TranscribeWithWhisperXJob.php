@@ -127,6 +127,18 @@ class TranscribeWithWhisperXJob implements ShouldQueue, ShouldBeUnique
                     'audio_path' => $audioRel, // RELATIVE to /var/www/storage/app inside whisperx container
                 ]);
 
+            // If path-based fails (404 = file not found on remote), try file upload
+            if ($res->status() === 404 && file_exists($audioAbs)) {
+                Log::info('WhisperX path not found, using file upload', [
+                    'video_id' => $video->id,
+                    'audio_path' => $audioRel,
+                ]);
+                $res = Http::timeout(300)
+                    ->connectTimeout(5)
+                    ->attach('audio', file_get_contents($audioAbs), basename($audioAbs))
+                    ->post("{$whisperxUrl}/analyze-upload");
+            }
+
             if ($res->failed()) {
                 Log::error('WhisperX HTTP failed', [
                     'video_id' => $video->id,

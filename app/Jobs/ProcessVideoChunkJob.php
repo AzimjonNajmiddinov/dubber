@@ -6,6 +6,8 @@ use App\Models\Video;
 use App\Models\VideoSegment;
 use App\Models\Speaker;
 use App\Services\TextNormalizer;
+use App\Services\Tts\TtsManager;
+use App\Services\TextToSpeech\NaturalSpeechProcessor;
 use App\Traits\DetectsEnglish;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldBeUnique;
@@ -110,7 +112,9 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
         $this->extractAudioCombined($videoPath, $audioHqPath, $audioTranscribePath, $this->startTime, $duration);
 
         // OPTIMIZATION 2: Early transcription to detect silence BEFORE stem separation
-        $segments = $this->transcribe($audioTranscribePath);
+        $transcription = $this->transcribe($audioTranscribePath);
+        $segments = $transcription['segments'];
+        $speakerMeta = $transcription['speaker_meta'];
 
         if (empty($segments)) {
             Log::info('No speech in chunk - fast path', ['chunk' => $this->chunkIndex]);
@@ -128,7 +132,7 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
         $vocalsPath = $stemResults['vocals'];
 
         // OPTIMIZATION 4: Batch translation with caching + voice cloning
-        $processedSegments = $this->processSegmentsBatched($video, $segments, $vocalsPath);
+        $processedSegments = $this->processSegmentsBatched($video, $segments, $vocalsPath, $speakerMeta);
 
         // OPTIMIZATION 5: Parallel TTS generation
         $ttsFiles = $this->generateAllTTSParallel($video, $processedSegments, $chunkDirAbs);
@@ -480,50 +484,93 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
         }
     }
 
+    /**
+     * Transcribe audio and return segments with optional speaker metadata.
+     * @return array{segments: array, speaker_meta: array}
+     */
     private function transcribe(string $audioPath): array
     {
-        $segments = $this->transcribeWhisperX($audioPath);
-        if (!empty($segments)) return $segments;
+        $result = $this->transcribeWhisperX($audioPath);
+        if (!empty($result['segments'])) return $result;
 
         $text = $this->transcribeOpenAI($audioPath);
         if (!empty($text)) {
-            // Split text into sentences and distribute evenly across chunk duration
-            return $this->splitTextIntoSegments($text, $this->endTime - $this->startTime);
+            return [
+                'segments' => $this->splitTextIntoSegments($text, $this->endTime - $this->startTime),
+                'speaker_meta' => [],
+            ];
         }
 
-        return [];
+        return ['segments' => [], 'speaker_meta' => []];
     }
 
+    /**
+     * @return array{segments: array, speaker_meta: array}
+     */
     private function transcribeWhisperX(string $audioPath): array
     {
         try {
-            $audioRel = str_replace(Storage::disk('local')->path(''), '', $audioPath);
             $whisperxUrl = config('services.whisperx.url', 'http://whisperx:8000');
 
+            // Try path-based first (shared filesystem), fall back to file upload (remote)
+            $audioRel = str_replace(Storage::disk('local')->path(''), '', $audioPath);
             $response = Http::timeout(120)->post("{$whisperxUrl}/analyze", [
                 'audio_path' => $audioRel,
-                'diarize' => true,
-                'min_speakers' => 1,
-                'max_speakers' => 6,
             ]);
 
-            if ($response->failed()) return [];
+            // If path-based fails (404 = file not found on remote), try file upload
+            if ($response->status() === 404 && file_exists($audioPath)) {
+                Log::info('WhisperX path not found, using file upload', [
+                    'audio_path' => $audioRel,
+                ]);
+                $response = Http::timeout(180)
+                    ->attach('audio', file_get_contents($audioPath), basename($audioPath))
+                    ->post("{$whisperxUrl}/analyze-upload");
+            }
+
+            if ($response->failed()) {
+                Log::warning('WhisperX request failed', [
+                    'status' => $response->status(),
+                    'body' => mb_substr($response->body(), 0, 500),
+                ]);
+                return ['segments' => [], 'speaker_meta' => []];
+            }
+
+            // Check for error payload
+            if ($response->json('error')) {
+                Log::warning('WhisperX returned error', [
+                    'error' => $response->json('error'),
+                    'message' => $response->json('message'),
+                ]);
+                return ['segments' => [], 'speaker_meta' => []];
+            }
 
             $segments = $response->json()['segments'] ?? [];
+            $speakerMeta = $response->json()['speakers'] ?? [];
 
-            return collect($segments)
+            $parsedSegments = collect($segments)
                 ->map(fn($seg) => [
                     'start' => (float)($seg['start'] ?? 0),
                     'end' => (float)($seg['end'] ?? 0),
                     'text' => trim($seg['text'] ?? ''),
                     'speaker' => $seg['speaker'] ?? 'SPEAKER_00',
+                    'emotion' => $seg['emotion'] ?? null,
+                    'emotion_confidence' => $seg['emotion_confidence'] ?? null,
                 ])
                 ->filter(fn($s) => !empty($s['text']) && $s['end'] > $s['start'])
                 ->values()
                 ->all();
 
+            Log::info('WhisperX transcription result', [
+                'segments' => count($parsedSegments),
+                'speakers' => count($speakerMeta),
+            ]);
+
+            return ['segments' => $parsedSegments, 'speaker_meta' => $speakerMeta];
+
         } catch (\Exception $e) {
-            return [];
+            Log::error('WhisperX transcription exception', ['error' => $e->getMessage()]);
+            return ['segments' => [], 'speaker_meta' => []];
         }
     }
 
@@ -550,7 +597,7 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
     /**
      * OPTIMIZATION: Process segments with batched translations and caching
      */
-    private function processSegmentsBatched(Video $video, array $segments, ?string $vocalsPath = null): array
+    private function processSegmentsBatched(Video $video, array $segments, ?string $vocalsPath = null, array $speakerMeta = []): array
     {
         $processed = [];
         $speakerCache = [];
@@ -562,7 +609,8 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
         foreach ($segments as $i => $seg) {
             $speakerKey = $seg['speaker'];
             if (!isset($speakerCache[$speakerKey])) {
-                $speaker = $this->getOrCreateSpeaker($video, $speakerKey);
+                $meta = $speakerMeta[$speakerKey] ?? [];
+                $speaker = $this->getOrCreateSpeaker($video, $speakerKey, $meta);
                 $speakerCache[$speakerKey] = $speaker;
 
                 // Attempt voice cloning for new speakers (if XTTS available and not already cloned)
@@ -584,6 +632,7 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
                     'text' => $seg['text'],
                     'translated' => $cached,
                     'speaker' => $speakerCache[$speakerKey],
+                    'emotion' => $this->detectSegmentEmotion($seg, $speakerCache[$speakerKey]),
                 ];
             } else {
                 $textsToTranslate[$i] = $seg['text'];
@@ -594,6 +643,12 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
         // Batch translate remaining texts
         if (!empty($textsToTranslate)) {
             $translations = $this->translateBatch(array_values($textsToTranslate), $video->target_language);
+
+                // Validate Uzbek grammar on all new translations as a batch
+            $isUzbek = in_array(strtolower($video->target_language), ['uz', 'uzbek']);
+            if ($isUzbek && !empty($translations)) {
+                $translations = $this->validateUzbekGrammar($translations);
+            }
 
             foreach ($segmentIndices as $idx => $segmentIndex) {
                 $originalText = $textsToTranslate[$segmentIndex];
@@ -613,6 +668,7 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
                     'text' => $seg['text'],
                     'translated' => $translated,
                     'speaker' => $speakerCache[$speakerKey],
+                    'emotion' => $this->detectSegmentEmotion($seg, $speakerCache[$speakerKey]),
                 ];
             }
         }
@@ -634,20 +690,54 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
     {
         if (empty($texts)) return [];
 
+        $uzbekGrammarRules = <<<'RULES'
+
+UZBEK GRAMMAR RULES (CRITICAL - follow exactly):
+- FORMALITY CONSISTENCY: Determine formality from the source text.
+  If source uses informal "ты/you" (casual), use "sen" forms EVERYWHERE:
+    * Imperative: bare verb stem (e.g. o'yna, qara, ket, ol)
+    * Present: -san (e.g. o'ynaysan, borasan)
+    * Past: -ng NEVER, use -Ø or -ng only for siz. For sen past: -ding (e.g. o'ynading, ko'rding)
+  If source uses formal "Вы/You" (polite), use "siz" forms EVERYWHERE:
+    * Imperative: stem + -ng (e.g. o'ynang, qarang, keting, oling)
+    * Present: -siz (e.g. o'ynaysiz, borasiz)
+    * Past: -dingiz (e.g. o'ynadingiz, ko'rdingiz)
+  NEVER MIX: "sen" with "-ng" imperatives or "siz" with bare-stem imperatives.
+- VERB CONJUGATION:
+  Present tense: stem + -a/-y + person (men: -man, sen: -san, u: -di, biz: -miz, siz: -siz)
+  Past tense: stem + -di + person (men: -m, sen: -ng, u: -Ø, biz: -k, siz: -ngiz)
+  Imperative: sen = bare stem, siz = stem + -ng
+- APOSTROPHES: Always use ASCII apostrophe (') in o', g', sh, ch combinations.
+- EXAMPLES (informal/sen):
+  "Играй своим камнем" → "O'z toshing bilan o'yna" (NOT o'ynang)
+  "Посмотри на это" → "Bunga qara" (NOT qarang)
+  "Иди сюда" → "Bu yoqqa kel" (NOT keling)
+- EXAMPLES (formal/siz):
+  "Играйте своим камнем" → "O'z toshingiz bilan o'ynang"
+  "Посмотрите на это" → "Bunga qarang"
+  "Идите сюда" → "Bu yoqqa keling"
+RULES;
+
         $langConfig = match (strtolower($targetLang)) {
             'uz', 'uzbek' => [
                 'name' => 'Uzbek',
+                'model' => 'gpt-4o',
                 'script' => 'Use ONLY Latin script (like: ko\'rganingiz, rahmat, yaxshi). NEVER use Cyrillic letters.',
+                'grammar_rules' => $uzbekGrammarRules,
             ],
             'ru', 'russian' => [
                 'name' => 'Russian',
+                'model' => 'gpt-4o-mini',
                 'script' => 'Use Cyrillic script.',
+                'grammar_rules' => '',
             ],
             'en', 'english' => [
                 'name' => 'English',
+                'model' => 'gpt-4o-mini',
                 'script' => '',
+                'grammar_rules' => '',
             ],
-            default => ['name' => $targetLang, 'script' => ''],
+            default => ['name' => $targetLang, 'model' => 'gpt-4o-mini', 'script' => '', 'grammar_rules' => ''],
         };
 
         $apiKey = config('services.openai.key');
@@ -665,10 +755,12 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
                 $numberedTexts[] = "[" . ($i + 1) . "] " . $text;
             }
 
+            $grammarSection = !empty($langConfig['grammar_rules']) ? "\n{$langConfig['grammar_rules']}" : '';
+
             $response = Http::withToken($apiKey)
                 ->timeout(120)
                 ->post('https://api.openai.com/v1/chat/completions', [
-                    'model' => 'gpt-4o-mini',
+                    'model' => $langConfig['model'],
                     'temperature' => 0.3,
                     'messages' => [
                         [
@@ -682,7 +774,7 @@ CRITICAL RULES:
 4. Translate ALL words - NO English/foreign words (except proper names)
 5. Match original length and rhythm closely for lip-sync
 6. Preserve emotion and tone - if angry, stay angry; if joking, keep humor
-7. {$langConfig['script']}"
+7. {$langConfig['script']}{$grammarSection}"
                         ],
                         ['role' => 'user', 'content' => implode("\n", $numberedTexts)],
                     ],
@@ -733,15 +825,17 @@ CRITICAL RULES:
         if (!$apiKey) return $text;
 
         try {
+            $grammarSection = !empty($langConfig['grammar_rules']) ? "\n{$langConfig['grammar_rules']}" : '';
+
             $response = Http::withToken($apiKey)
                 ->timeout(120)
                 ->post('https://api.openai.com/v1/chat/completions', [
-                    'model' => 'gpt-4o-mini',
+                    'model' => $langConfig['model'],
                     'temperature' => 0.3,
                     'messages' => [
                         [
                             'role' => 'system',
-                            'content' => "You are a professional movie dubbing translator. Translate to {$langConfig['name']}.\n\nRULES:\n- PRESERVE the exact meaning - do NOT lose any information\n- Use natural spoken {$langConfig['name']} expressions\n- Match the length closely for lip-sync\n- Output ONLY the translation, nothing else\n{$langConfig['script']}"
+                            'content' => "You are a professional movie dubbing translator. Translate to {$langConfig['name']}.\n\nRULES:\n- PRESERVE the exact meaning - do NOT lose any information\n- Use natural spoken {$langConfig['name']} expressions\n- Match the length closely for lip-sync\n- Output ONLY the translation, nothing else\n{$langConfig['script']}{$grammarSection}"
                         ],
                         ['role' => 'user', 'content' => $text],
                     ],
@@ -757,17 +851,155 @@ CRITICAL RULES:
         return $text;
     }
 
-    private function getOrCreateSpeaker(Video $video, string $speakerKey): Speaker
+    /**
+     * Post-translation grammar validation for Uzbek.
+     * Checks formality consistency and fixes verb suffix mismatches.
+     */
+    private function validateUzbekGrammar(array $translations): array
+    {
+        if (empty($translations)) return $translations;
+
+        $apiKey = config('services.openai.key');
+        if (!$apiKey) return $translations;
+
+        try {
+            $numberedTexts = [];
+            foreach ($translations as $i => $text) {
+                $numberedTexts[] = "[" . ($i + 1) . "] " . $text;
+            }
+
+            $response = Http::withToken($apiKey)
+                ->timeout(60)
+                ->post('https://api.openai.com/v1/chat/completions', [
+                    'model' => 'gpt-4o-mini',
+                    'temperature' => 0.1,
+                    'messages' => [
+                        [
+                            'role' => 'system',
+                            'content' => 'You are an Uzbek grammar checker. Check the following Uzbek text lines for grammar errors. Focus ONLY on:
+1. FORMALITY CONSISTENCY: If "sen" (informal) is used, ALL verbs must use informal forms (bare stem imperative, -san present, -ding past). If "siz" (formal), ALL verbs must use formal forms (-ng imperative, -siz present, -dingiz past). NEVER mix.
+2. VERB SUFFIX CORRECTNESS: Ensure verb endings match the person and tense correctly.
+3. Common error: imperative with -ng when subject is "sen" → fix to bare stem.
+
+Output each line with its [N] number. If a line is correct, output it unchanged. If it has errors, output the corrected version.
+Output ONLY the numbered lines, no explanations.',
+                        ],
+                        ['role' => 'user', 'content' => implode("\n", $numberedTexts)],
+                    ],
+                ]);
+
+            if ($response->successful()) {
+                $content = $response->json('choices.0.message.content') ?? '';
+                $validated = $this->parseBatchTranslations($content, count($translations), $translations);
+
+                Log::info('Uzbek grammar validation applied', [
+                    'count' => count($translations),
+                    'changes' => count(array_filter(array_map(
+                        fn($orig, $val) => $orig !== $val,
+                        $translations,
+                        $validated
+                    ))),
+                ]);
+
+                return $validated;
+            }
+        } catch (\Exception $e) {
+            Log::warning('Uzbek grammar validation failed', ['error' => $e->getMessage()]);
+        }
+
+        return $translations;
+    }
+
+    /**
+     * Detect emotion for a segment using WhisperX audio data, speaker-level emotion, and text heuristics.
+     */
+    private function detectSegmentEmotion(array $segment, Speaker $speaker): string
+    {
+        // Priority 1: Per-segment emotion from WhisperX (if confidence > 0.5)
+        if (!empty($segment['emotion']) && $segment['emotion'] !== 'neutral'
+            && ($segment['emotion_confidence'] ?? 0) > 0.5) {
+            return $segment['emotion'];
+        }
+
+        // Priority 2: Speaker-level emotion from WhisperX (if confidence > 0.5)
+        if ($speaker->emotion && $speaker->emotion !== 'neutral'
+            && ($speaker->emotion_confidence ?? 0) > 0.5) {
+            return $speaker->emotion;
+        }
+
+        // Priority 3: Text-based emotion detection
+        return $this->detectEmotionFromText($segment['text'] ?? '', '');
+    }
+
+    /**
+     * Detect emotion from text using heuristics (punctuation, keywords).
+     * Copied from GenerateTtsSegmentsJobV2.
+     */
+    private function detectEmotionFromText(string $originalText, string $translatedText): string
+    {
+        $text = mb_strtolower($originalText . ' ' . $translatedText);
+
+        // Angry indicators
+        if (preg_match('/[!]{2,}|!!/', $originalText) ||
+            preg_match('/\b(angry|furious|mad|hate|damn|hell|stop|shut up|get out)\b/i', $text)) {
+            return 'angry';
+        }
+
+        // Excited/Happy indicators
+        if (preg_match('/[!]{1,}.*[!]|wow|yay|great|amazing|wonderful|fantastic|love|happy|glad|excited/i', $text)) {
+            return 'happy';
+        }
+
+        // Question with surprise
+        if (preg_match('/\?{2,}|what\?|really\?|seriously\?/i', $text)) {
+            return 'surprise';
+        }
+
+        // Sad indicators
+        if (preg_match('/\b(sad|sorry|miss|cry|tears|lost|gone|died|dead|unfortunately|regret)\b/i', $text)) {
+            return 'sad';
+        }
+
+        // Fear indicators
+        if (preg_match('/\b(afraid|scared|fear|danger|help|run|careful|watch out|oh no)\b/i', $text)) {
+            return 'fear';
+        }
+
+        // Excitement from exclamation marks
+        if (substr_count($originalText, '!') >= 1) {
+            return 'excited';
+        }
+
+        return 'neutral';
+    }
+
+    private function getOrCreateSpeaker(Video $video, string $speakerKey, array $whisperxMeta = []): Speaker
     {
         $speaker = Speaker::where('video_id', $video->id)
             ->where('external_key', $speakerKey)
             ->first();
 
-        if ($speaker) return $speaker;
+        if ($speaker) {
+            // Update with WhisperX metadata if we have new data and speaker lacks it
+            if (!empty($whisperxMeta) && !$speaker->pitch_median_hz) {
+                $speaker->update(array_filter([
+                    'gender' => $whisperxMeta['gender'] ?? null,
+                    'gender_confidence' => $whisperxMeta['gender_confidence'] ?? null,
+                    'emotion' => $whisperxMeta['emotion'] ?? null,
+                    'emotion_confidence' => $whisperxMeta['emotion_confidence'] ?? null,
+                    'pitch_median_hz' => $whisperxMeta['pitch_median_hz'] ?? null,
+                    'age_group' => $whisperxMeta['age_group'] ?? null,
+                ], fn($v) => $v !== null));
+                $speaker->refresh();
+            }
+            return $speaker;
+        }
 
         preg_match('/(\d+)/', $speakerKey, $matches);
         $num = (int)($matches[1] ?? 0);
-        $gender = $num % 2 === 0 ? 'male' : 'female';
+
+        // Use WhisperX-detected gender, fall back to alternating guess
+        $gender = $whisperxMeta['gender'] ?? ($num % 2 === 0 ? 'male' : 'female');
 
         $lang = strtolower($video->target_language);
         $voices = self::VOICES[$lang] ?? self::VOICES['en'];
@@ -779,16 +1011,21 @@ CRITICAL RULES:
         $rate = self::RATE_VARIATIONS[$existingCount % count(self::RATE_VARIATIONS)];
 
         try {
-            return Speaker::create([
+            return Speaker::create(array_filter([
                 'video_id' => $video->id,
                 'external_key' => $speakerKey,
                 'label' => 'Speaker ' . ($num + 1),
                 'gender' => $gender,
+                'gender_confidence' => $whisperxMeta['gender_confidence'] ?? null,
+                'emotion' => $whisperxMeta['emotion'] ?? 'neutral',
+                'emotion_confidence' => $whisperxMeta['emotion_confidence'] ?? null,
+                'pitch_median_hz' => $whisperxMeta['pitch_median_hz'] ?? null,
+                'age_group' => $whisperxMeta['age_group'] ?? 'unknown',
                 'tts_voice' => $voice,
                 'tts_pitch' => $pitch,
                 'tts_rate' => $rate,
-                'tts_driver' => 'edge', // Default, will be upgraded to xtts if cloning works
-            ]);
+                'tts_driver' => 'edge',
+            ], fn($v) => $v !== null));
         } catch (\Illuminate\Database\QueryException $e) {
             if (str_contains($e->getMessage(), 'Duplicate entry')) {
                 return Speaker::where('video_id', $video->id)
@@ -929,16 +1166,17 @@ CRITICAL RULES:
     }
 
     /**
-     * OPTIMIZATION: Generate TTS in parallel using multiple processes
-     * Uses XTTS for cloned voices, Edge-TTS for others
+     * Generate TTS for all segments using the driver system.
+     * Routes to XTTS for cloned voices, Edge-TTS for others.
+     * Includes emotion, speed calculation, and natural speech processing.
      */
     private function generateAllTTSParallel(Video $video, array $segments, string $outputDir): array
     {
         $ttsFiles = [];
-        $ttsJobs = [];
-        $xttsJobs = [];
+        $ttsManager = app(TtsManager::class);
+        $naturalSpeech = new NaturalSpeechProcessor();
+        $fallbackDriverName = config('dubber.tts.fallback', 'edge');
 
-        // Separate jobs by TTS driver
         foreach ($segments as $i => $seg) {
             $text = $seg['translated'];
             if (empty($text)) continue;
@@ -947,297 +1185,139 @@ CRITICAL RULES:
                 continue;
             }
 
-            $text = TextNormalizer::normalize($text, $video->target_language);
             $speaker = $seg['speaker'];
+            $emotion = $seg['emotion'] ?? 'neutral';
+            $targetDuration = $seg['duration'];
 
-            $job = [
-                'index' => $i,
-                'text' => $text,
-                'speaker' => $speaker,
-                'segment' => $seg,
+            // Natural speech processing: add breathing pauses, emotional markers
+            $processedText = $naturalSpeech->process($text, $emotion);
+            $processedText = TextNormalizer::normalize($processedText, $video->target_language);
+
+            // Pre-calculate speed to fit time slot
+            $speed = $this->calculateSpeed($processedText, $targetDuration);
+
+            // Build options for driver
+            $options = [
+                'emotion' => $emotion,
+                'speed' => $speed,
+                'language' => $video->target_language ?? 'uz',
+                'gain_db' => (float)($speaker->tts_gain_db ?? 0),
             ];
 
-            // Use XTTS for speakers with cloned voices
+            // Add cloned voice ID if available
             if ($speaker->voice_cloned && $speaker->xtts_voice_id) {
-                $xttsJobs[] = $job;
-            } else {
-                $ttsJobs[] = $job;
+                $options['voice_id'] = $speaker->xtts_voice_id;
             }
-        }
 
-        // Process XTTS jobs (cloned voices - sequential for API)
-        foreach ($xttsJobs as $job) {
-            $result = $this->generateXttsTTS($video, $job, $outputDir);
-            if ($result) {
-                $ttsFiles[] = $result;
-            }
-        }
-
-        // Process Edge-TTS jobs in parallel (fallback voices)
-        if (!empty($ttsJobs)) {
-            $edgeResults = $this->generateEdgeTTSParallel($video, $ttsJobs, $outputDir);
-            $ttsFiles = array_merge($ttsFiles, $edgeResults);
-        }
-
-        return $ttsFiles;
-    }
-
-    /**
-     * Generate TTS using XTTS with cloned voice.
-     */
-    private function generateXttsTTS(Video $video, array $job, string $outputDir): ?array
-    {
-        $speaker = $job['speaker'];
-        $outputRel = "videos/chunks/{$video->id}/xtts_{$this->chunkIndex}_{$job['index']}.wav";
-
-        try {
-            $response = Http::timeout(60)->post('http://xtts:8000/synthesize', [
-                'text' => $job['text'],
-                'voice_id' => $speaker->xtts_voice_id,
-                'language' => $video->target_language ?? 'uz',
-                'emotion' => 'neutral',
-                'speed' => 1.0,
-                'output_path' => $outputRel,
+            // Create temporary VideoSegment for driver interface compatibility
+            $tempSegment = new VideoSegment([
+                'video_id' => $video->id,
+                'start_time' => $this->startTime + $seg['start'],
+                'end_time' => $this->startTime + $seg['end'],
+                'translated_text' => $processedText,
+                'emotion' => $emotion,
             ]);
+            $tempSegment->id = $i;
 
-            if (!$response->successful() || !($response->json()['ok'] ?? false)) {
-                Log::warning('XTTS synthesis failed, falling back to Edge-TTS', [
-                    'speaker' => $speaker->external_key,
-                    'error' => $response->json()['detail'] ?? 'Unknown',
+            // Determine driver: XTTS for cloned voices, configured default for others
+            $driverName = ($speaker->voice_cloned && $speaker->xtts_voice_id)
+                ? 'xtts'
+                : ($speaker->getEffectiveTtsDriver() ?? config('dubber.tts.default', 'edge'));
+
+            $ttsPath = null;
+            $usedDriver = $driverName;
+
+            try {
+                if ($ttsManager->hasDriver($driverName)) {
+                    $ttsPath = $ttsManager->driver($driverName)->synthesize(
+                        $processedText, $speaker, $tempSegment, $options
+                    );
+                }
+            } catch (\Throwable $e) {
+                Log::warning("TTS driver [{$driverName}] failed, trying fallback", [
+                    'chunk' => $this->chunkIndex,
+                    'segment' => $i,
+                    'error' => $e->getMessage(),
                 ]);
-                // Fallback to Edge-TTS
-                return $this->generateEdgeTTSSingle($video, $job, $outputDir);
+                $ttsPath = null;
             }
 
-            $ttsPath = Storage::disk('local')->path($outputRel);
-            if (!file_exists($ttsPath) || filesize($ttsPath) < 500) {
-                return $this->generateEdgeTTSSingle($video, $job, $outputDir);
-            }
-
-            // Process the XTTS output
-            $processedPath = "{$outputDir}/tts_{$this->chunkIndex}_{$job['index']}.wav";
-            $finalPath = $this->processTTSAudio($ttsPath, $processedPath);
-            @unlink($ttsPath);
-
-            if (!$finalPath) {
-                return $this->generateEdgeTTSSingle($video, $job, $outputDir);
-            }
-
-            $ttsDuration = $this->getAudioDuration($finalPath);
-            $targetDuration = $job['segment']['duration'];
-
-            // Speed adjustment if needed
-            if ($ttsDuration > 0 && $targetDuration > 0 && $ttsDuration > $targetDuration * 1.1) {
-                $speedRatio = min($ttsDuration / $targetDuration, 1.5);
-                $adjustedPath = "{$outputDir}/tts_adj_{$this->chunkIndex}_{$job['index']}.wav";
-                $this->adjustTTSSpeed($finalPath, $adjustedPath, $speedRatio);
-
-                if (file_exists($adjustedPath)) {
-                    @unlink($finalPath);
-                    $finalPath = $adjustedPath;
-                    $ttsDuration = $this->getAudioDuration($finalPath);
+            // Fallback to secondary driver
+            if (!$ttsPath || !file_exists($ttsPath)) {
+                try {
+                    if ($ttsManager->hasDriver($fallbackDriverName)) {
+                        $ttsPath = $ttsManager->driver($fallbackDriverName)->synthesize(
+                            $processedText, $speaker, $tempSegment, $options
+                        );
+                        $usedDriver = $fallbackDriverName;
+                    }
+                } catch (\Throwable $e) {
+                    Log::error("Fallback TTS also failed for segment {$i}", [
+                        'error' => $e->getMessage(),
+                    ]);
+                    continue;
                 }
             }
 
-            Log::info('XTTS synthesis successful', [
-                'speaker' => $speaker->external_key,
-                'voice_id' => $speaker->xtts_voice_id,
+            if (!$ttsPath || !file_exists($ttsPath)) {
+                continue;
+            }
+
+            // Post-synthesis speed correction if actual audio still exceeds slot
+            $ttsDuration = $this->getAudioDuration($ttsPath);
+            if ($ttsDuration > 0 && $targetDuration > 0 && $ttsDuration > $targetDuration * 1.1) {
+                $speedRatio = min($ttsDuration / $targetDuration, 1.5);
+                $adjustedPath = "{$outputDir}/tts_adj_{$this->chunkIndex}_{$i}.wav";
+                $this->adjustTTSSpeed($ttsPath, $adjustedPath, $speedRatio);
+
+                if (file_exists($adjustedPath)) {
+                    @unlink($ttsPath);
+                    $ttsPath = $adjustedPath;
+                    $ttsDuration = $this->getAudioDuration($ttsPath);
+                }
+            }
+
+            Log::info('TTS segment generated', [
+                'chunk' => $this->chunkIndex,
+                'segment' => $i,
+                'driver' => $usedDriver,
+                'emotion' => $emotion,
+                'speed' => $speed,
             ]);
 
-            return [
-                'path' => $finalPath,
-                'start' => $job['segment']['start'],
-                'end' => $job['segment']['end'],
+            $ttsFiles[] = [
+                'path' => $ttsPath,
+                'start' => $seg['start'],
+                'end' => $seg['end'],
                 'target_duration' => $targetDuration,
                 'actual_duration' => $ttsDuration,
                 'speaker' => $speaker,
-                'driver' => 'xtts',
+                'driver' => $usedDriver,
             ];
-
-        } catch (\Exception $e) {
-            Log::warning('XTTS exception, falling back to Edge-TTS', [
-                'error' => $e->getMessage(),
-            ]);
-            return $this->generateEdgeTTSSingle($video, $job, $outputDir);
-        }
-    }
-
-    /**
-     * Generate single Edge-TTS (fallback).
-     */
-    private function generateEdgeTTSSingle(Video $video, array $job, string $outputDir): ?array
-    {
-        $speaker = $job['speaker'];
-        $rawPath = "{$outputDir}/tts_raw_{$this->chunkIndex}_{$job['index']}.mp3";
-        $textFile = "/tmp/tts_{$this->videoId}_{$this->chunkIndex}_{$job['index']}.txt";
-
-        file_put_contents($textFile, $job['text']);
-
-        $cmd = sprintf(
-            'edge-tts -f %s --voice %s --rate=%s --pitch=%s --write-media %s 2>/dev/null',
-            escapeshellarg($textFile),
-            escapeshellarg($speaker->tts_voice),
-            escapeshellarg($speaker->tts_rate ?? '+0%'),
-            escapeshellarg($speaker->tts_pitch ?? '+0Hz'),
-            escapeshellarg($rawPath)
-        );
-
-        exec($cmd, $output, $code);
-        @unlink($textFile);
-
-        if (!file_exists($rawPath) || filesize($rawPath) < 500) {
-            return null;
-        }
-
-        $outputPath = "{$outputDir}/tts_{$this->chunkIndex}_{$job['index']}.wav";
-        $ttsPath = $this->processTTSAudio($rawPath, $outputPath);
-
-        if (!$ttsPath) {
-            return null;
-        }
-
-        $ttsDuration = $this->getAudioDuration($ttsPath);
-        $targetDuration = $job['segment']['duration'];
-
-        if ($ttsDuration > 0 && $targetDuration > 0 && $ttsDuration > $targetDuration * 1.1) {
-            $speedRatio = min($ttsDuration / $targetDuration, 1.5);
-            $adjustedPath = "{$outputDir}/tts_adj_{$this->chunkIndex}_{$job['index']}.wav";
-            $this->adjustTTSSpeed($ttsPath, $adjustedPath, $speedRatio);
-
-            if (file_exists($adjustedPath)) {
-                @unlink($ttsPath);
-                $ttsPath = $adjustedPath;
-                $ttsDuration = $this->getAudioDuration($ttsPath);
-            }
-        }
-
-        return [
-            'path' => $ttsPath,
-            'start' => $job['segment']['start'],
-            'end' => $job['segment']['end'],
-            'target_duration' => $targetDuration,
-            'actual_duration' => $ttsDuration,
-            'speaker' => $speaker,
-            'driver' => 'edge',
-        ];
-    }
-
-    /**
-     * Generate Edge-TTS in parallel for multiple jobs.
-     */
-    private function generateEdgeTTSParallel(Video $video, array $ttsJobs, string $outputDir): array
-    {
-        $ttsFiles = [];
-        $chunks = array_chunk($ttsJobs, 3);
-
-        foreach ($chunks as $chunk) {
-            $paths = [];
-
-            // Start all processes in this chunk
-            foreach ($chunk as $job) {
-                $rawPath = "{$outputDir}/tts_raw_{$this->chunkIndex}_{$job['index']}.mp3";
-                $textFile = "/tmp/tts_{$this->videoId}_{$this->chunkIndex}_{$job['index']}.txt";
-
-                file_put_contents($textFile, $job['text']);
-
-                $cmd = sprintf(
-                    'edge-tts -f %s --voice %s --rate=%s --pitch=%s --write-media %s 2>/dev/null &',
-                    escapeshellarg($textFile),
-                    escapeshellarg($job['speaker']->tts_voice),
-                    escapeshellarg($job['speaker']->tts_rate ?? '+0%'),
-                    escapeshellarg($job['speaker']->tts_pitch ?? '+0Hz'),
-                    escapeshellarg($rawPath)
-                );
-
-                exec($cmd);
-                $paths[$job['index']] = [
-                    'raw' => $rawPath,
-                    'text_file' => $textFile,
-                    'job' => $job,
-                ];
-            }
-
-            // Wait for all to complete
-            usleep(500000);
-            $maxWait = 10;
-            $waited = 0;
-            while ($waited < $maxWait) {
-                $allDone = true;
-                foreach ($paths as $p) {
-                    if (!file_exists($p['raw']) || filesize($p['raw']) < 100) {
-                        $allDone = false;
-                        break;
-                    }
-                }
-                if ($allDone) break;
-                usleep(200000);
-                $waited += 0.2;
-            }
-
-            // Process completed TTS files
-            foreach ($paths as $idx => $p) {
-                @unlink($p['text_file']);
-
-                if (!file_exists($p['raw']) || filesize($p['raw']) < 500) {
-                    continue;
-                }
-
-                $outputPath = "{$outputDir}/tts_{$this->chunkIndex}_{$idx}.wav";
-                $ttsPath = $this->processTTSAudio($p['raw'], $outputPath);
-
-                if ($ttsPath) {
-                    $job = $p['job'];
-                    $ttsDuration = $this->getAudioDuration($ttsPath);
-                    $targetDuration = $job['segment']['duration'];
-
-                    if ($ttsDuration > 0 && $targetDuration > 0 && $ttsDuration > $targetDuration * 1.1) {
-                        $speedRatio = min($ttsDuration / $targetDuration, 1.5);
-                        $adjustedPath = "{$outputDir}/tts_adj_{$this->chunkIndex}_{$idx}.wav";
-                        $this->adjustTTSSpeed($ttsPath, $adjustedPath, $speedRatio);
-
-                        if (file_exists($adjustedPath)) {
-                            @unlink($ttsPath);
-                            $ttsPath = $adjustedPath;
-                            $ttsDuration = $this->getAudioDuration($ttsPath);
-                        }
-                    }
-
-                    $ttsFiles[] = [
-                        'path' => $ttsPath,
-                        'start' => $job['segment']['start'],
-                        'end' => $job['segment']['end'],
-                        'target_duration' => $targetDuration,
-                        'actual_duration' => $ttsDuration,
-                        'speaker' => $job['speaker'],
-                        'driver' => 'edge',
-                    ];
-                }
-            }
         }
 
         return $ttsFiles;
     }
 
-    private function processTTSAudio(string $rawPath, string $outputPath): ?string
+    /**
+     * Calculate speech speed to fit the time slot.
+     */
+    private function calculateSpeed(string $text, float $slotDuration): float
     {
-        $audioFilter = implode(',', [
-            'highpass=f=80',
-            'lowpass=f=12000',
-            'acompressor=threshold=-18dB:ratio=2:attack=10:release=100',
-            'loudnorm=I=-16:TP=-1.5:LRA=11',
-        ]);
+        if ($slotDuration <= 0) {
+            return 1.0;
+        }
 
-        $result = Process::timeout(30)->run([
-            'ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
-            '-i', $rawPath,
-            '-af', $audioFilter,
-            '-ar', '44100', '-ac', '2', '-c:a', 'pcm_s16le',
-            $outputPath,
-        ]);
+        // Estimate: ~7 characters per second at normal speed
+        $textLen = mb_strlen($text);
+        $estimatedDuration = $textLen / 7.0;
 
-        @unlink($rawPath);
+        if ($estimatedDuration <= $slotDuration) {
+            return 1.0;
+        }
 
-        return $result->successful() && file_exists($outputPath) ? $outputPath : null;
+        $speedupFactor = $estimatedDuration / $slotDuration;
+        return min(1.5, $speedupFactor);
     }
 
     private function adjustTTSSpeed(string $inputPath, string $outputPath, float $speedRatio): void

@@ -6,6 +6,7 @@ use App\Contracts\TtsDriverInterface;
 use App\Models\Speaker;
 use App\Models\VideoSegment;
 use App\Services\TextNormalizer;
+use App\Services\Tts\SsmlBuilder;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
@@ -108,21 +109,30 @@ class EdgeTtsDriver implements TtsDriverInterface
         // Get emotion-based prosody
         $emotionProsody = $this->emotionProsody[$emotion] ?? $this->emotionProsody['neutral'];
 
-        // Calculate final rate: combine profile + emotion + speed multiplier
+        // Apply age-group presets from config (if available)
+        $agePreset = config("dubber.age_presets.{$speaker->age_group}", []);
+        $ageRate = $this->parsePercentage($agePreset['rate'] ?? '+0%');
+        $agePitch = $this->parseHz($agePreset['pitch'] ?? '+0Hz');
+        $ageGainDb = (float) ($agePreset['gain_db'] ?? 0);
+
+        // Calculate final rate: combine profile + emotion + age + speed multiplier
         $profileRate = $profile['rate_offset'];
         $emotionRate = $this->parsePercentage($emotionProsody['rate']);
         $speedRate = ($speedMultiplier - 1.0) * 100; // Convert 1.5 to +50%
-        $finalRate = (int) round($profileRate + $emotionRate + $speedRate);
+        $finalRate = (int) round($profileRate + $emotionRate + $ageRate + $speedRate);
 
         // Cap rate to reasonable limits (-50% to +100%)
         $finalRate = max(-50, min(100, $finalRate));
         $rate = $finalRate >= 0 ? "+{$finalRate}%" : "{$finalRate}%";
 
-        // Calculate final pitch: combine profile + emotion
+        // Calculate final pitch: combine profile + emotion + age
         $profilePitch = $profile['pitch_offset'];
         $emotionPitch = $this->parseHz($emotionProsody['pitch']);
-        $finalPitch = $profilePitch + $emotionPitch;
+        $finalPitch = $profilePitch + $emotionPitch + $agePitch;
         $pitch = $finalPitch >= 0 ? "+{$finalPitch}Hz" : "{$finalPitch}Hz";
+
+        // Add age gain to speaker gain
+        $options['gain_db'] = ($options['gain_db'] ?? 0) + $ageGainDb;
 
         $videoId = $segment->video_id;
         $segmentId = $segment->id;
@@ -139,20 +149,42 @@ class EdgeTtsDriver implements TtsDriverInterface
         // Normalize text for TTS (converts numbers to words, normalizes apostrophes, etc.)
         $text = TextNormalizer::normalize($text, $language);
 
-        // Write text to temp file to avoid shell escaping issues
-        $tmpTxt = "/tmp/tts_{$videoId}_{$segmentId}_" . Str::random(8) . ".txt";
-        file_put_contents($tmpTxt, $text);
+        $useSsml = config('dubber.tts.edge_ssml', true);
+        $tmpFile = "/tmp/tts_{$videoId}_{$segmentId}_" . Str::random(8);
 
-        $cmd = sprintf(
-            'edge-tts -f %s --voice %s --rate=%s --pitch=%s --write-media %s 2>&1',
-            escapeshellarg($tmpTxt),
-            escapeshellarg($voice),
-            escapeshellarg($rate),
-            escapeshellarg($pitch),
-            escapeshellarg($rawMp3)
-        );
+        if ($useSsml) {
+            // SSML mode: per-sentence prosody control with breaks and intonation
+            $locale = SsmlBuilder::languageToLocale($language);
+            $ssml = SsmlBuilder::fromTextWithEmotion(
+                $text, $voice, $emotion,
+                ['rate' => $rate, 'pitch' => $pitch],
+                $locale
+            );
+            $tmpFile .= '.xml';
+            file_put_contents($tmpFile, $ssml);
 
-        Log::info('Edge TTS command', [
+            // edge-tts auto-detects SSML from <speak> tag in input file
+            $cmd = sprintf(
+                'edge-tts -f %s --write-media %s 2>&1',
+                escapeshellarg($tmpFile),
+                escapeshellarg($rawMp3)
+            );
+        } else {
+            // Flag-based mode: global rate/pitch via CLI arguments
+            $tmpFile .= '.txt';
+            file_put_contents($tmpFile, $text);
+
+            $cmd = sprintf(
+                'edge-tts -f %s --voice %s --rate=%s --pitch=%s --write-media %s 2>&1',
+                escapeshellarg($tmpFile),
+                escapeshellarg($voice),
+                escapeshellarg($rate),
+                escapeshellarg($pitch),
+                escapeshellarg($rawMp3)
+            );
+        }
+
+        Log::info('Edge TTS synthesis', [
             'segment_id' => $segmentId,
             'speaker_id' => $speaker->id,
             'voice' => $voice,
@@ -160,11 +192,11 @@ class EdgeTtsDriver implements TtsDriverInterface
             'emotion' => $emotion,
             'rate' => $rate,
             'pitch' => $pitch,
-            'speed_multiplier' => $speedMultiplier,
+            'ssml' => $useSsml,
         ]);
 
         exec($cmd, $output, $code);
-        @unlink($tmpTxt);
+        @unlink($tmpFile);
 
         if ($code !== 0 || !file_exists($rawMp3) || filesize($rawMp3) < 500) {
             Log::error('Edge TTS synthesis failed', [
@@ -185,6 +217,7 @@ class EdgeTtsDriver implements TtsDriverInterface
 
     /**
      * Select appropriate voice based on speaker gender and language.
+     * Avoids assigning the same voice to multiple same-gender speakers in a video.
      */
     protected function selectVoice(Speaker $speaker, string $language): string
     {
@@ -196,30 +229,89 @@ class EdgeTtsDriver implements TtsDriverInterface
         // Determine gender (default to male if unknown)
         $gender = strtolower($speaker->gender ?? 'male');
         if (!in_array($gender, ['male', 'female'])) {
-            // Try to infer from speaker label
             $label = strtolower($speaker->label ?? '');
             $gender = preg_match('/female|woman|girl|lady/i', $label) ? 'female' : 'male';
         }
 
-        // Get voices for language and gender
         $langVoices = $this->voiceMap[$language] ?? $this->voiceMap['uz'];
         $genderVoices = $langVoices[$gender] ?? $langVoices['male'];
 
-        // Use speaker ID to consistently pick a voice for this speaker
-        $voiceIndex = $speaker->id % count($genderVoices);
+        // Avoid duplicate voices: check what same-gender speakers already use
+        if ($speaker->video_id) {
+            $usedVoices = Speaker::where('video_id', $speaker->video_id)
+                ->where('gender', $gender)
+                ->where('id', '!=', $speaker->id)
+                ->whereNotNull('tts_voice')
+                ->pluck('tts_voice')
+                ->toArray();
 
-        return $genderVoices[$voiceIndex];
+            $available = array_diff($genderVoices, $usedVoices);
+            if (!empty($available)) {
+                return array_values($available)[0];
+            }
+        }
+
+        // All voices used or no video context, fall back to ID-based
+        return $genderVoices[$speaker->id % count($genderVoices)];
     }
 
     /**
-     * Get voice profile for a speaker to create distinct voices.
-     * Different speakers get different pitch/rate offsets even with same base voice.
+     * Get voice profile for a speaker based on detected characteristics.
+     * Uses pitch_median_hz and age_group from WhisperX when available,
+     * falls back to ID-based assignment.
      */
     protected function getVoiceProfile(Speaker $speaker): array
     {
-        // Use speaker ID to consistently assign a profile
+        // Priority 1: Map from detected pitch (most accurate)
+        if ($speaker->pitch_median_hz) {
+            return $this->profileFromDetectedPitch($speaker);
+        }
+
+        // Priority 2: Map from age group
+        if ($speaker->age_group && $speaker->age_group !== 'unknown') {
+            return $this->profileFromAgeGroup($speaker->age_group);
+        }
+
+        // Fallback: ID-based assignment
         $profileIndex = $speaker->id % count($this->voiceProfiles);
         return $this->voiceProfiles[$profileIndex];
+    }
+
+    /**
+     * Select voice profile based on detected fundamental frequency.
+     */
+    protected function profileFromDetectedPitch(Speaker $speaker): array
+    {
+        $pitch = $speaker->pitch_median_hz;
+        $gender = strtolower($speaker->gender ?? 'male');
+
+        if ($gender === 'male') {
+            // Male pitch ranges: ~85-180 Hz
+            if ($pitch < 100) return $this->voiceProfiles[3]; // bass
+            if ($pitch < 120) return $this->voiceProfiles[1]; // deep
+            if ($pitch < 150) return $this->voiceProfiles[5]; // warm
+            return $this->voiceProfiles[2]; // bright
+        }
+
+        // Female pitch ranges: ~165-300 Hz
+        if ($pitch < 190) return $this->voiceProfiles[5]; // warm
+        if ($pitch < 220) return $this->voiceProfiles[0]; // default
+        if ($pitch < 260) return $this->voiceProfiles[2]; // bright
+        return $this->voiceProfiles[4]; // thin
+    }
+
+    /**
+     * Select voice profile based on detected age group.
+     */
+    protected function profileFromAgeGroup(string $ageGroup): array
+    {
+        return match ($ageGroup) {
+            'child' => $this->voiceProfiles[4],      // thin - higher pitch
+            'young_adult' => $this->voiceProfiles[2], // bright
+            'adult' => $this->voiceProfiles[0],       // default
+            'senior' => $this->voiceProfiles[1],      // deep - slower
+            default => $this->voiceProfiles[0],
+        };
     }
 
     /**
