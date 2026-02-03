@@ -25,6 +25,14 @@
         .ok { color: #0a7a2f; font-weight: 700; }
         .pending { color:#888; font-weight: 700; }
         .err { color:#b10000; font-weight: 700; }
+        .chunk-progress { margin-top: 8px; padding: 8px 12px; background: #f8f9fa; border-radius: 6px; font-size: 13px; }
+        .chunk-progress .chunk-bar { width: 100%; height: 6px; background: #e5e5e5; border-radius: 3px; margin-top: 4px; }
+        .chunk-progress .chunk-bar > div { height: 6px; background: #0a7a2f; border-radius: 3px; transition: width 0.3s; }
+        .seg-status { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; }
+        .seg-empty { background: #ddd; }
+        .seg-transcribed { background: #fbbf24; }
+        .seg-translated { background: #60a5fa; }
+        .seg-tts { background: #34d399; }
         .actions { display:flex; gap: 8px; flex-wrap:wrap; align-items:center; }
         audio { width: 220px; max-width: 100%; }
         .small { font-size: 12px; }
@@ -67,6 +75,18 @@
                 <div class="muted progress-text">0%</div>
             </div>
 
+            <div class="chunk-progress" id="chunkProgress" style="display:none;">
+                <div><strong>Chunks:</strong> <span id="chunksReadyText">0</span> / <span id="chunksTotalText">0</span></div>
+                <div class="chunk-bar"><div id="chunkBarFill" style="width:0%"></div></div>
+                <div style="margin-top:4px;">
+                    <span class="muted">Segments: <span id="segCountText">0</span></span>
+                    &nbsp;|&nbsp;
+                    <span class="muted">Translated: <span id="segTranslatedText">0</span></span>
+                    &nbsp;|&nbsp;
+                    <span class="muted">TTS: <span id="segTtsText">0</span></span>
+                </div>
+            </div>
+
             <div style="margin-top:12px;" class="actions">
                 <a class="btn btn-primary btn-download btn-disabled" href="#">Download dubbed</a>
                 <a class="btn btn-primary btn-download-lipsynced btn-disabled" href="#">Download lipsynced</a>
@@ -106,12 +126,13 @@
             <table>
                 <thead>
                 <tr>
+                    <th style="width:50px;">#</th>
                     <th style="width:120px;">Time</th>
+                    <th style="width:60px;">Dur</th>
                     <th style="width:170px;">Speaker</th>
                     <th>Original</th>
                     <th>Translated</th>
-                    <th style="width:220px;">TTS Audio</th>
-                    <th style="width:90px;">TTS</th>
+                    <th style="width:50px;">Status</th>
                 </tr>
                 </thead>
                 <tbody id="segmentsBody">
@@ -141,6 +162,9 @@
         if (!Number.isFinite(n)) return '—';
         return n.toFixed(2);
     }
+
+    let lastStatus = '';
+    let lastChunksReady = 0;
 
     function setStatusUI(data) {
         const labelEl = document.querySelector('.status-label');
@@ -189,6 +213,39 @@
         if (canRegenerate && speakers.length > 0) {
             regenerateBtn.disabled = false;
         }
+
+        // Chunk progress panel
+        const chunkPanel = document.getElementById('chunkProgress');
+        const isProcessing = ['processing_chunks', 'combining_chunks', 'pending', 'downloading'].includes(data.status);
+        if (isProcessing || data.chunks_total > 0) {
+            chunkPanel.style.display = 'block';
+            document.getElementById('chunksReadyText').textContent = data.chunks_ready || 0;
+            document.getElementById('chunksTotalText').textContent = data.chunks_total || '?';
+            document.getElementById('segCountText').textContent = data.segments_total || 0;
+            document.getElementById('segTranslatedText').textContent = data.segments_with_text || 0;
+            document.getElementById('segTtsText').textContent = data.segments_with_tts || 0;
+
+            const chunkPct = data.chunks_total > 0
+                ? Math.round((data.chunks_ready / data.chunks_total) * 100)
+                : 0;
+            document.getElementById('chunkBarFill').style.width = chunkPct + '%';
+        } else {
+            chunkPanel.style.display = 'none';
+        }
+
+        // Auto-refresh segments when new chunks arrive during processing
+        if (data.status === 'processing_chunks' && data.chunks_ready > lastChunksReady) {
+            lastChunksReady = data.chunks_ready;
+            loadSegments();
+        }
+
+        // Refresh segments when status changes to dubbed_complete
+        if (data.status !== lastStatus && data.status === 'dubbed_complete') {
+            loadSegments();
+            loadSpeakers();
+        }
+
+        lastStatus = data.status;
     }
 
     async function pollStatus() {
@@ -224,7 +281,7 @@
         const body = document.getElementById('segmentsBody');
 
         metaEl.textContent = 'Loading…';
-        body.innerHTML = `<tr><td colspan="6" class="muted">Loading segments…</td></tr>`;
+        body.innerHTML = `<tr><td colspan="7" class="muted">Loading segments…</td></tr>`;
 
         try {
             const res = await fetch(`/videos/${videoId}/segments`, {
@@ -233,54 +290,81 @@
 
             if (!res.ok) {
                 metaEl.innerHTML = `<span class="err">Failed to load segments</span> (HTTP ${res.status})`;
-                body.innerHTML = `<tr><td colspan="6" class="muted">No data</td></tr>`;
+                body.innerHTML = `<tr><td colspan="7" class="muted">No data</td></tr>`;
                 return;
             }
 
             const segments = await res.json();
             if (!Array.isArray(segments) || segments.length === 0) {
                 metaEl.textContent = 'No segments yet.';
-                body.innerHTML = `<tr><td colspan="6" class="muted">No segments yet</td></tr>`;
+                body.innerHTML = `<tr><td colspan="7" class="muted">No segments yet</td></tr>`;
                 return;
             }
 
-            metaEl.textContent = `Loaded ${segments.length} segment(s).`;
+            const withText = segments.filter(s => s.translated_text).length;
+            const withTts = segments.filter(s => s.tts_audio_path).length;
+            metaEl.textContent = `${segments.length} segment(s) | ${withText} translated | ${withTts} with TTS`;
 
             body.innerHTML = '';
-            for (const s of segments) {
+            for (let idx = 0; idx < segments.length; idx++) {
+                const s = segments[idx];
                 const spkKey = s?.speaker?.key ?? '—';
-                const spkVoice = s?.speaker?.voice ?? '—';
+                const spkGender = s?.speaker?.gender ?? '';
 
                 const start = fmtTime(s.start);
                 const end = fmtTime(s.end);
+                const dur = (Number(s.end) - Number(s.start)).toFixed(1);
 
-                // IMPORTANT:
-                // Your API should return a full URL for playback, not just "audio/tts/..".
-                // If you only return relative storage paths, convert them server-side to url().
-                const ttsUrl = s.tts_audio_url || s.tts_url || s.tts_audio_path_url || s.tts_audio_path || null;
+                // Determine segment status
+                const hasTts = !!s.tts_audio_path;
+                const hasTranslation = !!s.translated_text;
+                const hasText = !!s.text;
+
+                let statusDot, statusTitle;
+                if (hasTts) {
+                    statusDot = 'seg-tts';
+                    statusTitle = 'TTS ready';
+                } else if (hasTranslation) {
+                    statusDot = 'seg-translated';
+                    statusTitle = 'Translated';
+                } else if (hasText) {
+                    statusDot = 'seg-transcribed';
+                    statusTitle = 'Transcribed';
+                } else {
+                    statusDot = 'seg-empty';
+                    statusTitle = 'Empty / silent';
+                }
+
+                const genderBadge = spkGender === 'male'
+                    ? '<span class="gender-badge gender-male" style="font-size:10px;">M</span>'
+                    : spkGender === 'female'
+                        ? '<span class="gender-badge gender-female" style="font-size:10px;">F</span>'
+                        : '';
 
                 body.innerHTML += `
                     <tr>
+                        <td class="muted mono" style="text-align:center;">${idx + 1}</td>
                         <td class="muted mono">${start} – ${end}</td>
+                        <td class="muted mono">${dur}s</td>
                         <td>
-                            <strong class="mono">${escapeHtml(spkKey)}</strong><br>
-                            <span class="muted small">${escapeHtml(spkVoice)}</span>
+                            <strong class="mono">${escapeHtml(spkKey)}</strong> ${genderBadge}
                         </td>
                         <td>${escapeHtml(s.text || '')}</td>
                         <td>
-                            ${s.translated_text
+                            ${hasTranslation
                     ? escapeHtml(s.translated_text)
                     : '<span class="muted">—</span>'}
                         </td>
-                        <td>${ttsCell(ttsUrl)}</td>
-                        <td style="text-align:center;">${ttsStatusIcon(!!s.tts_audio_path)}</td>
+                        <td style="text-align:center;" title="${statusTitle}">
+                            <span class="seg-status ${statusDot}"></span>
+                        </td>
                     </tr>
                 `;
             }
 
         } catch (e) {
             metaEl.innerHTML = `<span class="err">Failed to load segments</span>`;
-            body.innerHTML = `<tr><td colspan="6" class="muted">No data</td></tr>`;
+            body.innerHTML = `<tr><td colspan="7" class="muted">No data</td></tr>`;
         }
     }
 
@@ -526,8 +610,8 @@
     pollStatus();
     loadSegments();
 
-    // Poll status periodically (segments are refreshed manually to reduce load)
-    setInterval(pollStatus, 2000);
+    // Poll status every 3s (segments auto-refresh when new chunks arrive)
+    setInterval(pollStatus, 3000);
 </script>
 
 </body>

@@ -117,6 +117,7 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
             // OPTIMIZATION 3: Skip stem separation for silent chunks
             $this->createSilentChunk($video, $videoPath, $chunkDir, $duration);
             $this->cleanup([$audioHqPath, $audioTranscribePath]);
+            $this->checkAndTriggerCombine($video);
             return;
         }
 
@@ -155,6 +156,46 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
             'has_background' => $bgMusicPath !== null,
             'has_vocals' => $vocalsPath !== null,
         ]);
+
+        // Check if all chunks are done and trigger combine
+        $this->checkAndTriggerCombine($video);
+    }
+
+    private function checkAndTriggerCombine(Video $video): void
+    {
+        $videoPath = Storage::disk('local')->path($video->original_path);
+        $result = Process::timeout(10)->run([
+            'ffprobe', '-v', 'error',
+            '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            $videoPath,
+        ]);
+
+        $duration = (float) trim($result->output());
+        if ($duration <= 0) return;
+
+        $chunkDuration = $duration <= 60 ? 8 : ($duration <= 300 ? 10 : ($duration <= 1800 ? 12 : 15));
+        $expectedChunks = (int) ceil($duration / $chunkDuration);
+
+        // Count ready chunks
+        $chunkDir = "videos/chunks/{$video->id}";
+        $readyChunks = 0;
+        $index = 0;
+        while (Storage::disk('local')->exists("{$chunkDir}/seg_{$index}.mp4")) {
+            $readyChunks++;
+            $index++;
+        }
+
+        Log::info('Chunk completion check', [
+            'video_id' => $video->id,
+            'ready' => $readyChunks,
+            'expected' => $expectedChunks,
+        ]);
+
+        if ($readyChunks >= $expectedChunks) {
+            Log::info('All chunks ready - dispatching combine job', ['video_id' => $video->id]);
+            CombineChunksJob::dispatch($video->id)->onQueue('chunks');
+        }
     }
 
     /**

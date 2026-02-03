@@ -12,6 +12,7 @@ use Illuminate\Contracts\View\Factory;
 use Illuminate\Contracts\View\View;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Facades\Storage;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
@@ -58,6 +59,40 @@ class VideoController extends Controller
     {
         [$progress, $label, $canDownload] = $this->statusMeta($video);
 
+        $segments = $video->segments();
+        $segmentsTotal = $segments->count();
+        $segmentsWithText = $segments->whereNotNull('translated_text')->where('translated_text', '!=', '')->count();
+        $segmentsWithTts = $segments->whereNotNull('tts_audio_path')->where('tts_audio_path', '!=', '')->count();
+
+        // Count chunk files on disk
+        $chunkDir = "videos/chunks/{$video->id}";
+        $chunksReady = 0;
+        $chunksTotal = 0;
+
+        if (Storage::disk('local')->exists($chunkDir)) {
+            $index = 0;
+            while (Storage::disk('local')->exists("{$chunkDir}/seg_{$index}.mp4")) {
+                $chunksReady++;
+                $index++;
+            }
+        }
+
+        // Estimate total chunks from video duration
+        if ($video->original_path && Storage::disk('local')->exists($video->original_path)) {
+            $path = Storage::disk('local')->path($video->original_path);
+            $result = Process::timeout(10)->run([
+                'ffprobe', '-v', 'error',
+                '-show_entries', 'format=duration',
+                '-of', 'default=noprint_wrappers=1:nokey=1',
+                $path,
+            ]);
+            $duration = (float) trim($result->output());
+            if ($duration > 0) {
+                $chunkDuration = $duration <= 60 ? 8 : ($duration <= 300 ? 10 : ($duration <= 1800 ? 12 : 15));
+                $chunksTotal = (int) ceil($duration / $chunkDuration);
+            }
+        }
+
         return response()->json([
             'status' => $video->status,
             'label' => $label,
@@ -67,6 +102,11 @@ class VideoController extends Controller
             'download_lipsynced_url' => $video->lipsynced_path ? route('videos.download.lipsynced', $video) : null,
             'dubbed_path' => $video->dubbed_path,
             'lipsynced_path' => $video->lipsynced_path,
+            'segments_total' => $segmentsTotal,
+            'segments_with_text' => $segmentsWithText,
+            'segments_with_tts' => $segmentsWithTts,
+            'chunks_ready' => $chunksReady,
+            'chunks_total' => $chunksTotal,
         ]);
     }
 
@@ -246,6 +286,7 @@ class VideoController extends Controller
                     'end' => $seg->end_time,
                     'text' => $seg->text,
                     'translated_text' => $seg->translated_text,
+                    'tts_audio_path' => $seg->tts_audio_path,
                     'speaker' => [
                         'key' => $seg->speaker->external_key ?? 'unknown',
                         'gender' => $seg->speaker->gender ?? 'unknown',
@@ -257,10 +298,16 @@ class VideoController extends Controller
 
     private function statusMeta(Video $video): array
     {
-        // Harmonize statuses from your pipeline
         $status = (string) $video->status;
 
+        if ($status === 'processing_chunks') {
+            return $this->chunkProcessingStatus($video);
+        }
+
         return match ($status) {
+            'pending' => [0, 'Pending', false],
+            'downloading' => [2, 'Downloading video', false],
+            'download_failed' => [0, 'Download failed', false],
             'uploaded' => [5, 'Uploaded', false],
             'audio_extracted' => [15, 'Audio extracted', false],
             'stems_separated' => [25, 'Stems separated', false],
@@ -268,11 +315,53 @@ class VideoController extends Controller
             'translated' => [50, 'Translated', false],
             'tts_generated' => [60, 'TTS generated', false],
             'mixed' => [70, 'Audio mixed', false],
-            'dubbed_complete' => [80, 'Dubbed complete', (bool) $video->dubbed_path],
-            'lipsync_processing' => [90, 'Lipsync processing', (bool) $video->dubbed_path],
+            'combining_chunks' => [85, 'Combining chunks into final video', false],
+            'dubbed_complete' => [95, 'Dubbed complete', (bool) $video->dubbed_path],
+            'lipsync_processing' => [97, 'Lipsync processing', (bool) $video->dubbed_path],
             'lipsync_done' => [100, 'Lipsync complete', true],
             'done' => [100, 'Complete', true],
+            'failed' => [0, 'Failed', false],
             default => [0, $status ?: 'unknown', false],
         };
+    }
+
+    private function chunkProcessingStatus(Video $video): array
+    {
+        $chunkDir = "videos/chunks/{$video->id}";
+        $chunksReady = 0;
+
+        if (Storage::disk('local')->exists($chunkDir)) {
+            $index = 0;
+            while (Storage::disk('local')->exists("{$chunkDir}/seg_{$index}.mp4")) {
+                $chunksReady++;
+                $index++;
+            }
+        }
+
+        $chunksTotal = 0;
+        if ($video->original_path && Storage::disk('local')->exists($video->original_path)) {
+            $path = Storage::disk('local')->path($video->original_path);
+            $result = Process::timeout(10)->run([
+                'ffprobe', '-v', 'error',
+                '-show_entries', 'format=duration',
+                '-of', 'default=noprint_wrappers=1:nokey=1',
+                $path,
+            ]);
+            $duration = (float) trim($result->output());
+            if ($duration > 0) {
+                $chunkDuration = $duration <= 60 ? 8 : ($duration <= 300 ? 10 : ($duration <= 1800 ? 12 : 15));
+                $chunksTotal = (int) ceil($duration / $chunkDuration);
+            }
+        }
+
+        if ($chunksTotal > 0) {
+            $pct = (int) round(($chunksReady / $chunksTotal) * 80) + 5; // 5-85% range
+            $label = "Processing chunks ({$chunksReady}/{$chunksTotal})";
+        } else {
+            $pct = 10;
+            $label = "Processing chunks ({$chunksReady} ready)";
+        }
+
+        return [$pct, $label, false];
     }
 }
