@@ -25,10 +25,10 @@ cd /workspace/dubber/xtts-service
 nohup python -m uvicorn app:app --host 0.0.0.0 --port 8004 > /tmp/xtts.log 2>&1 &
 echo "XTTS starting on port 8004..."
 
-# Start WhisperX on port 8001
+# Start WhisperX on port 8002
 cd /workspace/dubber/whisperx-service
-nohup python -m uvicorn app:app --host 0.0.0.0 --port 8001 > /tmp/whisperx.log 2>&1 &
-echo "WhisperX starting on port 8001..."
+nohup python -m uvicorn app:app --host 0.0.0.0 --port 8002 > /tmp/whisperx.log 2>&1 &
+echo "WhisperX starting on port 8002..."
 
 echo ""
 echo "Waiting for services to load models..."
@@ -38,7 +38,7 @@ echo ""
 echo "=== Checking Services ==="
 echo "XTTS:" && curl -s http://localhost:8004/health || echo "Still loading..."
 echo ""
-echo "WhisperX:" && curl -s http://localhost:8001/health || echo "Still loading..."
+echo "WhisperX:" && curl -s http://localhost:8002/health || echo "Still loading..."
 echo ""
 echo "GPU:" && nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv
 
@@ -49,13 +49,13 @@ echo "==========================================="
 echo ""
 echo "Your RunPod public URL should be something like:"
 echo "  https://<pod-id>-8004.proxy.runpod.net  (XTTS)"
-echo "  https://<pod-id>-8001.proxy.runpod.net  (WhisperX)"
+echo "  https://<pod-id>-8002.proxy.runpod.net  (WhisperX)"
 echo ""
 echo "Or use the direct pod IP with exposed ports."
 echo ""
 echo "Update your LOCAL .env file:"
 echo "  XTTS_SERVICE_URL=https://<pod-id>-8004.proxy.runpod.net"
-echo "  WHISPERX_SERVICE_URL=https://<pod-id>-8001.proxy.runpod.net"
+echo "  WHISPERX_SERVICE_URL=https://<pod-id>-8002.proxy.runpod.net"
 echo ""
 echo "To check logs:"
 echo "  tail -f /tmp/xtts.log"
