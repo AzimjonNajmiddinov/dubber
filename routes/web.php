@@ -6,6 +6,7 @@ use App\Http\Controllers\RealtimeDubController;
 use App\Http\Controllers\StreamDubController;
 use App\Http\Controllers\SegmentPlayerController;
 use App\Http\Controllers\LiveDubController;
+use App\Http\Controllers\OnlineDubController;
 
 Route::get('/', [VideoController::class, 'index'])->name('videos.index');
 
@@ -35,3 +36,8 @@ Route::get('/player/{video}/segments', [SegmentPlayerController::class, 'player'
 
 // Live streaming dubbing
 Route::get('/stream', [LiveDubController::class, 'index'])->name('stream.live');
+
+// Online video dubber
+Route::get('/dub', [OnlineDubController::class, 'index'])->name('dub.index');
+Route::post('/dub', [OnlineDubController::class, 'submit'])->name('dub.submit');
+Route::get('/dub/{video}', [OnlineDubController::class, 'progress'])->name('dub.progress');
