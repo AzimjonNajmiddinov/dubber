@@ -44,7 +44,7 @@ class RunpodStartServices extends Command
 
         // Check if services are already running
         $xttsHealthy = $this->checkHealth(8004);
-        $whisperxHealthy = $this->checkHealth(8001);
+        $whisperxHealthy = $this->checkHealth(8002);
 
         if ($xttsHealthy && $whisperxHealthy) {
             $this->info('Both services are already running and healthy.');
@@ -137,13 +137,13 @@ class RunpodStartServices extends Command
         }
 
         if (! $whisperxRunning) {
-            $this->info('Starting WhisperX on port 8001...');
+            $this->info('Starting WhisperX on port 8002...');
             $cmd = "export HF_TOKEN='{$hfToken}' && "
                 . 'cd /workspace/dubber/whisperx-service && '
-                . 'nohup python -m uvicorn app:app --host 0.0.0.0 --port 8001 > /tmp/whisperx.log 2>&1 &';
+                . 'nohup python -m uvicorn app:app --host 0.0.0.0 --port 8002 > /tmp/whisperx.log 2>&1 &';
             $this->ssh($cmd);
         } else {
-            $this->line('  WhisperX already running on port 8001');
+            $this->line('  WhisperX already running on port 8002');
         }
     }
 
@@ -165,7 +165,7 @@ class RunpodStartServices extends Command
             }
 
             if (! $whisperxReady) {
-                $whisperxReady = $this->checkHealth(8001);
+                $whisperxReady = $this->checkHealth(8002);
                 if ($whisperxReady) {
                     $this->line('  WhisperX is healthy');
                 }
@@ -217,7 +217,7 @@ class RunpodStartServices extends Command
         }
 
         $xttsUrl = "https://{$podId}-8004.proxy.runpod.net";
-        $whisperxUrl = "https://{$podId}-8001.proxy.runpod.net";
+        $whisperxUrl = "https://{$podId}-8002.proxy.runpod.net";
 
         $envPath = base_path('.env');
         $content = file_get_contents($envPath);
@@ -254,7 +254,7 @@ class RunpodStartServices extends Command
 
         if ($podId) {
             $this->line("  XTTS:     https://{$podId}-8004.proxy.runpod.net");
-            $this->line("  WhisperX: https://{$podId}-8001.proxy.runpod.net");
+            $this->line("  WhisperX: https://{$podId}-8002.proxy.runpod.net");
         }
 
         // GPU info
