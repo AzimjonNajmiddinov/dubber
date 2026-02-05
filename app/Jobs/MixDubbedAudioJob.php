@@ -194,28 +194,30 @@ class MixDubbedAudioJob implements ShouldQueue, ShouldBeUnique
             // Split ttsbus for two consumers: sidechain + mix
             $filtersMain[] = "[ttsbus]asplit=2[tts_sc][tts_mix]";
 
-            // PROFESSIONAL BACKGROUND - clear music/effects, natural ducking
+            // BACKGROUND BED - suppress vocal bleed from stem separation
             $filtersMain[] =
                 "[0:a]"
                 . "aresample=48000,"
                 . "aformat=sample_fmts=fltp:channel_layouts=stereo,"
                 . "highpass=f=30,"
                 . "lowpass=f=16000,"
-                // Keep background full and clear
-                . "equalizer=f=80:t=q:w=0.6:g=+2,"     // bass punch
-                . "equalizer=f=2500:t=q:w=1.5:g=-3,"   // slight cut for voice space
-                . "equalizer=f=8000:t=q:w=1.0:g=+1,"   // clarity/detail
-                . "volume=-3dB"              // balanced level
+                // Cut vocal frequencies aggressively to reduce English bleed
+                . "equalizer=f=80:t=q:w=0.6:g=+2,"     // keep bass
+                . "equalizer=f=300:t=q:w=1.0:g=-4,"    // cut low vocal range
+                . "equalizer=f=1500:t=q:w=2.0:g=-6,"   // heavy cut on speech range
+                . "equalizer=f=3000:t=q:w=1.5:g=-5,"   // cut intelligibility range
+                . "equalizer=f=8000:t=q:w=1.0:g=+1,"   // keep high detail
+                . "volume=-8dB"              // much lower bed level
                 . "[bed]";
 
-            // Natural ducking - like real movie dubbing
+            // Aggressive ducking - suppress English vocal bleed when TTS plays
             $filtersMain[] =
                 "[bed][tts_sc]sidechaincompress="
-                . "threshold=0.015:"         // natural threshold
-                . "ratio=4:"                 // moderate ducking
-                . "attack=15:"               // smooth attack
-                . "release=500:"             // natural release
-                . "knee=6"                   // soft knee
+                . "threshold=0.008:"         // trigger on quieter TTS
+                . "ratio=12:"               // aggressive ducking
+                . "attack=8:"               // fast attack
+                . "release=400:"            // quick release
+                . "knee=4"                  // tighter knee
                 . "[ducked]";
 
             // Final mix - professional balance
