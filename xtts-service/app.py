@@ -472,12 +472,17 @@ async def synthesize(request: SynthesizeRequest):
 
         logger.info(f"Synthesis complete: {output_path} ({len(chunks)} chunks)")
 
-        return {
-            "ok": True,
-            "output_path": request.output_path,
-            "size": output_path.stat().st_size,
-            "chunks": len(chunks),
-        }
+        # Return the audio file directly so remote clients can download it
+        return FileResponse(
+            str(output_path),
+            media_type="audio/wav",
+            filename=output_path.name,
+            headers={
+                "X-Output-Path": request.output_path,
+                "X-Chunks": str(len(chunks)),
+                "X-Size": str(output_path.stat().st_size),
+            },
+        )
 
     except HTTPException:
         raise

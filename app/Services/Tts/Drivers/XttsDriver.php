@@ -82,8 +82,12 @@ class XttsDriver implements TtsDriverInterface
         // Output path (relative to storage)
         $outputRel = "audio/tts/{$videoId}/seg_{$segmentId}.wav";
 
-        // XTTS on CPU is slow - need longer timeout for long segments
+        $outputAbs = Storage::disk('local')->path($outputRel);
+        @mkdir(dirname($outputAbs), 0777, true);
+
+        // Synthesize via XTTS - response is the audio file directly
         $response = Http::timeout(600)
+            ->withOptions(['sink' => $outputAbs])
             ->post("{$this->baseUrl}/synthesize", [
                 'text' => $text,
                 'voice_id' => $voiceId,
@@ -94,32 +98,17 @@ class XttsDriver implements TtsDriverInterface
             ]);
 
         if ($response->failed()) {
+            @unlink($outputAbs);
             Log::error('XTTS synthesis failed', [
                 'segment_id' => $segmentId,
                 'voice_id' => $voiceId,
                 'status' => $response->status(),
-                'body' => mb_substr($response->body(), 0, 500),
             ]);
             throw new RuntimeException("XTTS synthesis failed for segment {$segmentId}");
         }
 
-        $outputAbs = Storage::disk('local')->path($outputRel);
-        @mkdir(dirname($outputAbs), 0777, true);
-
-        // If XTTS is remote, download the file (local Docker won't have it)
         if (!file_exists($outputAbs) || filesize($outputAbs) < 1000) {
-            $dlResponse = Http::timeout(60)
-                ->withOptions(['sink' => $outputAbs])
-                ->get("{$this->baseUrl}/download", ['path' => $outputRel]);
-
-            if ($dlResponse->failed() || !file_exists($outputAbs) || filesize($outputAbs) < 1000) {
-                Log::error('XTTS download failed', [
-                    'segment_id' => $segmentId,
-                    'url' => "{$this->baseUrl}/download?path={$outputRel}",
-                    'status' => $dlResponse->status(),
-                ]);
-                throw new RuntimeException("XTTS output file missing for segment {$segmentId}");
-            }
+            throw new RuntimeException("XTTS output file missing for segment {$segmentId}");
         }
 
         // Normalize audio
