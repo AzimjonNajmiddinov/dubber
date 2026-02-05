@@ -265,6 +265,22 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
             $budgetRule = "8. CHARACTER BUDGET: The original text is {$charCount} characters. Your translation MUST be {$maxChars} characters or fewer. Shorter is better — dubbing requires fitting speech into the same time slot.\n";
         }
 
+        // Few-shot examples for Uzbek to demonstrate natural spoken style
+        $examples = '';
+        if (str_contains($targetLanguage, 'Uzbek') || str_contains($targetLanguage, 'uz')) {
+            $examples =
+                "\nEXAMPLES of good dubbing translation (English → Uzbek):\n" .
+                "- \"Here's what it says if you're ready.\" → \"Tayyor bo'lsangiz, mana.\"\n" .
+                "- \"I don't think that's going to work out.\" → \"Bu ishlamaydi, menimcha.\"\n" .
+                "- \"We need to get out of here right now!\" → \"Tezroq ketishimiz kerak!\"\n" .
+                "- \"What are you talking about?\" → \"Nima deyapsan?\"\n" .
+                "- \"I told you this was a bad idea.\" → \"Yomon fikr degan edim-ku.\"\n" .
+                "- \"There's no way I'm letting you do that.\" → \"Yo'q, qo'ymayman.\"\n" .
+                "- \"Can you believe what just happened?\" → \"Ko'rdingmi nima bo'ldi?\"\n" .
+                "- \"I'm sorry, I didn't mean to hurt you.\" → \"Kechirasiz, xafa qilmoqchi emasdim.\"\n" .
+                "Notice: translations are SHORT, natural, and drop unnecessary words. Do the same.\n";
+        }
+
         return
             "You are an expert DUBBING TRANSLATOR specializing in {$targetLanguage}.\n" .
             "Target language: {$targetLanguage}.\n\n" .
@@ -278,6 +294,7 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
             "6. NATURAL FLOW: This line is part of a conversation. Make it flow naturally with surrounding dialogue.\n" .
             "7. OUTPUT ONLY: Return ONLY the translated text. No explanations, no quotes, no commentary.\n" .
             $budgetRule .
+            $examples .
             $contextBlock .
             $extra;
     }
