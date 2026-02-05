@@ -73,17 +73,22 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
             // Normalize target language (critical for determinism)
             $targetLanguage = $this->normalizeTargetLanguage((string) ($video->target_language ?: 'uz'));
 
-            $segments = VideoSegment::query()
+            // Fetch all segments ordered by time for surrounding context
+            $allSegments = VideoSegment::query()
                 ->where('video_id', $video->id)
-                ->whereNull('translated_text')
                 ->orderBy('start_time')
-                ->get(['id', 'text']);
+                ->get(['id', 'text', 'translated_text']);
+
+            $segments = $allSegments->filter(fn ($s) => $s->translated_text === null);
 
             if ($segments->isEmpty()) {
                 $video->update(['status' => 'translated']);
                 GenerateTtsSegmentsJobV2::dispatch($video->id);
                 return;
             }
+
+            // Build index for surrounding context lookup
+            $segmentsList = $allSegments->values();
 
             $apiKey = (string) config('services.openai.key');
             if (trim($apiKey) === '') {
@@ -104,12 +109,19 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
                     continue;
                 }
 
+                // Find surrounding context
+                $segIndex = $segmentsList->search(fn ($s) => $s->id === $seg->id);
+                $prevText = $segIndex > 0 ? trim((string) $segmentsList[$segIndex - 1]->text) : '';
+                $nextText = $segIndex < $segmentsList->count() - 1 ? trim((string) $segmentsList[$segIndex + 1]->text) : '';
+
+                $charCount = mb_strlen($src);
+
                 // Attempt up to 2 times if English leaks
                 $translated = null;
                 $lastBody = null;
 
                 for ($attempt = 1; $attempt <= 2; $attempt++) {
-                    $system = $this->buildSystemPrompt($targetLanguage, $attempt);
+                    $system = $this->buildSystemPrompt($targetLanguage, $attempt, $charCount, $prevText, $nextText);
 
                     $res = $client->post('https://api.openai.com/v1/chat/completions', [
                         'model' => 'gpt-4o-mini',
@@ -176,7 +188,7 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
                         'model' => 'gpt-4o-mini',
                         'temperature' => 0.0,
                         'messages' => [
-                            ['role' => 'system', 'content' => $this->buildSystemPrompt($targetLanguage, 3)],
+                            ['role' => 'system', 'content' => $this->buildSystemPrompt($targetLanguage, 3, $charCount, $prevText, $nextText)],
                             ['role' => 'user', 'content' => $src],
                         ],
                     ]);
@@ -218,11 +230,8 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
         return $raw;
     }
 
-    private function buildSystemPrompt(string $targetLanguage, int $attempt): string
+    private function buildSystemPrompt(string $targetLanguage, int $attempt, int $charCount = 0, string $prevText = '', string $nextText = ''): string
     {
-        // attempt 1: normal
-        // attempt 2: extra strict
-        // attempt 3: ultra strict (temp 0.0)
         $extra = '';
         if ($attempt >= 2) {
             $extra =
@@ -237,20 +246,40 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
                 "- If a name is English, keep name but everything else Uzbek.\n";
         }
 
-        return
-            "You are a PROFESSIONAL MOVIE DUBBING TRANSLATOR.\n" .
-            "Target language: {$targetLanguage}.\n\n" .
-            "YOUR GOAL: Create natural dubbed dialogue that sounds like it was originally written in the target language.\n\n" .
-            "CRITICAL RULES:\n" .
-            "1. PRESERVE MEANING: The translated line MUST convey the exact same meaning, emotions, and intent as the original. Do NOT change or lose any information.\n" .
-            "2. NATURAL SPEECH: Write how people actually speak in {$targetLanguage} - use natural expressions, idioms, and conversational flow.\n" .
-            "3. MATCH LENGTH: Keep similar word count and syllable count for lip-sync. If the original is short, translation must be short.\n" .
-            "4. EMOTION & TONE: Preserve the exact emotional tone - if angry, stay angry; if sad, stay sad; if joking, keep the humor.\n" .
-            "5. NO ENGLISH: Output ONLY in the target language. Translate everything except proper names.\n" .
-            "6. SPOKEN DIALOGUE: This will be spoken by voice actors - write for the ear, not the eye.\n" .
-            "7. OUTPUT ONLY: Return ONLY the translated text. No explanations, no quotes, no commentary.\n" .
-            $extra;
+        // Surrounding context block
+        $contextBlock = '';
+        if ($prevText !== '' || $nextText !== '') {
+            $contextBlock = "\nSURROUNDING DIALOGUE (for natural flow, do NOT translate these):\n";
+            if ($prevText !== '') {
+                $contextBlock .= "- Previous line: \"{$prevText}\"\n";
+            }
+            if ($nextText !== '') {
+                $contextBlock .= "- Next line: \"{$nextText}\"\n";
+            }
+        }
 
+        // Character budget
+        $budgetRule = '';
+        if ($charCount > 0) {
+            $maxChars = (int) round($charCount * 1.2);
+            $budgetRule = "8. CHARACTER BUDGET: The original text is {$charCount} characters. Your translation MUST be {$maxChars} characters or fewer. Shorter is better — dubbing requires fitting speech into the same time slot.\n";
+        }
+
+        return
+            "You are an expert DUBBING TRANSLATOR specializing in {$targetLanguage}.\n" .
+            "Target language: {$targetLanguage}.\n\n" .
+            "YOUR GOAL: Produce concise, natural dubbed dialogue that fits within the original time slot.\n\n" .
+            "CRITICAL RULES:\n" .
+            "1. BE CONCISE: Translation must be SHORTER or equal length to the original. Dubbing requires fitting speech into the same time slot. Cut filler words, simplify long constructions, use compact phrasing.\n" .
+            "2. SPOKEN LANGUAGE: Use short, punchy phrases. Avoid long formal constructions. Write how people TALK, not how they write. Use colloquial, everyday speech patterns of {$targetLanguage}.\n" .
+            "3. PRESERVE MEANING: Convey the same meaning, emotions, and intent. Do NOT add or lose information.\n" .
+            "4. EMOTION & TONE: Preserve the exact emotional tone — angry stays angry, sad stays sad, humor stays funny.\n" .
+            "5. NO ENGLISH: Output ONLY in {$targetLanguage}. Translate everything except proper names.\n" .
+            "6. NATURAL FLOW: This line is part of a conversation. Make it flow naturally with surrounding dialogue.\n" .
+            "7. OUTPUT ONLY: Return ONLY the translated text. No explanations, no quotes, no commentary.\n" .
+            $budgetRule .
+            $contextBlock .
+            $extra;
     }
 
 }

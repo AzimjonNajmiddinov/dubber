@@ -17,6 +17,7 @@ use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Facades\Storage;
 
 /**
@@ -247,6 +248,9 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
         try {
             $outputPath = $driver->synthesize($text, $speaker, $seg, $options);
 
+            // Post-synthesis: fit audio to time slot if it overflows
+            $this->fitAudioToSlot($outputPath, $slotDuration);
+
             // Update segment with output path
             $relPath = str_replace(Storage::disk('local')->path(''), '', $outputPath);
 
@@ -322,8 +326,109 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
 
         $speedupFactor = $estimatedDuration / $slotDuration;
 
-        // Cap at 1.5x for quality
-        return min(1.5, $speedupFactor);
+        // Cap at 1.2x for quality — post-synthesis atempo handles the rest
+        return min(1.2, $speedupFactor);
+    }
+
+    /**
+     * Fit TTS audio to the available time slot using atempo if it overflows.
+     */
+    protected function fitAudioToSlot(string $audioPath, float $slotDuration): void
+    {
+        if ($slotDuration <= 0 || !file_exists($audioPath)) {
+            return;
+        }
+
+        // Probe actual TTS duration
+        $probe = Process::timeout(15)->run([
+            'ffprobe', '-v', 'error',
+            '-show_entries', 'format=duration',
+            '-of', 'csv=p=0',
+            $audioPath,
+        ]);
+
+        if (!$probe->successful()) {
+            Log::warning('ffprobe failed for TTS audio', [
+                'path' => $audioPath,
+                'error' => $probe->errorOutput(),
+            ]);
+            return;
+        }
+
+        $audioDuration = (float) trim($probe->output());
+
+        if ($audioDuration <= 0 || $audioDuration <= $slotDuration) {
+            return; // Fits within the slot, no adjustment needed
+        }
+
+        $ratio = $audioDuration / $slotDuration;
+
+        // Cap at 8x (3 chained atempo=2.0) — beyond that, audio is unusable
+        if ($ratio > 8.0) {
+            Log::warning('TTS audio exceeds 8x slot duration, capping atempo', [
+                'path' => $audioPath,
+                'audio_duration' => $audioDuration,
+                'slot_duration' => $slotDuration,
+                'ratio' => $ratio,
+            ]);
+            $ratio = 8.0;
+        }
+
+        $atempoChain = $this->buildAtempoChain($ratio);
+
+        if ($atempoChain === '') {
+            return;
+        }
+
+        $tmpPath = $audioPath . '.fitted.wav';
+
+        $result = Process::timeout(30)->run([
+            'ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
+            '-i', $audioPath,
+            '-af', $atempoChain,
+            '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s16le',
+            $tmpPath,
+        ]);
+
+        if ($result->successful() && file_exists($tmpPath) && filesize($tmpPath) > 0) {
+            rename($tmpPath, $audioPath);
+
+            Log::info('Fitting TTS audio to slot', [
+                'path' => $audioPath,
+                'original_duration' => $audioDuration,
+                'slot_duration' => $slotDuration,
+                'tempo_ratio' => round($ratio, 3),
+                'atempo_chain' => $atempoChain,
+            ]);
+        } else {
+            @unlink($tmpPath);
+            Log::warning('atempo fitting failed', [
+                'path' => $audioPath,
+                'error' => $result->errorOutput(),
+            ]);
+        }
+    }
+
+    /**
+     * Build chained atempo filter string for a given speedup ratio.
+     * Each atempo filter supports 0.5–2.0, so chain multiple for larger ratios.
+     */
+    protected function buildAtempoChain(float $ratio): string
+    {
+        if ($ratio <= 1.0) {
+            return '';
+        }
+
+        $filters = [];
+        $remaining = $ratio;
+
+        while ($remaining > 1.0 && count($filters) < 3) {
+            $step = min($remaining, 2.0);
+            $filters[] = 'atempo=' . number_format($step, 4, '.', '');
+            $remaining = $remaining / $step;
+        }
+
+        return implode(',', $filters);
     }
 
     /**
