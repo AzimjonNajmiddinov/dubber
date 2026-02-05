@@ -77,7 +77,7 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
             $allSegments = VideoSegment::query()
                 ->where('video_id', $video->id)
                 ->orderBy('start_time')
-                ->get(['id', 'text', 'translated_text']);
+                ->get(['id', 'text', 'translated_text', 'start_time', 'end_time']);
 
             $segments = $allSegments->filter(fn ($s) => $s->translated_text === null);
 
@@ -116,12 +116,15 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
 
                 $charCount = mb_strlen($src);
 
+                // Calculate slot duration for time-aware character budget
+                $slotDuration = ((float) $seg->end_time) - ((float) $seg->start_time);
+
                 // Attempt up to 2 times if English leaks
                 $translated = null;
                 $lastBody = null;
 
                 for ($attempt = 1; $attempt <= 2; $attempt++) {
-                    $system = $this->buildSystemPrompt($targetLanguage, $attempt, $charCount, $prevText, $nextText);
+                    $system = $this->buildSystemPrompt($targetLanguage, $attempt, $charCount, $prevText, $nextText, $slotDuration);
 
                     $res = $client->post('https://api.openai.com/v1/chat/completions', [
                         'model' => 'gpt-4o-mini',
@@ -188,7 +191,7 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
                         'model' => 'gpt-4o-mini',
                         'temperature' => 0.0,
                         'messages' => [
-                            ['role' => 'system', 'content' => $this->buildSystemPrompt($targetLanguage, 3, $charCount, $prevText, $nextText)],
+                            ['role' => 'system', 'content' => $this->buildSystemPrompt($targetLanguage, 3, $charCount, $prevText, $nextText, $slotDuration)],
                             ['role' => 'user', 'content' => $src],
                         ],
                     ]);
@@ -230,7 +233,7 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
         return $raw;
     }
 
-    private function buildSystemPrompt(string $targetLanguage, int $attempt, int $charCount = 0, string $prevText = '', string $nextText = ''): string
+    private function buildSystemPrompt(string $targetLanguage, int $attempt, int $charCount = 0, string $prevText = '', string $nextText = '', float $slotDuration = 0): string
     {
         $extra = '';
         if ($attempt >= 2) {
@@ -258,11 +261,24 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
             }
         }
 
-        // Character budget
+        // Time-aware character budget
         $budgetRule = '';
         if ($charCount > 0) {
-            $maxChars = (int) round($charCount * 1.2);
-            $budgetRule = "8. CHARACTER BUDGET: The original text is {$charCount} characters. Your translation MUST be {$maxChars} characters or fewer. Shorter is better — dubbing requires fitting speech into the same time slot.\n";
+            $maxCharsFromSource = (int) round($charCount * 1.2);
+
+            if ($slotDuration > 0) {
+                // ~12 chars/sec is a conservative speaking rate for Uzbek TTS
+                $maxCharsFromSlot = (int) round($slotDuration * 12);
+                $maxChars = min($maxCharsFromSlot, $maxCharsFromSource);
+
+                if ($slotDuration < 1.5) {
+                    $budgetRule = "8. TIME CONSTRAINT: This line must fit in {$slotDuration}s. Use only 1-3 words. Maximum {$maxChars} characters.\n";
+                } else {
+                    $budgetRule = "8. TIME CONSTRAINT: This line must fit in {$slotDuration}s (~{$maxChars} characters max at speaking speed). Shorter is better — dubbing requires fitting speech into this time slot.\n";
+                }
+            } else {
+                $budgetRule = "8. CHARACTER BUDGET: The original text is {$charCount} characters. Your translation MUST be {$maxCharsFromSource} characters or fewer. Shorter is better — dubbing requires fitting speech into the same time slot.\n";
+            }
         }
 
         // Few-shot examples for Uzbek to demonstrate natural spoken style

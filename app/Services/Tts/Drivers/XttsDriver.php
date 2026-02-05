@@ -240,14 +240,14 @@ class XttsDriver implements TtsDriverInterface
         $gainDb = $options['gain_db'] ?? 0.0;
         $tempPath = $path . '.tmp.wav';
 
-        $filter = sprintf(
-            'aresample=48000,' .
-            'aformat=sample_fmts=fltp:channel_layouts=stereo,' .
-            'volume=%sdB,' .
-            'loudnorm=I=-16:TP=-1.5:LRA=11,' .
-            'aresample=48000',
-            $gainDb >= 0 ? "+{$gainDb}" : $gainDb
-        );
+        // Only resample to 48kHz stereo (XTTS outputs 24kHz mono).
+        // No loudnorm here — the final mix handles loudness normalization once.
+        $filter = 'aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo';
+
+        if (abs($gainDb) > 0.1) {
+            $sign = $gainDb >= 0 ? '+' : '';
+            $filter .= ",volume={$sign}{$gainDb}dB";
+        }
 
         $cmd = sprintf(
             'ffmpeg -y -hide_banner -loglevel error -i %s -af %s -ar 48000 -ac 2 -c:a pcm_s16le %s 2>&1',

@@ -334,8 +334,8 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
      * Fit TTS audio to the available time slot.
      *
      * Strategy:
-     * - Up to 1.8x: apply atempo speedup (still sounds natural)
-     * - Beyond 1.8x: apply 1.8x atempo + trim with fade-out to fit the slot
+     * - Up to 2.3x: apply atempo speedup (still intelligible)
+     * - Beyond 2.3x: apply 2.3x atempo + trim with fade-out to fit the slot
      *   (understandable speech is better than garbled fast-forward)
      */
     protected function fitAudioToSlot(string $audioPath, float $slotDuration): void
@@ -370,7 +370,7 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
         }
 
         $ratio = $audioDuration / $slotDuration;
-        $maxTempo = 1.8;
+        $maxTempo = 2.3;
 
         // Build the filter chain
         if ($ratio <= $maxTempo) {

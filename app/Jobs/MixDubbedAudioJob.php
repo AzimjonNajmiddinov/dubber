@@ -58,6 +58,49 @@ class MixDubbedAudioJob implements ShouldQueue, ShouldBeUnique
         }
     }
 
+    /**
+     * Build FFmpeg volume expression that mutes the bed during TTS segments.
+     * Returns expression like: 1-min(between(t\,0.5\,2.3)+between(t\,3.0\,5.0)\,1)*0.97
+     * During TTS: volume = 0.03 (-30dB), Between TTS: volume = 1.0
+     */
+    protected function buildDuckingExpression($segments): string
+    {
+        // Merge overlapping/adjacent segments with padding into blocks
+        $padding = 0.08; // 80ms padding before/after each segment
+        $blocks = [];
+
+        foreach ($segments as $seg) {
+            $start = max(0, (float) $seg->start_time - $padding);
+            $end = (float) $seg->end_time + $padding;
+
+            if (!empty($blocks) && $start <= end($blocks)['end']) {
+                // Merge with previous block
+                $blocks[count($blocks) - 1]['end'] = max($blocks[count($blocks) - 1]['end'], $end);
+            } else {
+                $blocks[] = ['start' => $start, 'end' => $end];
+            }
+        }
+
+        if (empty($blocks)) {
+            return '1'; // No ducking needed
+        }
+
+        // Build between() terms with escaped commas for FFmpeg filter_complex
+        $terms = [];
+        foreach ($blocks as $b) {
+            $terms[] = sprintf(
+                'between(t\\,%.3f\\,%.3f)',
+                $b['start'],
+                $b['end']
+            );
+        }
+
+        // volume = 1 - min(sum, 1) * 0.97
+        // When TTS plays: 1 - 1*0.97 = 0.03 (-30dB)
+        // When no TTS:    1 - 0*0.97 = 1.0  (full volume)
+        return '1-min(' . implode('+', $terms) . '\\,1)*0.97';
+    }
+
     public function handle(): void
     {
         $lock = Cache::lock("video:{$this->videoId}:mix", 1800);
@@ -126,24 +169,13 @@ class MixDubbedAudioJob implements ShouldQueue, ShouldBeUnique
                 $delayMs = max(0, (int) round(((float) $seg->start_time) * 1000));
                 $label = "tts{$i}";
 
-                // PROFESSIONAL MOVIE DUBBING - clean, natural, clear
                 $filtersBase[] =
                     "[{$i}:a]"
                     . "aresample=48000,"
                     . "aformat=sample_fmts=fltp:channel_layouts=stereo,"
                     . "adelay={$delayMs}|{$delayMs},"
-                    // Clean up
                     . "highpass=f=60,"
-                    . "lowpass=f=15000,"
-                    // Professional voice EQ - natural and clear
-                    . "equalizer=f=120:t=q:w=0.7:g=+2,"      // body/fullness
-                    . "equalizer=f=2800:t=q:w=1.0:g=+3,"     // clarity/intelligibility
-                    . "equalizer=f=5500:t=q:w=0.8:g=+2,"     // presence/air
-                    . "equalizer=f=7500:t=q:w=1.5:g=-1,"     // reduce harshness
-                    // Broadcast-style compression for consistent level
-                    . "acompressor=threshold=-20dB:ratio=3:attack=10:release=100:makeup=2dB,"
-                    // Voice level - prominent but natural
-                    . "volume=+4dB"
+                    . "lowpass=f=15000"
                     . "[{$label}]";
 
                 $ttsLabels[] = "[{$label}]";
@@ -188,41 +220,38 @@ class MixDubbedAudioJob implements ShouldQueue, ShouldBeUnique
                 throw new \RuntimeException("TTS-only render failed for video {$video->id}");
             }
 
-            // 5) Bed + ducking + final mix (USE asplit because ttsbus is reused)
+            // 5) Bed + deterministic time-based ducking + final mix
             $filtersMain = $filtersBase;
 
-            // Split ttsbus for two consumers: sidechain + mix
-            $filtersMain[] = "[ttsbus]asplit=2[tts_sc][tts_mix]";
+            // Build volume expression that mutes the bed during TTS segments
+            $duckExpr = $this->buildDuckingExpression($segments);
 
-            // BACKGROUND BED - suppress vocal bleed from stem separation
+            Log::info('Bed ducking expression built', [
+                'video_id' => $video->id,
+                'expression_length' => strlen($duckExpr),
+            ]);
+
+            // BACKGROUND BED with time-based ducking
+            // EQ cuts vocal frequencies, then volume expression mutes bed during TTS
             $filtersMain[] =
                 "[0:a]"
                 . "aresample=48000,"
                 . "aformat=sample_fmts=fltp:channel_layouts=stereo,"
                 . "highpass=f=30,"
                 . "lowpass=f=16000,"
-                // Cut vocal frequencies aggressively to reduce English bleed
+                // Cut vocal frequencies to reduce English bleed
                 . "equalizer=f=80:t=q:w=0.6:g=+2,"     // keep bass
-                . "equalizer=f=300:t=q:w=1.0:g=-4,"    // cut low vocal range
-                . "equalizer=f=1500:t=q:w=2.0:g=-6,"   // heavy cut on speech range
-                . "equalizer=f=3000:t=q:w=1.5:g=-5,"   // cut intelligibility range
-                . "equalizer=f=8000:t=q:w=1.0:g=+1,"   // keep high detail
-                . "volume=-8dB"              // much lower bed level
-                . "[bed]";
-
-            // Aggressive ducking - suppress English vocal bleed when TTS plays
-            $filtersMain[] =
-                "[bed][tts_sc]sidechaincompress="
-                . "threshold=0.008:"         // trigger on quieter TTS
-                . "ratio=12:"               // aggressive ducking
-                . "attack=8:"               // fast attack
-                . "release=400:"            // quick release
-                . "knee=4"                  // tighter knee
+                . "equalizer=f=300:t=q:w=1.0:g=-4,"     // cut low vocal range
+                . "equalizer=f=1500:t=q:w=2.0:g=-6,"    // heavy cut on speech range
+                . "equalizer=f=3000:t=q:w=1.5:g=-5,"    // cut intelligibility range
+                . "equalizer=f=8000:t=q:w=1.0:g=+1,"    // keep high detail
+                . "volume=-10dB,"                        // lower bed level
+                . "volume={$duckExpr}:eval=frame"        // mute during TTS segments
                 . "[ducked]";
 
-            // Final mix - professional balance
+            // Final mix - bed (ducked) + TTS
             $filtersMain[] =
-                "[ducked][tts_mix]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,"
+                "[ducked][ttsbus]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,"
                 . "loudnorm=I=-14:TP=-1.5:LRA=11,"    // broadcast loudness standard
                 . "alimiter=limit=0.95"
                 . "[mixed]";
