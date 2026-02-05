@@ -101,6 +101,8 @@ class RunpodStartServices extends Command
             'pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121',
             'pip install --ignore-installed blinker',
             'pip install TTS faster-whisper whisperx fastapi uvicorn python-multipart',
+            'pip install nvidia-cudnn-cu11==8.9.6.50',
+            'pip install --upgrade pyannote.audio huggingface_hub',
         ]);
 
         $result = $this->ssh($commands, 600);
@@ -126,9 +128,12 @@ class RunpodStartServices extends Command
     {
         $hfToken = env('HF_TOKEN', '');
 
+        // Resolve cuDNN library path for LD_LIBRARY_PATH
+        $ldExport = 'export LD_LIBRARY_PATH=$(python -c "import nvidia.cudnn; print(nvidia.cudnn.__path__[0] + \'/lib\')" 2>/dev/null):${LD_LIBRARY_PATH}';
+
         if (! $xttsRunning) {
             $this->info('Starting XTTS on port 8004...');
-            $cmd = "export HF_TOKEN='{$hfToken}' && "
+            $cmd = "export HF_TOKEN='{$hfToken}' && {$ldExport} && "
                 . 'cd /workspace/dubber/xtts-service && '
                 . 'nohup python -m uvicorn app:app --host 0.0.0.0 --port 8004 > /tmp/xtts.log 2>&1 &';
             $this->ssh($cmd);
@@ -138,7 +143,7 @@ class RunpodStartServices extends Command
 
         if (! $whisperxRunning) {
             $this->info('Starting WhisperX on port 8002...');
-            $cmd = "export HF_TOKEN='{$hfToken}' && "
+            $cmd = "export HF_TOKEN='{$hfToken}' && {$ldExport} && "
                 . 'cd /workspace/dubber/whisperx-service && '
                 . 'nohup python -m uvicorn app:app --host 0.0.0.0 --port 8002 > /tmp/whisperx.log 2>&1 &';
             $this->ssh($cmd);
