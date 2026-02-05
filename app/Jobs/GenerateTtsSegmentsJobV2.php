@@ -221,12 +221,9 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
         }
         $slotDuration = (float) $seg->end_time - (float) $seg->start_time;
 
-        // Calculate speed adjustment
-        $speed = $this->calculateSpeed($text, $slotDuration);
-
         $options = [
             'emotion' => $emotion,
-            'speed' => $speed,
+            'speed' => 1.0,
             'gain_db' => (float) ($speaker?->tts_gain_db ?? 0),
             'language' => $video->target_language ?? 'uz',
         ];
@@ -241,7 +238,7 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
             'segment_id' => $seg->id,
             'driver' => $driver->name(),
             'emotion' => $emotion,
-            'speed' => $speed,
+            'slot_duration' => $slotDuration,
             'voice_cloned' => $speaker?->voice_cloned ?? false,
         ]);
 
@@ -308,35 +305,13 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
     }
 
     /**
-     * Calculate speech speed to fit the time slot.
-     */
-    protected function calculateSpeed(string $text, float $slotDuration): float
-    {
-        if ($slotDuration <= 0) {
-            return 1.0;
-        }
-
-        // Estimate: ~7 characters per second at normal speed
-        $textLen = mb_strlen($text);
-        $estimatedDuration = $textLen / 7.0;
-
-        if ($estimatedDuration <= $slotDuration) {
-            return 1.0; // No speedup needed
-        }
-
-        $speedupFactor = $estimatedDuration / $slotDuration;
-
-        // Cap at 1.2x for quality — post-synthesis atempo handles the rest
-        return min(1.2, $speedupFactor);
-    }
-
-    /**
-     * Fit TTS audio to the available time slot.
+     * Fit TTS audio to the available time slot (bidirectional).
      *
      * Strategy:
-     * - Up to 2.3x: apply atempo speedup (still intelligible)
-     * - Beyond 2.3x: apply 2.3x atempo + trim with fade-out to fit the slot
-     *   (understandable speech is better than garbled fast-forward)
+     * - Too short (ratio 0.75–1.0): slow down with atempo to fill the slot
+     * - Already fits (ratio ~1.0): no change
+     * - Too long (ratio 1.0–2.3): speed up with atempo
+     * - Way too long (>2.3x): apply 2.3x atempo + trim with fade-out
      */
     protected function fitAudioToSlot(string $audioPath, float $slotDuration): void
     {
@@ -365,15 +340,25 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
 
         $audioDuration = (float) trim($probe->output());
 
-        if ($audioDuration <= 0 || $audioDuration <= $slotDuration) {
-            return; // Fits within the slot, no adjustment needed
+        if ($audioDuration <= 0) {
+            return;
         }
 
         $ratio = $audioDuration / $slotDuration;
         $maxTempo = 2.3;
+        $minTempo = 0.75;
+
+        // Skip if already close enough (within 5%)
+        if ($ratio >= 0.95 && $ratio <= 1.05) {
+            return;
+        }
 
         // Build the filter chain
-        if ($ratio <= $maxTempo) {
+        if ($ratio < 1.0) {
+            // Audio is too short — slow down to fill the slot
+            $effectiveRatio = max($ratio, $minTempo);
+            $filter = 'atempo=' . number_format($effectiveRatio, 4, '.', '');
+        } elseif ($ratio <= $maxTempo) {
             // Moderate speedup — atempo alone is enough
             $filter = $this->buildAtempoChain($ratio);
         } else {
@@ -413,7 +398,8 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
                 'path' => $audioPath,
                 'original_duration' => $audioDuration,
                 'slot_duration' => $slotDuration,
-                'tempo_ratio' => round(min($ratio, $maxTempo), 3),
+                'tempo_ratio' => round($ratio, 3),
+                'direction' => $ratio < 1.0 ? 'slowdown' : 'speedup',
                 'trimmed' => $ratio > $maxTempo,
                 'filter' => $filter,
             ]);
