@@ -24,7 +24,7 @@ git clone https://github.com/AzimjonNajmiddinov/dubber.git
 cd dubber
 
 echo "[4/4] Starting GPU services..."
-export HF_TOKEN="${HF_TOKEN:-YOUR_HF_TOKEN_HERE}"
+export HF_TOKEN="${HF_TOKEN:-your_hf_token_here}"
 
 # Ensure cuDNN libraries are on the path
 CUDNN_PATH=$(python -c "import nvidia.cudnn; print(nvidia.cudnn.__path__[0] + '/lib')" 2>/dev/null || true)
