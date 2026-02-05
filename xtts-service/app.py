@@ -31,6 +31,7 @@ import torch
 import torchaudio
 import numpy as np
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 # Configure logging
@@ -483,6 +484,20 @@ async def synthesize(request: SynthesizeRequest):
     except Exception as e:
         logger.error(f"Synthesis failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/download")
+async def download_file(path: str):
+    """Download a synthesized audio file by its relative path."""
+    file_path = STORAGE_PATH / path
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail=f"File not found: {path}")
+    # Prevent path traversal
+    try:
+        file_path.resolve().relative_to(STORAGE_PATH.resolve())
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Access denied")
+    return FileResponse(str(file_path), media_type="audio/wav", filename=file_path.name)
 
 
 @app.post("/warmup/{voice_id}")

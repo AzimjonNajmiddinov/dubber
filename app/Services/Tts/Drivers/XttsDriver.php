@@ -104,9 +104,22 @@ class XttsDriver implements TtsDriverInterface
         }
 
         $outputAbs = Storage::disk('local')->path($outputRel);
+        @mkdir(dirname($outputAbs), 0777, true);
 
+        // If XTTS is remote, download the file (local Docker won't have it)
         if (!file_exists($outputAbs) || filesize($outputAbs) < 1000) {
-            throw new RuntimeException("XTTS output file missing for segment {$segmentId}");
+            $dlResponse = Http::timeout(60)
+                ->withOptions(['sink' => $outputAbs])
+                ->get("{$this->baseUrl}/download", ['path' => $outputRel]);
+
+            if ($dlResponse->failed() || !file_exists($outputAbs) || filesize($outputAbs) < 1000) {
+                Log::error('XTTS download failed', [
+                    'segment_id' => $segmentId,
+                    'url' => "{$this->baseUrl}/download?path={$outputRel}",
+                    'status' => $dlResponse->status(),
+                ]);
+                throw new RuntimeException("XTTS output file missing for segment {$segmentId}");
+            }
         }
 
         // Normalize audio
