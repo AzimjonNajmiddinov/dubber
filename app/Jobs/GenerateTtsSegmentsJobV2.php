@@ -457,14 +457,11 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
         $tmpPath = $audioPath . '.trimmed.wav';
 
         // silenceremove: strip leading silence, then reverse+strip trailing silence
-        // start_periods=1: remove silence at start
-        // stop_periods=1: remove silence at end (via reverse trick)
-        // start_threshold/stop_threshold: -50dB is silence
-        // start_duration/stop_duration: minimum silence to trigger removal
+        // -40dB threshold catches Edge TTS low-level noise padding
         $result = Process::timeout(15)->run([
             'ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
             '-i', $audioPath,
-            '-af', 'silenceremove=start_periods=1:start_threshold=-50dB:start_duration=0.05,areverse,silenceremove=start_periods=1:start_threshold=-50dB:start_duration=0.05,areverse',
+            '-af', 'silenceremove=start_periods=1:start_threshold=-40dB:start_duration=0.02,areverse,silenceremove=start_periods=1:start_threshold=-40dB:start_duration=0.02,areverse',
             '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s16le',
             $tmpPath,
         ]);
@@ -473,14 +470,15 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
             $origSize = filesize($audioPath);
             $newSize = filesize($tmpPath);
 
-            // Only use trimmed version if it actually removed something meaningful
-            if ($newSize < $origSize * 0.95) {
-                rename($tmpPath, $audioPath);
+            // Accept trimmed version if it's smaller (any amount of silence removed helps)
+            if ($newSize < $origSize) {
                 Log::info('Stripped silence from TTS audio', [
                     'path' => $audioPath,
                     'original_size' => $origSize,
                     'trimmed_size' => $newSize,
+                    'reduced_pct' => round((1 - $newSize / $origSize) * 100, 1),
                 ]);
+                rename($tmpPath, $audioPath);
                 return;
             }
         }
