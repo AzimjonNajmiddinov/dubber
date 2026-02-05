@@ -331,7 +331,12 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
     }
 
     /**
-     * Fit TTS audio to the available time slot using atempo if it overflows.
+     * Fit TTS audio to the available time slot.
+     *
+     * Strategy:
+     * - Up to 1.8x: apply atempo speedup (still sounds natural)
+     * - Beyond 1.8x: apply 1.8x atempo + trim with fade-out to fit the slot
+     *   (understandable speech is better than garbled fast-forward)
      */
     protected function fitAudioToSlot(string $audioPath, float $slotDuration): void
     {
@@ -362,21 +367,29 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
         }
 
         $ratio = $audioDuration / $slotDuration;
+        $maxTempo = 1.8;
 
-        // Cap at 8x (3 chained atempo=2.0) — beyond that, audio is unusable
-        if ($ratio > 8.0) {
-            Log::warning('TTS audio exceeds 8x slot duration, capping atempo', [
+        // Build the filter chain
+        if ($ratio <= $maxTempo) {
+            // Moderate speedup — atempo alone is enough
+            $filter = $this->buildAtempoChain($ratio);
+        } else {
+            // Audio is way too long — apply max safe atempo, then trim to fit
+            $atempoChain = $this->buildAtempoChain($maxTempo);
+            $fadeOut = max(0.05, min(0.3, $slotDuration * 0.1));
+            $fadeStart = max(0, $slotDuration - $fadeOut);
+            $filter = "{$atempoChain},atrim=0:{$slotDuration},asetpts=PTS-STARTPTS,afade=t=out:st={$fadeStart}:d={$fadeOut}";
+
+            Log::warning('TTS audio too long for slot, applying atempo+trim', [
                 'path' => $audioPath,
                 'audio_duration' => $audioDuration,
                 'slot_duration' => $slotDuration,
-                'ratio' => $ratio,
+                'ratio' => round($ratio, 3),
+                'effective_tempo' => $maxTempo,
             ]);
-            $ratio = 8.0;
         }
 
-        $atempoChain = $this->buildAtempoChain($ratio);
-
-        if ($atempoChain === '') {
+        if ($filter === '') {
             return;
         }
 
@@ -385,7 +398,7 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
         $result = Process::timeout(30)->run([
             'ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
             '-i', $audioPath,
-            '-af', $atempoChain,
+            '-af', $filter,
             '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s16le',
             $tmpPath,
         ]);
@@ -397,8 +410,9 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
                 'path' => $audioPath,
                 'original_duration' => $audioDuration,
                 'slot_duration' => $slotDuration,
-                'tempo_ratio' => round($ratio, 3),
-                'atempo_chain' => $atempoChain,
+                'tempo_ratio' => round(min($ratio, $maxTempo), 3),
+                'trimmed' => $ratio > $maxTempo,
+                'filter' => $filter,
             ]);
         } else {
             @unlink($tmpPath);
