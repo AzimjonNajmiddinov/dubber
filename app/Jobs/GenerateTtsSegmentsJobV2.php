@@ -344,7 +344,10 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
             return;
         }
 
-        // Probe actual TTS duration
+        // Step 1: Strip trailing silence (Edge TTS adds heavy padding)
+        $this->stripSilence($audioPath);
+
+        // Probe actual TTS duration (after silence removal)
         $probe = Process::timeout(15)->run([
             'ffprobe', '-v', 'error',
             '-show_entries', 'format=duration',
@@ -443,6 +446,46 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
         }
 
         return implode(',', $filters);
+    }
+
+    /**
+     * Strip leading and trailing silence from TTS audio.
+     * Edge TTS often pads output with several seconds of silence.
+     */
+    protected function stripSilence(string $audioPath): void
+    {
+        $tmpPath = $audioPath . '.trimmed.wav';
+
+        // silenceremove: strip leading silence, then reverse+strip trailing silence
+        // start_periods=1: remove silence at start
+        // stop_periods=1: remove silence at end (via reverse trick)
+        // start_threshold/stop_threshold: -50dB is silence
+        // start_duration/stop_duration: minimum silence to trigger removal
+        $result = Process::timeout(15)->run([
+            'ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
+            '-i', $audioPath,
+            '-af', 'silenceremove=start_periods=1:start_threshold=-50dB:start_duration=0.05,areverse,silenceremove=start_periods=1:start_threshold=-50dB:start_duration=0.05,areverse',
+            '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s16le',
+            $tmpPath,
+        ]);
+
+        if ($result->successful() && file_exists($tmpPath) && filesize($tmpPath) > 1000) {
+            $origSize = filesize($audioPath);
+            $newSize = filesize($tmpPath);
+
+            // Only use trimmed version if it actually removed something meaningful
+            if ($newSize < $origSize * 0.95) {
+                rename($tmpPath, $audioPath);
+                Log::info('Stripped silence from TTS audio', [
+                    'path' => $audioPath,
+                    'original_size' => $origSize,
+                    'trimmed_size' => $newSize,
+                ]);
+                return;
+            }
+        }
+
+        @unlink($tmpPath);
     }
 
     /**
