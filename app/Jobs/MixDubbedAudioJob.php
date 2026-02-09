@@ -169,16 +169,23 @@ class MixDubbedAudioJob implements ShouldQueue, ShouldBeUnique
                 $delayMs = max(0, (int) round(((float) $seg->start_time) * 1000));
                 $label = "tts{$i}";
 
-                // Add short fade in/out for smooth segment transitions (30ms each)
+                // Professional TTS processing for natural, broadcast-quality speech
+                // - Gentle fade in/out (50ms) for smooth transitions without clicks
+                // - Light de-esser to reduce harsh sibilance
+                // - Subtle warmth boost for voice presence
                 $filtersBase[] =
                     "[{$i}:a]"
                     . "aresample=48000,"
                     . "aformat=sample_fmts=fltp:channel_layouts=stereo,"
-                    . "afade=t=in:d=0.03,"
-                    . "areverse,afade=t=in:d=0.03,areverse,"  // fade out via reverse trick
-                    . "adelay={$delayMs}|{$delayMs},"
-                    . "highpass=f=60,"
-                    . "lowpass=f=15000"
+                    . "afade=t=in:d=0.05,"                     // 50ms fade in
+                    . "areverse,afade=t=in:d=0.05,areverse,"   // 50ms fade out
+                    . "highpass=f=80,"                         // Remove rumble
+                    . "lowpass=f=12000,"                       // Remove harsh highs
+                    . "equalizer=f=200:t=q:w=0.8:g=+1,"        // Subtle warmth
+                    . "equalizer=f=3000:t=q:w=1.2:g=+1,"       // Presence/clarity
+                    . "equalizer=f=6500:t=q:w=1.5:g=-2,"       // De-ess (reduce sibilance)
+                    . "acompressor=threshold=-20dB:ratio=2:attack=20:release=200:makeup=1dB," // Gentle compression
+                    . "adelay={$delayMs}|{$delayMs}"
                     . "[{$label}]";
 
                 $ttsLabels[] = "[{$label}]";
@@ -235,21 +242,21 @@ class MixDubbedAudioJob implements ShouldQueue, ShouldBeUnique
             ]);
 
             // BACKGROUND BED with time-based ducking
-            // EQ cuts vocal frequencies, then volume expression mutes bed during TTS
+            // Gentle EQ to reduce vocal bleed while preserving music quality
             $filtersMain[] =
                 "[0:a]"
                 . "aresample=48000,"
                 . "aformat=sample_fmts=fltp:channel_layouts=stereo,"
-                . "highpass=f=30,"
-                . "lowpass=f=16000,"
-                // Cut vocal frequencies to reduce English bleed
-                . "equalizer=f=80:t=q:w=0.6:g=+2,"     // keep bass
-                . "equalizer=f=300:t=q:w=1.0:g=-4,"     // cut low vocal range
-                . "equalizer=f=1500:t=q:w=2.0:g=-6,"    // heavy cut on speech range
-                . "equalizer=f=3000:t=q:w=1.5:g=-5,"    // cut intelligibility range
-                . "equalizer=f=8000:t=q:w=1.0:g=+1,"    // keep high detail
-                . "volume=-10dB,"                        // lower bed level
-                . "volume={$duckExpr}:eval=frame"        // mute during TTS segments
+                . "highpass=f=40,"
+                . "lowpass=f=15000,"
+                // Gentle vocal reduction (less aggressive than before)
+                . "equalizer=f=100:t=q:w=0.7:g=+1,"     // Warm bass
+                . "equalizer=f=400:t=q:w=1.2:g=-2,"     // Slight cut low-mids
+                . "equalizer=f=1200:t=q:w=1.5:g=-3,"    // Moderate cut speech range
+                . "equalizer=f=2500:t=q:w=1.2:g=-2,"    // Slight cut presence
+                . "equalizer=f=8000:t=q:w=0.8:g=+1,"    // Air/sparkle
+                . "volume=-8dB,"                         // Lower bed level
+                . "volume={$duckExpr}:eval=frame"        // Duck during TTS
                 . "[ducked]";
 
             // Final mix - bed (ducked) + TTS

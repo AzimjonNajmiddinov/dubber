@@ -489,51 +489,138 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
     }
 
     /**
-     * Detect emotion from text using simple heuristics.
-     * Analyzes punctuation, keywords, and patterns to guess emotion.
+     * Detect emotion from text using comprehensive analysis.
+     * Combines punctuation, keywords, sentence structure, and context patterns.
      */
     protected function detectEmotionFromText(string $originalText, string $translatedText): string
     {
         $text = mb_strtolower($originalText . ' ' . $translatedText);
+        $original = $originalText;
 
-        // Check for strong emotions first
+        // Score-based detection for nuanced emotions
+        $scores = [
+            'angry' => 0,
+            'happy' => 0,
+            'sad' => 0,
+            'fear' => 0,
+            'surprise' => 0,
+            'excited' => 0,
+            'serious' => 0,
+            'tender' => 0,
+        ];
 
-        // Angry indicators
-        if (preg_match('/[!]{2,}|!!/', $originalText) ||
-            preg_match('/\b(angry|furious|mad|hate|damn|hell|stop|shut up|get out)\b/i', $text)) {
-            return 'angry';
+        // === PUNCTUATION ANALYSIS ===
+
+        // Multiple exclamation marks = strong emotion (anger or excitement)
+        $exclamationCount = substr_count($original, '!');
+        if ($exclamationCount >= 2) {
+            $scores['angry'] += 2;
+            $scores['excited'] += 2;
+        } elseif ($exclamationCount == 1) {
+            $scores['excited'] += 1;
         }
 
-        // Excited/Happy indicators
-        if (preg_match('/[!]{1,}.*[!]|wow|yay|great|amazing|wonderful|fantastic|love|happy|glad|excited/i', $text)) {
-            return 'happy';
+        // Multiple question marks = surprise/disbelief
+        if (preg_match('/\?{2,}/', $original)) {
+            $scores['surprise'] += 3;
         }
 
-        // Question with surprise
-        if (preg_match('/\?{2,}|what\?|really\?|seriously\?/i', $text)) {
-            return 'surprise';
+        // Ellipsis = hesitation, sadness, or tension
+        if (str_contains($original, '...') || str_contains($original, '…')) {
+            $scores['sad'] += 1;
+            $scores['serious'] += 1;
         }
 
-        // Sad indicators
-        if (preg_match('/\b(sad|sorry|miss|cry|tears|lost|gone|died|dead|unfortunately|regret)\b/i', $text)) {
-            return 'sad';
+        // ALL CAPS = shouting (anger or excitement)
+        if (preg_match('/\b[A-Z]{3,}\b/', $original)) {
+            $scores['angry'] += 2;
+            $scores['excited'] += 1;
         }
 
-        // Fear indicators
-        if (preg_match('/\b(afraid|scared|fear|danger|help|run|careful|watch out|oh no)\b/i', $text)) {
-            return 'fear';
+        // === KEYWORD ANALYSIS ===
+
+        // Anger keywords (weighted by intensity)
+        if (preg_match('/\b(furious|rage|hate|loathe|despise)\b/i', $text)) $scores['angry'] += 4;
+        if (preg_match('/\b(angry|mad|pissed|annoyed|frustrated)\b/i', $text)) $scores['angry'] += 3;
+        if (preg_match('/\b(damn|hell|shut up|get out|stop it|enough)\b/i', $text)) $scores['angry'] += 2;
+
+        // Happy/Joy keywords
+        if (preg_match('/\b(ecstatic|overjoyed|thrilled|delighted)\b/i', $text)) $scores['happy'] += 4;
+        if (preg_match('/\b(happy|joy|wonderful|amazing|fantastic|great|love)\b/i', $text)) $scores['happy'] += 3;
+        if (preg_match('/\b(glad|pleased|nice|good|smile|laugh)\b/i', $text)) $scores['happy'] += 2;
+
+        // Sad keywords
+        if (preg_match('/\b(devastated|heartbroken|grief|mourn|tragic)\b/i', $text)) $scores['sad'] += 4;
+        if (preg_match('/\b(sad|sorry|miss|cry|tears|died|dead|lost)\b/i', $text)) $scores['sad'] += 3;
+        if (preg_match('/\b(unfortunately|regret|alone|lonely|pain)\b/i', $text)) $scores['sad'] += 2;
+
+        // Fear keywords
+        if (preg_match('/\b(terrified|horrified|petrified|panic)\b/i', $text)) $scores['fear'] += 4;
+        if (preg_match('/\b(afraid|scared|fear|terror|danger|threat)\b/i', $text)) $scores['fear'] += 3;
+        if (preg_match('/\b(worried|nervous|anxious|careful|watch out|run|help)\b/i', $text)) $scores['fear'] += 2;
+
+        // Surprise keywords
+        if (preg_match('/\b(shocked|astonished|stunned|incredible)\b/i', $text)) $scores['surprise'] += 4;
+        if (preg_match('/\b(surprised|unexpected|unbelievable|what|really)\b/i', $text)) $scores['surprise'] += 2;
+        if (preg_match('/\b(wow|oh|whoa|no way|seriously)\b/i', $text)) $scores['surprise'] += 2;
+
+        // Excitement keywords
+        if (preg_match('/\b(yes|yeah|awesome|incredible|let\'s go|can\'t wait)\b/i', $text)) $scores['excited'] += 3;
+        if (preg_match('/\b(exciting|excited|thrilling|adventure)\b/i', $text)) $scores['excited'] += 2;
+
+        // Tender/Gentle keywords
+        if (preg_match('/\b(dear|darling|sweetheart|honey|love you|care)\b/i', $text)) $scores['tender'] += 3;
+        if (preg_match('/\b(gentle|soft|quiet|peaceful|calm)\b/i', $text)) $scores['tender'] += 2;
+
+        // Serious/Grave keywords
+        if (preg_match('/\b(must|important|serious|critical|urgent|need to)\b/i', $text)) $scores['serious'] += 2;
+        if (preg_match('/\b(listen|understand|remember|never|always)\b/i', $text)) $scores['serious'] += 1;
+
+        // === SENTENCE STRUCTURE ANALYSIS ===
+
+        // Questions ending with specific words indicate curiosity/surprise
+        if (preg_match('/\b(really|seriously|actually)\s*\?/i', $text)) {
+            $scores['surprise'] += 2;
         }
 
-        // Excitement from exclamation marks
-        if (substr_count($originalText, '!') >= 1) {
-            return 'excited';
+        // Short sentences with exclamation = urgency
+        if (strlen($original) < 20 && $exclamationCount > 0) {
+            $scores['excited'] += 1;
+            $scores['angry'] += 1;
         }
 
-        // Questions are slightly varied
-        if (str_contains($originalText, '?')) {
-            return 'neutral'; // Questions stay neutral but could be curious
+        // Commands (imperative sentences)
+        if (preg_match('/^(go|come|run|stop|wait|look|listen|help|don\'t|do|get)\b/i', trim($original))) {
+            $scores['serious'] += 2;
         }
 
-        return 'neutral';
+        // === FIND DOMINANT EMOTION ===
+
+        $maxScore = 0;
+        $dominantEmotion = 'neutral';
+
+        foreach ($scores as $emotion => $score) {
+            if ($score > $maxScore) {
+                $maxScore = $score;
+                $dominantEmotion = $emotion;
+            }
+        }
+
+        // Need minimum score to override neutral (threshold = 2)
+        if ($maxScore < 2) {
+            // Check for simple question without other emotion
+            if (str_contains($original, '?')) {
+                return 'neutral';
+            }
+            return 'neutral';
+        }
+
+        // Map additional emotions to XTTS-supported set
+        return match($dominantEmotion) {
+            'tender' => 'sad',      // Soft, gentle delivery
+            'serious' => 'neutral', // Steady, measured delivery
+            'excited' => 'happy',   // Energetic delivery
+            default => $dominantEmotion,
+        };
     }
 }

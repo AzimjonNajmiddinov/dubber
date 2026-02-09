@@ -282,34 +282,35 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
             }
         }
 
-        // Few-shot examples for Uzbek to demonstrate natural spoken style
+        // Few-shot examples for Uzbek demonstrating emotional range
         $examples = '';
         if (str_contains($targetLanguage, 'Uzbek') || str_contains($targetLanguage, 'uz')) {
             $examples =
-                "\nEXAMPLES of good dubbing translation (English → Uzbek):\n" .
-                "- \"Here's what it says if you're ready.\" → \"Tayyor bo'lsangiz, mana.\"\n" .
-                "- \"I don't think that's going to work out.\" → \"Bu ishlamaydi, menimcha.\"\n" .
-                "- \"We need to get out of here right now!\" → \"Tezroq ketishimiz kerak!\"\n" .
-                "- \"What are you talking about?\" → \"Nima deyapsan?\"\n" .
-                "- \"I told you this was a bad idea.\" → \"Yomon fikr degan edim-ku.\"\n" .
-                "- \"There's no way I'm letting you do that.\" → \"Yo'q, qo'ymayman.\"\n" .
-                "- \"Can you believe what just happened?\" → \"Ko'rdingmi nima bo'ldi?\"\n" .
-                "- \"I'm sorry, I didn't mean to hurt you.\" → \"Kechirasiz, xafa qilmoqchi emasdim.\"\n" .
-                "Notice: translations are SHORT, natural, and drop unnecessary words. Do the same.\n";
+                "\nEXAMPLES of good dubbing translation with emotions (English → Uzbek):\n" .
+                "- \"Here's what it says.\" → \"Mana, ko'ring.\"\n" .
+                "- \"I don't think that's going to work.\" → \"Bu ishlamaydi.\"\n" .
+                "- \"We need to get out now!\" (urgent) → \"Tez ketamiz!\"\n" .
+                "- \"What are you talking about?\" (confused) → \"Nima deyapsan?\"\n" .
+                "- \"I told you this was bad.\" (frustrated) → \"Aytgan edim-ku!\"\n" .
+                "- \"No way I'm letting you.\" (firm) → \"Yo'q, qo'ymayman.\"\n" .
+                "- \"Can you believe it?\" (surprised) → \"Ko'rdingmi?!\"\n" .
+                "- \"I'm sorry, I didn't mean to.\" (apologetic) → \"Kechirasiz.\"\n" .
+                "- \"This is incredible!\" (excited) → \"Ajoyib!\"\n" .
+                "- \"I can't do this anymore.\" (defeated) → \"Endi qo'limdan kelmaydi.\"\n" .
+                "KEY: Translations are SHORT, emotional, and natural. Use punctuation to convey emotion (!?). Match the speaker's feeling.\n";
         }
 
         return
-            "You are an expert DUBBING TRANSLATOR specializing in {$targetLanguage}.\n" .
-            "Target language: {$targetLanguage}.\n\n" .
-            "YOUR GOAL: Produce concise, natural dubbed dialogue that fits within the original time slot.\n\n" .
+            "You are an expert FILM DUBBING TRANSLATOR for {$targetLanguage}.\n\n" .
+            "YOUR MISSION: Create dubbed dialogue that sounds NATURAL and EMOTIONAL — like a native speaker would say it.\n\n" .
             "CRITICAL RULES:\n" .
-            "1. BE CONCISE: Translation must be SHORTER or equal length to the original. Dubbing requires fitting speech into the same time slot. Cut filler words, simplify long constructions, use compact phrasing.\n" .
-            "2. SPOKEN LANGUAGE: Use short, punchy phrases. Avoid long formal constructions. Write how people TALK, not how they write. Use colloquial, everyday speech patterns of {$targetLanguage}.\n" .
-            "3. PRESERVE MEANING: Convey the same meaning, emotions, and intent. Do NOT add or lose information.\n" .
-            "4. EMOTION & TONE: Preserve the exact emotional tone — angry stays angry, sad stays sad, humor stays funny.\n" .
-            "5. NO ENGLISH: Output ONLY in {$targetLanguage}. Translate everything except proper names.\n" .
-            "6. NATURAL FLOW: This line is part of a conversation. Make it flow naturally with surrounding dialogue.\n" .
-            "7. OUTPUT ONLY: Return ONLY the translated text. No explanations, no quotes, no commentary.\n" .
+            "1. EXTREMELY CONCISE: Use the FEWEST words possible. Dubbing MUST fit the time slot. Drop filler words. Simplify everything.\n" .
+            "2. NATURAL SPEECH: Write how people ACTUALLY TALK. Use contractions. Use colloquial phrases. Avoid formal/written style.\n" .
+            "3. EMOTIONAL AUTHENTICITY: Match the speaker's emotion EXACTLY. If they're angry, your translation must SOUND angry. If sad, it must feel heavy. Use punctuation (! ? ...) to convey emotion.\n" .
+            "4. PRESERVE INTENT: Keep the core meaning but adapt the expression. Cultural equivalents are fine.\n" .
+            "5. ONLY {$targetLanguage}: Output ONLY in {$targetLanguage}. No English except proper names.\n" .
+            "6. DIALOGUE FLOW: This is part of a conversation. It must sound natural when spoken aloud.\n" .
+            "7. PURE OUTPUT: Return ONLY the translated line. No quotes, no explanations.\n" .
             $budgetRule .
             $examples .
             $contextBlock .

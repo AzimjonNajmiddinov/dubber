@@ -240,29 +240,95 @@ def split_text_into_chunks(text: str, max_chars: int = MAX_CHUNK_CHARS) -> List[
 
 
 def get_emotion_params(emotion: str) -> dict:
-    """Get synthesis parameters based on emotion for more expressive speech."""
+    """
+    Get synthesis parameters based on emotion for expressive, natural speech.
+
+    Key parameters:
+    - temperature: Higher = more variation/expressiveness, lower = more stable
+    - top_p: Higher = more diverse word choices, lower = more predictable
+    - speed_mult: Speech rate multiplier
+    - length_penalty: < 1.0 = shorter outputs, > 1.0 = longer outputs
+    - repetition_penalty: Prevents word/phrase repetition
+    """
     emotion = emotion.lower() if emotion else "neutral"
 
-    # Base parameters
+    # Base parameters tuned for natural speech
     params = {
-        "temperature": 0.75,
+        "temperature": 0.7,
         "length_penalty": 1.0,
         "repetition_penalty": 2.0,
         "top_k": 50,
         "top_p": 0.85,
-        "speed_mult": 1.0,  # Multiplier for base speed
+        "speed_mult": 1.0,
     }
 
-    # Adjust parameters based on emotion for more expressive speech
+    # Emotion configs tuned for more expressive, natural delivery
+    # More differentiated parameters for distinct emotional signatures
     emotion_configs = {
-        "happy": {"temperature": 0.85, "top_p": 0.9, "speed_mult": 1.05, "length_penalty": 0.9},
-        "excited": {"temperature": 0.9, "top_p": 0.92, "speed_mult": 1.1, "length_penalty": 0.85},
-        "sad": {"temperature": 0.65, "top_p": 0.8, "speed_mult": 0.9, "length_penalty": 1.1},
-        "angry": {"temperature": 0.8, "top_p": 0.88, "speed_mult": 1.08, "repetition_penalty": 2.5},
-        "fear": {"temperature": 0.82, "top_p": 0.87, "speed_mult": 1.12, "length_penalty": 0.9},
-        "surprise": {"temperature": 0.88, "top_p": 0.9, "speed_mult": 1.05},
-        "disgust": {"temperature": 0.7, "top_p": 0.82, "speed_mult": 0.95},
-        "neutral": {"temperature": 0.75, "top_p": 0.85, "speed_mult": 1.0},
+        # Happy: Warm, slightly faster, more melodic variation
+        "happy": {
+            "temperature": 0.82,
+            "top_p": 0.88,
+            "speed_mult": 1.08,
+            "length_penalty": 0.92,
+            "repetition_penalty": 1.8,
+        },
+        # Excited: High energy, faster, more pitch variation
+        "excited": {
+            "temperature": 0.88,
+            "top_p": 0.92,
+            "speed_mult": 1.15,
+            "length_penalty": 0.85,
+            "repetition_penalty": 1.7,
+        },
+        # Sad: Slower, more monotone, heavier
+        "sad": {
+            "temperature": 0.55,
+            "top_p": 0.75,
+            "speed_mult": 0.85,
+            "length_penalty": 1.15,
+            "repetition_penalty": 2.2,
+        },
+        # Angry: Intense, clipped, forceful
+        "angry": {
+            "temperature": 0.78,
+            "top_p": 0.85,
+            "speed_mult": 1.12,
+            "length_penalty": 0.88,
+            "repetition_penalty": 2.5,
+        },
+        # Fear: Faster, breathier, urgent
+        "fear": {
+            "temperature": 0.8,
+            "top_p": 0.88,
+            "speed_mult": 1.18,
+            "length_penalty": 0.85,
+            "repetition_penalty": 2.0,
+        },
+        # Surprise: Quick onset, varied
+        "surprise": {
+            "temperature": 0.85,
+            "top_p": 0.9,
+            "speed_mult": 1.1,
+            "length_penalty": 0.9,
+            "repetition_penalty": 1.8,
+        },
+        # Disgust: Slower, lower, dismissive
+        "disgust": {
+            "temperature": 0.6,
+            "top_p": 0.78,
+            "speed_mult": 0.92,
+            "length_penalty": 1.05,
+            "repetition_penalty": 2.3,
+        },
+        # Neutral: Natural, conversational
+        "neutral": {
+            "temperature": 0.7,
+            "top_p": 0.85,
+            "speed_mult": 1.0,
+            "length_penalty": 1.0,
+            "repetition_penalty": 2.0,
+        },
     }
 
     if emotion in emotion_configs:
