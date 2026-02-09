@@ -48,15 +48,25 @@ class ResetVideoCommand extends Command
             $this->resetVideo($video, $keepOriginal);
         }
 
-        // Clear all cache locks
+        // Clear all cache (includes ShouldBeUnique locks)
         Cache::flush();
         $this->info('Cache cleared');
+
+        // Flush Redis completely to clear any stale unique job locks
+        try {
+            $redis = Cache::getStore()->getRedis();
+            $redis->flushall();
+            $this->info('Redis flushed (all unique job locks cleared)');
+        } catch (\Throwable $e) {
+            // Fallback if Redis not available directly
+            $this->warn('Could not flush Redis directly: ' . $e->getMessage());
+        }
 
         // Clear failed jobs
         DB::table('failed_jobs')->truncate();
         $this->info('Failed jobs cleared');
 
-        // Clear pending jobs for these videos
+        // Clear pending jobs
         DB::table('jobs')->truncate();
         $this->info('Pending jobs cleared');
 
