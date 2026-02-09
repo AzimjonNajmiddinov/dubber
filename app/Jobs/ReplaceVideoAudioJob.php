@@ -145,14 +145,32 @@ class ReplaceVideoAudioJob implements ShouldQueue, ShouldBeUnique
             /** @var Video $video */
             $video = Video::query()->findOrFail($this->videoId);
 
-            $origMp4Rel = $video->original_path;
-            if (!$origMp4Rel) {
-                throw new \RuntimeException("Video original_path is NULL for video {$video->id}");
+            // Find video source: prefer original, fall back to existing dubbed video
+            $origMp4Abs = null;
+            $sourceType = 'original';
+
+            if ($video->original_path) {
+                $origMp4Abs = Storage::disk('local')->path($video->original_path);
+                if (!file_exists($origMp4Abs)) {
+                    $origMp4Abs = null;
+                }
             }
 
-            $origMp4Abs = Storage::disk('local')->path($origMp4Rel);
-            if (!file_exists($origMp4Abs)) {
-                throw new \RuntimeException("Original MP4 not found: {$origMp4Rel}");
+            // Fall back to existing dubbed video (extract video stream from it)
+            if (!$origMp4Abs && $video->dubbed_path) {
+                $dubbedAbs = Storage::disk('local')->path($video->dubbed_path);
+                if (file_exists($dubbedAbs) && filesize($dubbedAbs) > 10000) {
+                    $origMp4Abs = $dubbedAbs;
+                    $sourceType = 'dubbed';
+                    Log::info('Using existing dubbed video as source (original missing)', [
+                        'video_id' => $video->id,
+                        'dubbed_path' => $video->dubbed_path,
+                    ]);
+                }
+            }
+
+            if (!$origMp4Abs) {
+                throw new \RuntimeException("No video source found for video {$video->id} (original_path and dubbed_path both missing/invalid)");
             }
 
             $finalWavRel = $video->final_audio_path ?: "audio/final/{$video->id}.wav";
@@ -270,6 +288,12 @@ class ReplaceVideoAudioJob implements ShouldQueue, ShouldBeUnique
                 'dubbed_path' => $outRel,
                 'status' => 'dubbed_complete',
             ]);
+
+            // Dispatch lip-sync job if enabled
+            if (config('dubber.lipsync.enabled', false)) {
+                Log::info('Dispatching lipsync job', ['video_id' => $video->id]);
+                LipSyncMainFaceJob::dispatch($video->id);
+            }
 
             // Auto-delete original video and intermediate files to save storage
             if (config('dubber.cleanup.delete_after_dubbing', true)) {

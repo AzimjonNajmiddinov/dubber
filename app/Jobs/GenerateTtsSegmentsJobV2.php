@@ -111,8 +111,14 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
             Storage::disk('local')->makeDirectory($outDirRel);
 
             // Step 3: Generate TTS for each segment sequentially
-            foreach ($segments as $seg) {
-                $this->processSegment($seg, $driver, $video);
+            // Pass next segment start time to allow audio to extend into gaps
+            $segmentList = $segments->values();
+            $segmentCount = $segmentList->count();
+
+            for ($i = 0; $i < $segmentCount; $i++) {
+                $seg = $segmentList[$i];
+                $nextStart = ($i < $segmentCount - 1) ? (float) $segmentList[$i + 1]->start_time : null;
+                $this->processSegment($seg, $driver, $video, $nextStart);
             }
 
             Log::info('TTS generation complete', [
@@ -194,8 +200,13 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
 
     /**
      * Process a single segment.
+     *
+     * @param VideoSegment $seg The segment to process
+     * @param TtsDriverInterface $driver TTS driver to use
+     * @param Video $video The video being processed
+     * @param float|null $nextSegmentStart Start time of next segment (null if last)
      */
-    protected function processSegment(VideoSegment $seg, TtsDriverInterface $driver, Video $video): void
+    protected function processSegment(VideoSegment $seg, TtsDriverInterface $driver, Video $video, ?float $nextSegmentStart = null): void
     {
         $speaker = $seg->speaker;
         $text = trim((string) $seg->translated_text);
@@ -221,6 +232,16 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
         }
         $slotDuration = (float) $seg->end_time - (float) $seg->start_time;
 
+        // Calculate actual available time until next segment starts
+        // This allows TTS to extend into gaps between segments
+        $segEnd = (float) $seg->end_time;
+        $availableTime = $slotDuration;
+        if ($nextSegmentStart !== null && $nextSegmentStart > $segEnd) {
+            // Add gap time (max 1 second extra to prevent too long pauses)
+            $gap = min(1.0, $nextSegmentStart - $segEnd);
+            $availableTime = $slotDuration + $gap;
+        }
+
         $options = [
             'emotion' => $emotion,
             'speed' => 1.0,
@@ -245,8 +266,9 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
         try {
             $outputPath = $driver->synthesize($text, $speaker, $seg, $options);
 
-            // Post-synthesis: fit audio to time slot if it overflows
-            $this->fitAudioToSlot($outputPath, $slotDuration);
+            // Post-synthesis: fit audio to available time (slot + gap until next segment)
+            // This allows words to be fully pronounced without cutting off
+            $this->fitAudioToSlot($outputPath, $availableTime);
 
             // Update segment with output path
             $relPath = str_replace(Storage::disk('local')->path(''), '', $outputPath);
@@ -321,13 +343,13 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
     }
 
     /**
-     * Fit TTS audio to the available time slot (bidirectional).
+     * Fit TTS audio to the available time slot.
      *
      * Strategy:
-     * - Too short (ratio 0.75–1.0): slow down with atempo to fill the slot
-     * - Already fits (ratio ~1.0): no change
-     * - Too long (ratio 1.0–2.3): speed up with atempo
-     * - Way too long (>2.3x): apply 2.3x atempo + trim with fade-out
+     * - Edge TTS --rate parameter already handles speed adjustment
+     * - Here we only: strip silence, and trim if still too long
+     * - No slowdown (sounds unnatural)
+     * - No speedup (already done by Edge TTS)
      */
     protected function fitAudioToSlot(string $audioPath, float $slotDuration): void
     {
@@ -335,7 +357,7 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
             return;
         }
 
-        // Step 1: Strip trailing silence (Edge TTS adds heavy padding)
+        // Step 1: Strip trailing silence (Edge TTS adds padding)
         $this->stripSilence($audioPath);
 
         // Probe actual TTS duration (after silence removal)
@@ -347,10 +369,6 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
         ]);
 
         if (!$probe->successful()) {
-            Log::warning('ffprobe failed for TTS audio', [
-                'path' => $audioPath,
-                'error' => $probe->errorOutput(),
-            ]);
             return;
         }
 
@@ -360,43 +378,28 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
             return;
         }
 
-        $ratio = $audioDuration / $slotDuration;
-        $maxTempo = 1.15;  // Very gentle speedup only - Edge TTS now handles rate
-        $minTempo = 0.90;  // Minimal slowdown
-
-        // Skip if already close enough (within 10% - Edge TTS pre-calculated rate)
-        if ($ratio >= 0.90 && $ratio <= 1.10) {
-            return;
-        }
-
-        // Build the filter chain
-        if ($ratio < 1.0) {
-            // Audio is too short — slow down to fill the slot
-            // atempo < 1.0 slows down, so use ratio directly (e.g., 0.8 = 20% slower)
-            $effectiveTempo = max($ratio, $minTempo);
-            $filter = 'atempo=' . number_format($effectiveTempo, 4, '.', '');
-        } elseif ($ratio <= $maxTempo) {
-            // Moderate speedup — atempo alone is enough
-            $filter = $this->buildAtempoChain($ratio);
-        } else {
-            // Audio is way too long — apply max safe atempo, then trim to fit
-            $atempoChain = $this->buildAtempoChain($maxTempo);
-            $fadeOut = max(0.05, min(0.3, $slotDuration * 0.1));
-            $fadeStart = max(0, $slotDuration - $fadeOut);
-            $filter = "{$atempoChain},atrim=0:{$slotDuration},asetpts=PTS-STARTPTS,afade=t=out:st={$fadeStart}:d={$fadeOut}";
-
-            Log::warning('TTS audio too long for slot, applying atempo+trim', [
-                'path' => $audioPath,
-                'audio_duration' => $audioDuration,
-                'slot_duration' => $slotDuration,
-                'ratio' => round($ratio, 3),
-                'effective_tempo' => $maxTempo,
+        // If audio fits within slot (+5% tolerance), we're done
+        if ($audioDuration <= $slotDuration * 1.05) {
+            Log::debug('TTS audio fits slot', [
+                'path' => basename($audioPath),
+                'audio' => round($audioDuration, 2),
+                'slot' => round($slotDuration, 2),
+                'fill' => round($audioDuration / $slotDuration * 100) . '%',
             ]);
-        }
-
-        if ($filter === '') {
             return;
         }
+
+        // Audio is too long - trim with fade-out
+        $fadeOut = min(0.15, $slotDuration * 0.1);
+        $fadeStart = max(0, $slotDuration - $fadeOut);
+        $filter = "atrim=0:{$slotDuration},asetpts=PTS-STARTPTS,afade=t=out:st={$fadeStart}:d={$fadeOut}";
+
+        Log::warning('TTS audio trimmed to fit slot', [
+            'path' => basename($audioPath),
+            'audio_duration' => round($audioDuration, 2),
+            'slot_duration' => round($slotDuration, 2),
+            'overflow' => round(($audioDuration - $slotDuration) * 1000) . 'ms',
+        ]);
 
         $tmpPath = $audioPath . '.fitted.wav';
 
@@ -410,22 +413,8 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
 
         if ($result->successful() && file_exists($tmpPath) && filesize($tmpPath) > 0) {
             rename($tmpPath, $audioPath);
-
-            Log::info('Fitting TTS audio to slot', [
-                'path' => $audioPath,
-                'original_duration' => $audioDuration,
-                'slot_duration' => $slotDuration,
-                'tempo_ratio' => round($ratio, 3),
-                'direction' => $ratio < 1.0 ? 'slowdown' : 'speedup',
-                'trimmed' => $ratio > $maxTempo,
-                'filter' => $filter,
-            ]);
         } else {
             @unlink($tmpPath);
-            Log::warning('atempo fitting failed', [
-                'path' => $audioPath,
-                'error' => $result->errorOutput(),
-            ]);
         }
     }
 

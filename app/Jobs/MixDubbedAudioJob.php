@@ -59,14 +59,15 @@ class MixDubbedAudioJob implements ShouldQueue, ShouldBeUnique
     }
 
     /**
-     * Build FFmpeg volume expression that mutes the bed during TTS segments.
-     * Returns expression like: 1-min(between(t\,0.5\,2.3)+between(t\,3.0\,5.0)\,1)*0.97
-     * During TTS: volume = 0.03 (-30dB), Between TTS: volume = 1.0
+     * Build FFmpeg volume expression that ducks the bed during TTS segments.
+     * Professional dubbing style: background stays audible but lower.
+     * Returns expression like: 1-min(between(t\,0.5\,2.3)+between(t\,3.0\,5.0)\,1)*0.6
+     * During TTS: volume = 0.4 (-8dB), Between TTS: volume = 1.0
      */
     protected function buildDuckingExpression($segments): string
     {
         // Merge overlapping/adjacent segments with padding into blocks
-        $padding = 0.08; // 80ms padding before/after each segment
+        $padding = 0.05; // 50ms padding before/after each segment
         $blocks = [];
 
         foreach ($segments as $seg) {
@@ -95,10 +96,10 @@ class MixDubbedAudioJob implements ShouldQueue, ShouldBeUnique
             );
         }
 
-        // volume = 1 - min(sum, 1) * 0.97
-        // When TTS plays: 1 - 1*0.97 = 0.03 (-30dB)
-        // When no TTS:    1 - 0*0.97 = 1.0  (full volume)
-        return '1-min(' . implode('+', $terms) . '\\,1)*0.97';
+        // volume = 1 - min(sum, 1) * 0.6
+        // When TTS plays: 1 - 1*0.6 = 0.4 (-8dB) - background still audible
+        // When no TTS:    1 - 0*0.6 = 1.0  (full volume)
+        return '1-min(' . implode('+', $terms) . '\\,1)*0.6';
     }
 
     public function handle(): void
@@ -166,14 +167,41 @@ class MixDubbedAudioJob implements ShouldQueue, ShouldBeUnique
 
                 $inputs[] = '-i ' . escapeshellarg($ttsAbs);
 
-                $delayMs = max(0, (int) round(((float) $seg->start_time) * 1000));
+                // Get TTS duration for centering
+                $ttsDuration = 0;
+                $probeCmd = sprintf(
+                    'ffprobe -v error -show_entries format=duration -of csv=p=0 %s 2>/dev/null',
+                    escapeshellarg($ttsAbs)
+                );
+                $ttsDuration = (float) trim(shell_exec($probeCmd) ?? '0');
+
+                // Calculate slot duration
+                $slotStart = (float) $seg->start_time;
+                $slotEnd = (float) $seg->end_time;
+                $slotDuration = $slotEnd - $slotStart;
+
+                // Center TTS within the slot if it's shorter
+                // This prevents awkward pauses at segment boundaries
+                $centerOffset = 0;
+                if ($ttsDuration > 0 && $ttsDuration < $slotDuration) {
+                    $centerOffset = ($slotDuration - $ttsDuration) / 2;
+                }
+
+                $delayMs = max(0, (int) round(($slotStart + $centerOffset) * 1000));
                 $label = "tts{$i}";
 
-                // Simple TTS processing - delay to correct position
+                // TTS processing - delay to centered position with smooth fades
+                // Small fade-in/out prevents clicks and makes transitions natural
+                $fadeIn = 0.03;  // 30ms fade-in
+                $fadeOut = 0.05; // 50ms fade-out
+                $fadeOutStart = max(0, $ttsDuration - $fadeOut);
+
                 $filtersBase[] =
                     "[{$i}:a]"
                     . "aresample=48000,"
                     . "aformat=sample_fmts=fltp:channel_layouts=stereo,"
+                    . "afade=t=in:st=0:d={$fadeIn},"
+                    . "afade=t=out:st={$fadeOutStart}:d={$fadeOut},"
                     . "adelay={$delayMs}|{$delayMs}"
                     . "[{$label}]";
 
@@ -231,21 +259,14 @@ class MixDubbedAudioJob implements ShouldQueue, ShouldBeUnique
             ]);
 
             // BACKGROUND BED with time-based ducking
-            // Gentle EQ to reduce vocal bleed while preserving music quality
+            // Keep background loud like original, only duck during speech
             $filtersMain[] =
                 "[0:a]"
                 . "aresample=48000,"
                 . "aformat=sample_fmts=fltp:channel_layouts=stereo,"
-                . "highpass=f=40,"
-                . "lowpass=f=15000,"
-                // Gentle vocal reduction (less aggressive than before)
-                . "equalizer=f=100:t=q:w=0.7:g=+1,"     // Warm bass
-                . "equalizer=f=400:t=q:w=1.2:g=-2,"     // Slight cut low-mids
-                . "equalizer=f=1200:t=q:w=1.5:g=-3,"    // Moderate cut speech range
-                . "equalizer=f=2500:t=q:w=1.2:g=-2,"    // Slight cut presence
-                . "equalizer=f=8000:t=q:w=0.8:g=+1,"    // Air/sparkle
-                . "volume=-8dB,"                         // Lower bed level
-                . "volume={$duckExpr}:eval=frame"        // Duck during TTS
+                . "highpass=f=60,"   // Remove rumble
+                . "lowpass=f=14000," // Remove hiss
+                . "volume={$duckExpr}:eval=frame"  // Duck during TTS only
                 . "[ducked]";
 
             // Final mix - bed (ducked) + TTS

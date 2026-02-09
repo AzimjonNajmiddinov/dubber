@@ -50,15 +50,17 @@ class EdgeTtsDriver implements TtsDriverInterface
     ];
 
     /**
-     * Emotion to prosody mapping for more expressive speech.
+     * Emotion to prosody mapping for expressive speech.
+     * IMPORTANT: Keep pitch changes minimal (±3Hz) to maintain voice consistency.
+     * Large pitch swings make same speaker sound like different people.
      */
     protected array $emotionProsody = [
-        'happy' => ['rate' => '+15%', 'pitch' => '+10Hz', 'volume' => '+5%'],
-        'excited' => ['rate' => '+20%', 'pitch' => '+15Hz', 'volume' => '+10%'],
-        'sad' => ['rate' => '-15%', 'pitch' => '-10Hz', 'volume' => '-5%'],
-        'angry' => ['rate' => '+10%', 'pitch' => '+5Hz', 'volume' => '+15%'],
-        'fear' => ['rate' => '+25%', 'pitch' => '+20Hz', 'volume' => '-5%'],
-        'surprise' => ['rate' => '+5%', 'pitch' => '+25Hz', 'volume' => '+5%'],
+        'happy' => ['rate' => '+5%', 'pitch' => '+2Hz', 'volume' => '+3%'],
+        'excited' => ['rate' => '+8%', 'pitch' => '+3Hz', 'volume' => '+5%'],
+        'sad' => ['rate' => '-5%', 'pitch' => '-2Hz', 'volume' => '-3%'],
+        'angry' => ['rate' => '+5%', 'pitch' => '+1Hz', 'volume' => '+5%'],
+        'fear' => ['rate' => '+8%', 'pitch' => '+2Hz', 'volume' => '-3%'],
+        'surprise' => ['rate' => '+3%', 'pitch' => '+3Hz', 'volume' => '+3%'],
         'neutral' => ['rate' => '+0%', 'pitch' => '+0Hz', 'volume' => '+0%'],
     ];
 
@@ -104,26 +106,37 @@ class EdgeTtsDriver implements TtsDriverInterface
         $emotionProsody = $this->emotionProsody[$emotion] ?? $this->emotionProsody['neutral'];
 
         // Calculate slot-aware speaking rate
-        // Normal Edge TTS speaks at ~5 chars/sec for Uzbek
+        // Uzbek Edge TTS speaks at ~12 chars/sec at normal speed
         $slotDuration = ((float) $segment->end_time) - ((float) $segment->start_time);
         $textLength = mb_strlen($text);
-        $normalCharsPerSec = 5.0;
+        $normalCharsPerSec = 12.0;
 
         $requiredRate = 0; // Default: normal speed
-        if ($slotDuration > 0 && $textLength > 0) {
-            $requiredCharsPerSec = $textLength / $slotDuration;
-            // If we need faster speech, calculate the rate increase
-            // rate +100% = 2x speed, so rate% = (required/normal - 1) * 100
+        if ($slotDuration > 0.3 && $textLength > 0) {
+            // Leave 10% buffer for natural pauses
+            $effectiveSlot = $slotDuration * 0.90;
+            $requiredCharsPerSec = $textLength / $effectiveSlot;
+
+            // Calculate rate adjustment
             $speedRatio = $requiredCharsPerSec / $normalCharsPerSec;
             $requiredRate = (int) round(($speedRatio - 1.0) * 100);
+
+            Log::debug('TTS rate calculation', [
+                'segment_id' => $segment->id,
+                'text_length' => $textLength,
+                'slot' => $slotDuration,
+                'required_cps' => round($requiredCharsPerSec, 1),
+                'speed_ratio' => round($speedRatio, 2),
+                'rate_percent' => $requiredRate,
+            ]);
         }
 
         // Get emotion rate modifier
         $emotionRate = $this->parsePercentage($emotionProsody['rate']);
 
         // Final rate: slot-based + emotion modifier
-        // Cap at +50% to keep speech intelligible (beyond this, quality degrades)
-        $finalRate = min(50, max(-20, $requiredRate + $emotionRate));
+        // Cap at +40% for intelligibility, allow -30% for slow speech
+        $finalRate = min(40, max(-30, $requiredRate + $emotionRate));
         $rate = $finalRate >= 0 ? "+{$finalRate}%" : "{$finalRate}%";
 
         // Calculate final pitch: profile + emotion
@@ -341,56 +354,17 @@ class EdgeTtsDriver implements TtsDriverInterface
     protected function normalizeAudio(string $input, string $output, array $options, float $slotDuration = 0): void
     {
         $gainDb = $options['gain_db'] ?? 0.0;
-        $lufsTarget = $options['lufs_target'] ?? -16.0;
 
-        // First, get the duration of the input audio
-        $durationCmd = sprintf(
-            'ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 %s 2>/dev/null',
-            escapeshellarg($input)
-        );
-        $audioDuration = (float) trim(shell_exec($durationCmd) ?? '0');
-
-        // Calculate tempo adjustment if audio is longer than slot
-        $tempoFilter = '';
-        if ($slotDuration > 0 && $audioDuration > 0 && $audioDuration > $slotDuration) {
-            // Need to speed up: tempo = audio_duration / slot_duration
-            $tempo = $audioDuration / $slotDuration;
-
-            // Cap tempo at 2.0 (ffmpeg atempo limit per filter, can chain for higher)
-            if ($tempo > 2.0) {
-                // Chain multiple atempo filters for > 2x speedup
-                $tempo1 = 2.0;
-                $tempo2 = min(2.0, $tempo / 2.0);
-                $tempoFilter = "atempo={$tempo1},atempo={$tempo2},";
-                Log::info('Audio tempo adjustment (chained)', [
-                    'audio_duration' => $audioDuration,
-                    'slot_duration' => $slotDuration,
-                    'tempo1' => $tempo1,
-                    'tempo2' => $tempo2,
-                ]);
-            } else {
-                $tempoFilter = "atempo={$tempo},";
-                Log::info('Audio tempo adjustment', [
-                    'audio_duration' => $audioDuration,
-                    'slot_duration' => $slotDuration,
-                    'tempo' => $tempo,
-                ]);
-            }
+        // Simple conversion: MP3 to WAV, 48kHz stereo
+        // No tempo adjustment - Edge TTS --rate parameter handles speed
+        // No loudnorm - final mix handles loudness normalization once
+        $volumeFilter = '';
+        if (abs($gainDb) > 0.1) {
+            $sign = $gainDb >= 0 ? '+' : '';
+            $volumeFilter = ",volume={$sign}{$gainDb}dB";
         }
 
-        $filter = sprintf(
-            'aresample=48000,' .
-            'aformat=sample_fmts=fltp:channel_layouts=stereo,' .
-            '%s' . // tempo filter if needed
-            'highpass=f=80,' .
-            'lowpass=f=10000,' .
-            'volume=%sdB,' .
-            'loudnorm=I=%s:TP=-1.5:LRA=11,' .
-            'aresample=48000',
-            $tempoFilter,
-            $gainDb >= 0 ? "+{$gainDb}" : $gainDb,
-            $lufsTarget
-        );
+        $filter = "aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo{$volumeFilter}";
 
         $cmd = sprintf(
             'ffmpeg -y -hide_banner -loglevel error -i %s -vn -af %s -ar 48000 -ac 2 -c:a pcm_s16le %s 2>&1',
@@ -401,7 +375,7 @@ class EdgeTtsDriver implements TtsDriverInterface
 
         exec($cmd, $out, $code);
 
-        if ($code !== 0 || !file_exists($output) || filesize($output) < 5000) {
+        if ($code !== 0 || !file_exists($output) || filesize($output) < 1000) {
             Log::error('Audio normalization failed', [
                 'exit_code' => $code,
                 'output' => implode("\n", $out),

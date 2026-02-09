@@ -121,18 +121,37 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
 
                 // Attempt up to 2 times if English leaks
                 $translated = null;
+                $emotion = 'neutral';
                 $lastBody = null;
 
                 for ($attempt = 1; $attempt <= 2; $attempt++) {
                     $system = $this->buildSystemPrompt($targetLanguage, $attempt, $charCount, $prevText, $nextText, $slotDuration);
 
+                    // Build messages with few-shot examples for better accuracy
+                    $messages = [
+                        ['role' => 'system', 'content' => $system],
+                    ];
+
+                    // Add few-shot examples with emotion detection (JSON format)
+                    if (str_contains($targetLanguage, 'Uzbek') || str_contains($targetLanguage, 'uz')) {
+                        $messages[] = ['role' => 'user', 'content' => 'Ask.'];
+                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"So\'ra.","e":"neutral"}'];
+                        $messages[] = ['role' => 'user', 'content' => 'I can\'t believe this!'];
+                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Bunga ishonolmayman!","e":"surprise"}'];
+                        $messages[] = ['role' => 'user', 'content' => 'Get out of here right now!'];
+                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Hoziroq yo\'qol bu yerdan!","e":"angry"}'];
+                        $messages[] = ['role' => 'user', 'content' => 'I miss you so much...'];
+                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Seni juda sog\'indim...","e":"sad"}'];
+                        $messages[] = ['role' => 'user', 'content' => 'This is amazing! I love it!'];
+                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Bu ajoyib! Menga yoqdi!","e":"happy"}'];
+                    }
+
+                    $messages[] = ['role' => 'user', 'content' => $src];
+
                     $res = $client->post('https://api.openai.com/v1/chat/completions', [
-                        'model' => 'gpt-4o-mini',
-                        'temperature' => 0.2,
-                        'messages' => [
-                            ['role' => 'system', 'content' => $system],
-                            ['role' => 'user', 'content' => $src],
-                        ],
+                        'model' => 'gpt-4o',
+                        'temperature' => 0.1,
+                        'messages' => $messages,
                     ]);
 
                     if ($res->failed()) {
@@ -160,20 +179,45 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
 
                     $out = trim($out);
 
+                    // Parse JSON response: {"t":"translation","e":"emotion"}
+                    $parsedText = $out;
+                    $detectedEmotion = 'neutral';
+
+                    if (str_starts_with($out, '{') && str_contains($out, '"t"')) {
+                        $parsed = json_decode($out, true);
+                        if (is_array($parsed) && isset($parsed['t'])) {
+                            $parsedText = trim($parsed['t']);
+                            $detectedEmotion = strtolower(trim($parsed['e'] ?? 'neutral'));
+
+                            // Validate emotion
+                            $validEmotions = ['neutral', 'happy', 'sad', 'angry', 'fear', 'surprise', 'excited'];
+                            if (!in_array($detectedEmotion, $validEmotions)) {
+                                $detectedEmotion = 'neutral';
+                            }
+
+                            Log::info('Emotion detected from translation', [
+                                'segment_id' => $seg->id,
+                                'emotion' => $detectedEmotion,
+                            ]);
+                        }
+                    }
+
                     // Guard: reject English-ish outputs
-                    if ($this->looksLikeEnglish($out)) {
+                    if ($this->looksLikeEnglish($parsedText)) {
                         Log::warning('Translation looks English; retrying with stricter prompt', [
                             'video_id' => $video->id,
                             'segment_id' => $seg->id,
                             'attempt' => $attempt,
                             'target_language' => $targetLanguage,
-                            'sample' => mb_substr($out, 0, 160),
+                            'sample' => mb_substr($parsedText, 0, 160),
                         ]);
                         $translated = null;
+                        $emotion = null;
                         continue;
                     }
 
-                    $translated = $out;
+                    $translated = $parsedText;
+                    $emotion = $detectedEmotion;
                     break;
                 }
 
@@ -188,7 +232,7 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
 
                     // Try one more very strict request (single shot)
                     $res = $client->post('https://api.openai.com/v1/chat/completions', [
-                        'model' => 'gpt-4o-mini',
+                        'model' => 'gpt-4o',
                         'temperature' => 0.0,
                         'messages' => [
                             ['role' => 'system', 'content' => $this->buildSystemPrompt($targetLanguage, 3, $charCount, $prevText, $nextText, $slotDuration)],
@@ -203,7 +247,10 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
                     $translated = $out;
                 }
 
-                $seg->update(['translated_text' => $translated]);
+                $seg->update([
+                    'translated_text' => $translated,
+                    'emotion' => $emotion,
+                ]);
             }
 
             $video->update(['status' => 'translated']);
@@ -262,15 +309,16 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
         }
 
         // Time-aware character budget
-        // Use 4 chars/sec to leave room for TTS variation
+        // Uzbek TTS speaks ~12 chars/sec at normal speed
+        // Use 10 chars/sec to leave buffer for natural pauses
         $budgetRule = '';
         if ($slotDuration > 0) {
-            $maxChars = max(3, (int) floor($slotDuration * 4));
+            $maxChars = max(5, (int) floor($slotDuration * 10));
 
             if ($slotDuration < 1.0) {
-                $budgetRule = "8. CRITICAL: Only {$slotDuration}s! Use 1 word, max {$maxChars} characters. Example: 'Ha' or 'Yo'q'\n";
+                $budgetRule = "8. CRITICAL: Only {$slotDuration}s! Max {$maxChars} characters. Be VERY brief.\n";
             } elseif ($slotDuration < 2.0) {
-                $budgetRule = "8. VERY SHORT: {$slotDuration}s slot. Max 2 words, {$maxChars} characters total.\n";
+                $budgetRule = "8. SHORT: {$slotDuration}s slot. Max {$maxChars} characters. Keep it brief.\n";
             } elseif ($slotDuration < 3.0) {
                 $budgetRule = "8. SHORT: {$slotDuration}s. Keep under {$maxChars} characters. Be extremely brief.\n";
             } else {
@@ -278,39 +326,104 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
             }
         }
 
-        // Few-shot examples for Uzbek demonstrating emotional range
+        // Uzbek-specific translation rules
         $examples = '';
         if (str_contains($targetLanguage, 'Uzbek') || str_contains($targetLanguage, 'uz')) {
             $examples =
-                "\nEXAMPLES of good dubbing translation with emotions (English → Uzbek):\n" .
-                "- \"Here's what it says.\" → \"Mana, ko'ring.\"\n" .
-                "- \"I don't think that's going to work.\" → \"Bu ishlamaydi.\"\n" .
-                "- \"We need to get out now!\" (urgent) → \"Tez ketamiz!\"\n" .
-                "- \"What are you talking about?\" (confused) → \"Nima deyapsan?\"\n" .
-                "- \"I told you this was bad.\" (frustrated) → \"Aytgan edim-ku!\"\n" .
-                "- \"No way I'm letting you.\" (firm) → \"Yo'q, qo'ymayman.\"\n" .
-                "- \"Can you believe it?\" (surprised) → \"Ko'rdingmi?!\"\n" .
-                "- \"I'm sorry, I didn't mean to.\" (apologetic) → \"Kechirasiz.\"\n" .
-                "- \"This is incredible!\" (excited) → \"Ajoyib!\"\n" .
-                "- \"I can't do this anymore.\" (defeated) → \"Endi qo'limdan kelmaydi.\"\n" .
-                "KEY: Translations are SHORT, emotional, and natural. Use punctuation to convey emotion (!?). Match the speaker's feeling.\n";
+                "\n### MUHIM: O'ZBEK TARJIMA QOIDALARI ###\n\n" .
+                "FE'L SHAKLLARI - FAQAT NORASMIY \"SEN\" ISHLATILSIN:\n" .
+                "- \"Ask\" = \"So'ra\" (XATO: \"So'rang\")\n" .
+                "- \"Listen\" = \"Tingla\" (XATO: \"Tinglang\")\n" .
+                "- \"Come\" = \"Kel\" (XATO: \"Keling\")\n" .
+                "- \"Look\" = \"Qara\" (XATO: \"Qarang\")\n" .
+                "- \"Go\" = \"Bor\" yoki \"Ket\" (XATO: \"Boring\")\n\n" .
+                "MA'NO BO'YICHA TARJIMA:\n" .
+                "- \"End of notes\" = \"Qaydlar tugadi\" yoki \"Eslatmalar oxiri\" (XATO: \"Qaytish\" - bu \"return\" degan ma'no!)\n" .
+                "- \"It says, ask\" = \"Unda aytilgan: so'ra\" (bu kitob/qog'oz nimani aytayotganini bildiradi)\n" .
+                "- \"Here's what it says\" = \"Mana nima deyilgan\" yoki \"Mana u nima deydi\"\n" .
+                "- \"That's it\" = \"Tamom\" yoki \"Shu, xolos\"\n" .
+                "- \"The art of asking\" = \"So'rash san'ati\"\n\n" .
+                "QOIDALAR:\n" .
+                "1. MA'NONI SAQLANG - inglizcha gap nimani anglatsa, o'zbekcha ham shu ma'noni bersin\n" .
+                "2. NORASMIY SO'ZLASHING - do'stingiz bilan gaplashgandek\n" .
+                "3. QISQA BO'LSIN - dublyaj uchun\n";
         }
 
         return
-            "You are an expert FILM DUBBING TRANSLATOR for {$targetLanguage}.\n\n" .
-            "YOUR MISSION: Create dubbed dialogue that sounds NATURAL and EMOTIONAL — like a native speaker would say it.\n\n" .
-            "CRITICAL RULES:\n" .
-            "1. EXTREMELY CONCISE: Use the FEWEST words possible. Dubbing MUST fit the time slot. Drop filler words. Simplify everything.\n" .
-            "2. NATURAL SPEECH: Write how people ACTUALLY TALK. Use contractions. Use colloquial phrases. Avoid formal/written style.\n" .
-            "3. EMOTIONAL AUTHENTICITY: Match the speaker's emotion EXACTLY. If they're angry, your translation must SOUND angry. If sad, it must feel heavy. Use punctuation (! ? ...) to convey emotion.\n" .
-            "4. PRESERVE INTENT: Keep the core meaning but adapt the expression. Cultural equivalents are fine.\n" .
-            "5. ONLY {$targetLanguage}: Output ONLY in {$targetLanguage}. No English except proper names.\n" .
-            "6. DIALOGUE FLOW: This is part of a conversation. It must sound natural when spoken aloud.\n" .
-            "7. PURE OUTPUT: Return ONLY the translated line. No quotes, no explanations.\n" .
+            "You are a professional {$targetLanguage} translator for movie dubbing with emotional awareness.\n\n" .
+            "YOUR TASK:\n" .
+            "1. Translate the text accurately and naturally\n" .
+            "2. Detect the emotion from context, punctuation, and meaning\n" .
+            "3. Return JSON format: {\"t\":\"translation\",\"e\":\"emotion\"}\n\n" .
+            "EMOTIONS (choose one): neutral, happy, sad, angry, fear, surprise, excited\n\n" .
+            "TRANSLATION RULES:\n" .
+            "- Translate MEANING, not word-by-word\n" .
+            "- Use informal speech (talking to a friend)\n" .
+            "- Keep it concise for dubbing\n" .
             $budgetRule .
             $examples .
             $contextBlock .
             $extra;
+    }
+
+    /**
+     * Fix common "siz" forms that GPT keeps using despite instructions.
+     * Converts formal forms to informal "sen" forms for natural dubbing.
+     */
+    private function fixSizForms(string $text): string
+    {
+        // Imperative -ng → informal form (word boundary aware)
+        $imperatives = [
+            '/\bso\'rang\b/ui' => "so'ra",
+            '/\bkeling\b/ui' => 'kel',
+            '/\bqarang\b/ui' => 'qara',
+            '/\bayting\b/ui' => 'ayt',
+            '/\bboring\b/ui' => 'bor',
+            '/\bturing\b/ui' => "tur",
+            '/\bchiqing\b/ui' => 'chiq',
+            '/\boling\b/ui' => 'ol',
+            '/\bbering\b/ui' => 'ber',
+            '/\btinglang\b/ui' => 'tingla',
+            '/\bo\'qing\b/ui' => "o'qi",
+            '/\byozing\b/ui' => 'yoz',
+            '/\bkuting\b/ui' => 'kut',
+            '/\byuring\b/ui' => 'yur',
+            '/\bo\'tiring\b/ui' => "o'tir",
+            '/\bkiriting\b/ui' => 'kirit',
+        ];
+
+        foreach ($imperatives as $pattern => $replacement) {
+            $text = preg_replace($pattern, $replacement, $text);
+        }
+
+        // Verb -siz endings → -san (careful not to match nouns)
+        // Only fix clear verb patterns
+        $verbSiz = [
+            '/(\w)asiz\b/ui' => '$1asan',
+            '/(\w)aysiz\b/ui' => '$1aysan',
+            '/(\w)isiz\b/ui' => '$1isan',
+            '/(\w)osiz\b/ui' => '$1osan',
+        ];
+
+        foreach ($verbSiz as $pattern => $replacement) {
+            $text = preg_replace($pattern, $replacement, $text);
+        }
+
+        // Pronouns (word boundary)
+        $text = preg_replace('/\bsizga\b/ui', 'senga', $text);
+        $text = preg_replace('/\bsizni\b/ui', 'seni', $text);
+        $text = preg_replace('/\bsizning\b/ui', 'sening', $text);
+
+        // "siz" as standalone pronoun when it means "you" → "sen"
+        // Be careful: "siz" could be part of compound words
+        $text = preg_replace('/\bSiz\b/u', 'Sen', $text);
+        $text = preg_replace('/\bsiz\b/u', 'sen', $text);
+
+        // Fix "so'rov berish" → "so'rash" (more natural)
+        $text = preg_replace('/so\'rov berish/ui', "so'rash", $text);
+        $text = preg_replace('/so\'rov qilish/ui', "so'rash", $text);
+
+        return $text;
     }
 
 }

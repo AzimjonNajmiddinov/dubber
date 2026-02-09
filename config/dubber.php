@@ -29,7 +29,7 @@ return [
         'cloning_driver' => env('TTS_CLONING_DRIVER', 'xtts'),
 
         // Use SSML markup for Edge-TTS (per-sentence prosody, breaks, intonation)
-        'edge_ssml' => env('TTS_EDGE_SSML', true),
+        'edge_ssml' => env('TTS_EDGE_SSML', false),  // SSML broken in edge-tts 7.x - speaks XML tags as text
     ],
 
     // Uzbek Edge TTS voices available on your system:
@@ -91,5 +91,12 @@ return [
         // pitch in Hz (string like +3Hz) - kept mild for natural sound
         'pitch_min' => -20,
         'pitch_max' => 20,
+    ],
+
+    // Lip-sync settings (Wav2Lip)
+    // NOTE: Disabled by default - CPU too slow, needs GPU or cloud service
+    'lipsync' => [
+        // Enable lip-sync processing after dubbing
+        'enabled' => env('LIPSYNC_ENABLED', false),
     ],
 ];
