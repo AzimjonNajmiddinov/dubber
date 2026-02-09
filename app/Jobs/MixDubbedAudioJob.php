@@ -169,22 +169,11 @@ class MixDubbedAudioJob implements ShouldQueue, ShouldBeUnique
                 $delayMs = max(0, (int) round(((float) $seg->start_time) * 1000));
                 $label = "tts{$i}";
 
-                // Professional TTS processing for natural, broadcast-quality speech
-                // - Gentle fade in/out (50ms) for smooth transitions without clicks
-                // - Light de-esser to reduce harsh sibilance
-                // - Subtle warmth boost for voice presence
+                // Simple TTS processing - delay to correct position
                 $filtersBase[] =
                     "[{$i}:a]"
                     . "aresample=48000,"
                     . "aformat=sample_fmts=fltp:channel_layouts=stereo,"
-                    . "afade=t=in:d=0.05,"                     // 50ms fade in
-                    . "areverse,afade=t=in:d=0.05,areverse,"   // 50ms fade out
-                    . "highpass=f=80,"                         // Remove rumble
-                    . "lowpass=f=12000,"                       // Remove harsh highs
-                    . "equalizer=f=200:t=q:w=0.8:g=+1,"        // Subtle warmth
-                    . "equalizer=f=3000:t=q:w=1.2:g=+1,"       // Presence/clarity
-                    . "equalizer=f=6500:t=q:w=1.5:g=-2,"       // De-ess (reduce sibilance)
-                    . "acompressor=threshold=-20dB:ratio=2:attack=20:release=200:makeup=1dB," // Gentle compression
                     . "adelay={$delayMs}|{$delayMs}"
                     . "[{$label}]";
 
@@ -281,6 +270,8 @@ class MixDubbedAudioJob implements ShouldQueue, ShouldBeUnique
                 'bed' => $bedRel,
                 'final' => $finalRel,
                 'tts_count' => $segments->count(),
+                'filter_complex_length' => strlen($fc),
+                'first_3_delays_ms' => array_map(fn($s) => (int) round(((float) $s->start_time) * 1000), $segments->take(3)->all()),
             ]);
 
             $out = [];
@@ -298,8 +289,8 @@ class MixDubbedAudioJob implements ShouldQueue, ShouldBeUnique
 
                 copy($ttsOnlyAbs, $finalAbs);
             } else {
-                // Clean up debug TTS-only file after successful mix
-                @unlink($ttsOnlyAbs);
+                // Keep TTS-only file for debugging
+                // @unlink($ttsOnlyAbs);
             }
 
             Log::info('Mix completed', [
