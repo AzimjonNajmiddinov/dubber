@@ -169,10 +169,13 @@ class MixDubbedAudioJob implements ShouldQueue, ShouldBeUnique
                 $delayMs = max(0, (int) round(((float) $seg->start_time) * 1000));
                 $label = "tts{$i}";
 
+                // Add short fade in/out for smooth segment transitions (30ms each)
                 $filtersBase[] =
                     "[{$i}:a]"
                     . "aresample=48000,"
                     . "aformat=sample_fmts=fltp:channel_layouts=stereo,"
+                    . "afade=t=in:d=0.03,"
+                    . "areverse,afade=t=in:d=0.03,areverse,"  // fade out via reverse trick
                     . "adelay={$delayMs}|{$delayMs},"
                     . "highpass=f=60,"
                     . "lowpass=f=15000"

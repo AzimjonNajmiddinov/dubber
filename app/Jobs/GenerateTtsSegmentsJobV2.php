@@ -348,19 +348,20 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
         }
 
         $ratio = $audioDuration / $slotDuration;
-        $maxTempo = 2.3;
-        $minTempo = 0.75;
+        $maxTempo = 2.0;  // Reduced from 2.3 for more natural speech
+        $minTempo = 0.85; // Don't slow down too much
 
-        // Skip if already close enough (within 5%)
-        if ($ratio >= 0.95 && $ratio <= 1.05) {
+        // Skip if already close enough (within 3%)
+        if ($ratio >= 0.97 && $ratio <= 1.03) {
             return;
         }
 
         // Build the filter chain
         if ($ratio < 1.0) {
             // Audio is too short — slow down to fill the slot
-            $effectiveRatio = max($ratio, $minTempo);
-            $filter = 'atempo=' . number_format($effectiveRatio, 4, '.', '');
+            // atempo < 1.0 slows down, so use ratio directly (e.g., 0.8 = 20% slower)
+            $effectiveTempo = max($ratio, $minTempo);
+            $filter = 'atempo=' . number_format($effectiveTempo, 4, '.', '');
         } elseif ($ratio <= $maxTempo) {
             // Moderate speedup — atempo alone is enough
             $filter = $this->buildAtempoChain($ratio);
