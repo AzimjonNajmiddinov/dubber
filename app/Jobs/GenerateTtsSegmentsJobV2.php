@@ -299,12 +299,25 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
         ]);
 
         $outputPath = $fallbackDriver->synthesize($text, $speaker, $seg, $options);
+
+        // Time-fit the fallback TTS as well
+        $slotDuration = ((float) $seg->end_time) - ((float) $seg->start_time);
+        $this->fitAudioToSlot($outputPath, $slotDuration);
+
         $relPath = str_replace(Storage::disk('local')->path(''), '', $outputPath);
 
         $seg->update([
             'tts_audio_path' => $relPath,
             'tts_gain_db' => $options['gain_db'],
         ]);
+
+        Log::info('TTS segment ready (fallback)', [
+            'segment_id' => $seg->id,
+            'path' => $relPath,
+        ]);
+
+        // Generate segment video for HLS
+        GenerateSegmentVideoJob::dispatch($seg->id)->onQueue('default');
     }
 
     /**
