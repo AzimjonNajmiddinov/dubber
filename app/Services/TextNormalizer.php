@@ -32,34 +32,36 @@ class TextNormalizer
      * Normalize Uzbek special characters for TTS.
      *
      * Uzbek Latin uses o' and g' for special sounds:
-     * - o' (oʻ) - open O sound
-     * - g' (gʻ) - voiced uvular fricative
+     * - o' (oʻ) - open O sound (like "ö" or "aw" in "law")
+     * - g' (gʻ) - voiced uvular fricative (like French "r" or soft "gh")
      *
-     * GPT and other sources may use different apostrophe characters:
-     * - U+0027 (') ASCII apostrophe
-     * - U+2019 (') right single quotation mark (curly quote)
-     * - U+02BB (ʻ) modifier letter turned comma
-     * - U+02BC (ʼ) modifier letter apostrophe
-     * - U+0060 (`) grave accent (backtick)
-     *
-     * Edge TTS Uzbek voices expect ASCII apostrophe (').
+     * XTTS doesn't natively understand these, so we convert them to
+     * phonetic approximations that produce more accurate sounds.
      */
     private static function normalizeUzbekCharacters(string $text): string
     {
-        // Replace all apostrophe-like characters with ASCII apostrophe
-        // Using regex with Unicode character classes for reliability
-        $patterns = [
-            "/\x{2019}/u",  // RIGHT SINGLE QUOTATION MARK
-            "/\x{2018}/u",  // LEFT SINGLE QUOTATION MARK
-            "/\x{02BB}/u",  // MODIFIER LETTER TURNED COMMA
-            "/\x{02BC}/u",  // MODIFIER LETTER APOSTROPHE
-            "/\x{0060}/u",  // GRAVE ACCENT (backtick)
-            "/\x{00B4}/u",  // ACUTE ACCENT
-            "/\x{02C8}/u",  // MODIFIER LETTER VERTICAL LINE
-            "/\x{055A}/u",  // ARMENIAN APOSTROPHE
+        // First, normalize all apostrophe variants to ASCII apostrophe
+        $apostrophes = [
+            "\u{2019}",  // RIGHT SINGLE QUOTATION MARK '
+            "\u{2018}",  // LEFT SINGLE QUOTATION MARK '
+            "\u{02BB}",  // MODIFIER LETTER TURNED COMMA ʻ
+            "\u{02BC}",  // MODIFIER LETTER APOSTROPHE ʼ
+            "\u{0060}",  // GRAVE ACCENT `
+            "\u{00B4}",  // ACUTE ACCENT ´
+            "\u{02C8}",  // MODIFIER LETTER VERTICAL LINE ˈ
+            "\u{055A}",  // ARMENIAN APOSTROPHE ՚
         ];
+        $text = str_replace($apostrophes, "'", $text);
 
-        $text = preg_replace($patterns, "'", $text);
+        // Convert o' to phonetic "ö" (XTTS understands German/Turkish ö)
+        // This produces the correct open-mid back rounded vowel
+        $text = preg_replace("/o'/iu", "ö", $text);
+        $text = preg_replace("/O'/u", "Ö", $text);
+
+        // Convert g' to phonetic "gh" (voiced velar/uvular approximation)
+        // "gh" is commonly understood by TTS as a softer g sound
+        $text = preg_replace("/g'/iu", "gh", $text);
+        $text = preg_replace("/G'/u", "Gh", $text);
 
         return $text;
     }
@@ -141,8 +143,9 @@ class TextNormalizer
      */
     private static function digitsToWords(string $digits, string $lang): string
     {
+        // Use phonetic representations for Uzbek: o' → ö
         $digitWords = match($lang) {
-            'uz', 'uzbek' => ['nol', 'bir', 'ikki', 'uch', 'to\'rt', 'besh', 'olti', 'yetti', 'sakkiz', 'to\'qqiz'],
+            'uz', 'uzbek' => ['nol', 'bir', 'ikki', 'uch', 'tört', 'besh', 'olti', 'yetti', 'sakkiz', 'töqqiz'],
             'ru', 'russian' => ['ноль', 'один', 'два', 'три', 'четыре', 'пять', 'шесть', 'семь', 'восемь', 'девять'],
             default => ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'],
         };
@@ -161,8 +164,9 @@ class TextNormalizer
     {
         if ($n == 0) return 'nol';
 
-        $ones = ['', 'bir', 'ikki', 'uch', 'to\'rt', 'besh', 'olti', 'yetti', 'sakkiz', 'to\'qqiz'];
-        $tens = ['', 'o\'n', 'yigirma', 'o\'ttiz', 'qirq', 'ellik', 'oltmish', 'yetmish', 'sakson', 'to\'qson'];
+        // Use phonetic representations: o' → ö, g' → gh
+        $ones = ['', 'bir', 'ikki', 'uch', 'tört', 'besh', 'olti', 'yetti', 'sakkiz', 'töqqiz'];
+        $tens = ['', 'ön', 'yigirma', 'öttiz', 'qirq', 'ellik', 'oltmish', 'yetmish', 'sakson', 'töqson'];
 
         $words = [];
 
@@ -347,7 +351,8 @@ class TextNormalizer
     {
         $abbreviations = match($lang) {
             'uz', 'uzbek' => [
-                '/\bAQSh\b/i' => 'Amerika Qo\'shma Shtatlari',
+                // Use phonetic: o' → ö, g' → gh
+                '/\bAQSh\b/i' => 'Amerika Qöshma Shtatlari',
                 '/\bBMT\b/i' => 'Birlashgan Millatlar Tashkiloti',
                 '/(?<=\d)\s*km\b/' => ' kilometr',
                 '/(?<=\d)\s*m\b/' => ' metr',
