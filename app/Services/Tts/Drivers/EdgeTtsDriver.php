@@ -341,7 +341,6 @@ class EdgeTtsDriver implements TtsDriverInterface
     protected function normalizeAudio(string $input, string $output, array $options, float $slotDuration = 0): void
     {
         $gainDb = $options['gain_db'] ?? 0.0;
-        $lufsTarget = $options['lufs_target'] ?? -16.0;
 
         // First, get the duration of the input audio
         $durationCmd = sprintf(
@@ -378,18 +377,17 @@ class EdgeTtsDriver implements TtsDriverInterface
             }
         }
 
+        // No loudnorm here — the final mix handles loudness normalization once.
+        // Just format conversion and optional tempo/gain adjustment.
         $filter = sprintf(
             'aresample=48000,' .
             'aformat=sample_fmts=fltp:channel_layouts=stereo,' .
             '%s' . // tempo filter if needed
             'highpass=f=80,' .
-            'lowpass=f=10000,' .
-            'volume=%sdB,' .
-            'loudnorm=I=%s:TP=-1.5:LRA=11,' .
-            'aresample=48000',
+            'lowpass=f=12000,' .
+            'volume=%sdB',
             $tempoFilter,
-            $gainDb >= 0 ? "+{$gainDb}" : $gainDb,
-            $lufsTarget
+            $gainDb >= 0 ? "+{$gainDb}" : $gainDb
         );
 
         $cmd = sprintf(
