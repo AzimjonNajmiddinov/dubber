@@ -110,14 +110,57 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
             $outDirRel = "audio/tts/{$video->id}";
             Storage::disk('local')->makeDirectory($outDirRel);
 
-            // Step 3: Generate TTS for each segment
-            foreach ($segments as $seg) {
-                $this->processSegment($seg, $driver, $video);
+            // Step 3: Generate TTS in parallel batches
+            // Process 8 segments at a time for optimal throughput
+            $batchSize = 8;
+            $batches = $segments->chunk($batchSize);
+
+            Log::info('TTS generation starting parallel processing', [
+                'video_id' => $video->id,
+                'total_segments' => $segments->count(),
+                'batch_count' => $batches->count(),
+                'batch_size' => $batchSize,
+            ]);
+
+            foreach ($batches as $batchIndex => $batch) {
+                // Process batch in parallel
+                $jobs = [];
+                foreach ($batch as $seg) {
+                    $jobs[] = new ProcessTtsSegmentJob($seg->id, $video->id);
+                }
+
+                // Dispatch all jobs in this batch
+                foreach ($jobs as $job) {
+                    dispatch($job)->onQueue('tts');
+                }
+
+                // Wait for batch to complete before next batch
+                // This prevents overwhelming the TTS service
+                $this->waitForBatchCompletion($batch, $video->id);
+
+                Log::info('TTS batch completed', [
+                    'video_id' => $video->id,
+                    'batch' => $batchIndex + 1,
+                    'of' => $batches->count(),
+                ]);
+            }
+
+            // Verify all segments have TTS
+            $completed = VideoSegment::where('video_id', $video->id)
+                ->whereNotNull('tts_audio_path')
+                ->count();
+
+            if ($completed < $segments->count()) {
+                Log::warning('Some TTS segments failed', [
+                    'video_id' => $video->id,
+                    'completed' => $completed,
+                    'expected' => $segments->count(),
+                ]);
             }
 
             Log::info('TTS generation complete', [
                 'video_id' => $video->id,
-                'segments_processed' => $segments->count(),
+                'segments_processed' => $completed,
                 'driver' => $driverName,
             ]);
 
@@ -190,6 +233,36 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
                 // Continue with default voice for this speaker
             }
         }
+    }
+
+    /**
+     * Wait for a batch of TTS segments to complete.
+     */
+    protected function waitForBatchCompletion($batch, int $videoId): void
+    {
+        $segmentIds = $batch->pluck('id')->toArray();
+        $maxWait = 120; // 2 minutes max per batch
+        $waited = 0;
+        $interval = 2; // Check every 2 seconds
+
+        while ($waited < $maxWait) {
+            $completed = VideoSegment::whereIn('id', $segmentIds)
+                ->whereNotNull('tts_audio_path')
+                ->count();
+
+            if ($completed >= count($segmentIds)) {
+                return; // All done
+            }
+
+            sleep($interval);
+            $waited += $interval;
+        }
+
+        Log::warning('TTS batch wait timeout', [
+            'video_id' => $videoId,
+            'expected' => count($segmentIds),
+            'completed' => $completed ?? 0,
+        ]);
     }
 
     /**
@@ -361,7 +434,7 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
         }
 
         $ratio = $audioDuration / $slotDuration;
-        $maxTempo = 2.0;  // Reduced from 2.3 for more natural speech
+        $maxTempo = 1.3;  // Keep speech natural and clear - prefer trimming over speedup
         $minTempo = 0.85; // Don't slow down too much
 
         // Skip if already close enough (within 3%)

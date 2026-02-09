@@ -262,23 +262,20 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
         }
 
         // Time-aware character budget
-        // XTTS speaks at ~6-8 chars/sec for Uzbek, so we use 7 as target
+        // Natural speech is ~5 chars/sec for Uzbek. Use 5 to avoid any speedup.
         $budgetRule = '';
-        if ($charCount > 0) {
-            $maxCharsFromSource = (int) round($charCount * 0.9); // Aim for shorter than original
+        if ($slotDuration > 0) {
+            // 5 chars/sec = natural speech pace, no speedup needed
+            $maxChars = (int) round($slotDuration * 5);
 
-            if ($slotDuration > 0) {
-                // ~7 chars/sec matches XTTS Uzbek speaking rate
-                $maxCharsFromSlot = (int) round($slotDuration * 7);
-                $maxChars = min($maxCharsFromSlot, $maxCharsFromSource);
-
-                if ($slotDuration < 1.5) {
-                    $budgetRule = "8. STRICT TIME LIMIT: Only {$slotDuration}s available. Use 1-2 words MAX. Under {$maxChars} characters.\n";
-                } else {
-                    $budgetRule = "8. STRICT TIME LIMIT: Must fit in {$slotDuration}s. Maximum {$maxChars} characters. Be extremely concise.\n";
-                }
+            if ($slotDuration < 1.0) {
+                $budgetRule = "8. ULTRA-SHORT ({$slotDuration}s): ONE word only. Max {$maxChars} chars.\n";
+            } elseif ($slotDuration < 2.0) {
+                $budgetRule = "8. VERY SHORT ({$slotDuration}s): 1-2 words max. Under {$maxChars} characters.\n";
+            } elseif ($slotDuration < 4.0) {
+                $budgetRule = "8. SHORT SLOT ({$slotDuration}s): Be very brief. Max {$maxChars} characters.\n";
             } else {
-                $budgetRule = "8. CHARACTER BUDGET: Maximum {$maxCharsFromSource} characters. Shorter is always better for dubbing.\n";
+                $budgetRule = "8. TIME LIMIT: {$slotDuration}s available. Maximum {$maxChars} characters.\n";
             }
         }
 

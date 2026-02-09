@@ -289,8 +289,8 @@ class MixDubbedAudioJob implements ShouldQueue, ShouldBeUnique
 
                 copy($ttsOnlyAbs, $finalAbs);
             } else {
-                // Keep TTS-only file for debugging
-                // @unlink($ttsOnlyAbs);
+                // Clean up debug TTS-only file after successful mix
+                @unlink($ttsOnlyAbs);
             }
 
             Log::info('Mix completed', [

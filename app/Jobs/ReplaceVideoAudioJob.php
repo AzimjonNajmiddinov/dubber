@@ -272,10 +272,9 @@ class ReplaceVideoAudioJob implements ShouldQueue, ShouldBeUnique
             ]);
 
             // Auto-delete original video and intermediate files to save storage
-            // TEMPORARILY DISABLED FOR DEBUGGING
-            // if (config('dubber.cleanup.delete_after_dubbing', true)) {
-            //     $this->cleanupOriginalFiles($video, $origMp4Abs, $finalWavAbs);
-            // }
+            if (config('dubber.cleanup.delete_after_dubbing', true)) {
+                $this->cleanupOriginalFiles($video, $origMp4Abs, $finalWavAbs);
+            }
         } finally {
             optional($lock)->release();
         }
