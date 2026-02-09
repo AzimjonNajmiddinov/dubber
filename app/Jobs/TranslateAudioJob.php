@@ -119,9 +119,6 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
                 // Calculate slot duration for time-aware character budget
                 $slotDuration = ((float) $seg->end_time) - ((float) $seg->start_time);
 
-                // Calculate max chars (3 chars/sec to leave margin for TTS)
-                $maxChars = $slotDuration > 0 ? max(5, (int) floor($slotDuration * 5)) : 0;
-
                 // Attempt up to 2 times if English leaks
                 $translated = null;
                 $lastBody = null;
@@ -174,38 +171,6 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
                         ]);
                         $translated = null;
                         continue;
-                    }
-
-                    // Guard: enforce character limit
-                    $outLen = mb_strlen($out);
-                    if ($maxChars > 0 && $outLen > $maxChars * 1.5) {
-                        // Way over limit - retry with attempt bump
-                        Log::warning('Translation too long; retrying', [
-                            'video_id' => $video->id,
-                            'segment_id' => $seg->id,
-                            'attempt' => $attempt,
-                            'chars' => $outLen,
-                            'max' => $maxChars,
-                            'sample' => mb_substr($out, 0, 60),
-                        ]);
-                        $translated = null;
-                        continue;
-                    }
-
-                    // Soft truncate if slightly over - cut at last space
-                    if ($maxChars > 0 && $outLen > $maxChars) {
-                        $truncated = mb_substr($out, 0, $maxChars);
-                        $lastSpace = mb_strrpos($truncated, ' ');
-                        if ($lastSpace !== false && $lastSpace > $maxChars * 0.5) {
-                            $out = mb_substr($truncated, 0, $lastSpace);
-                        } else {
-                            $out = $truncated;
-                        }
-                        Log::info('Translation soft-truncated', [
-                            'segment_id' => $seg->id,
-                            'original_len' => $outLen,
-                            'truncated_len' => mb_strlen($out),
-                        ]);
                     }
 
                     $translated = $out;
@@ -297,49 +262,52 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
         }
 
         // Time-aware character budget
-        // Use 5 chars/sec (Edge TTS speaks ~5 chars/sec, can speed up to 7.5 with +50%)
+        // Use 4 chars/sec to leave room for TTS variation
         $budgetRule = '';
-        $maxChars = 0;
         if ($slotDuration > 0) {
-            $maxChars = max(5, (int) floor($slotDuration * 5));
+            $maxChars = max(3, (int) floor($slotDuration * 4));
 
             if ($slotDuration < 1.0) {
-                $budgetRule = "⚠️ HARD LIMIT: {$maxChars} CHARACTERS MAX (only {$slotDuration}s). Use 1-2 words ONLY.\n";
+                $budgetRule = "8. CRITICAL: Only {$slotDuration}s! Use 1 word, max {$maxChars} characters. Example: 'Ha' or 'Yo'q'\n";
             } elseif ($slotDuration < 2.0) {
-                $budgetRule = "⚠️ HARD LIMIT: {$maxChars} CHARACTERS MAX ({$slotDuration}s slot). Use 2-4 words max.\n";
+                $budgetRule = "8. VERY SHORT: {$slotDuration}s slot. Max 2 words, {$maxChars} characters total.\n";
             } elseif ($slotDuration < 3.0) {
-                $budgetRule = "⚠️ HARD LIMIT: {$maxChars} CHARACTERS MAX ({$slotDuration}s slot). Be very brief.\n";
+                $budgetRule = "8. SHORT: {$slotDuration}s. Keep under {$maxChars} characters. Be extremely brief.\n";
             } else {
-                $budgetRule = "⚠️ HARD LIMIT: {$maxChars} CHARACTERS MAX ({$slotDuration}s slot). Brevity essential.\n";
+                $budgetRule = "8. LIMIT: {$slotDuration}s = max {$maxChars} characters. Brevity is essential.\n";
             }
         }
 
-        // Few-shot examples - emphasis on SHORT translations
+        // Few-shot examples for Uzbek demonstrating emotional range
         $examples = '';
         if (str_contains($targetLanguage, 'Uzbek') || str_contains($targetLanguage, 'uz')) {
             $examples =
-                "\nEXAMPLES (notice how SHORT they are):\n" .
-                "- \"Yes, I understand.\" → \"Ha.\" (2 chars)\n" .
-                "- \"No, I don't think so.\" → \"Yo'q.\" (4 chars)\n" .
-                "- \"What?\" → \"Nima?\" (5 chars)\n" .
-                "- \"Let's go!\" → \"Ketdik!\" (7 chars)\n" .
-                "- \"I told you.\" → \"Aytdim.\" (7 chars)\n" .
-                "- \"Look at this.\" → \"Mana.\" (5 chars)\n" .
-                "- \"Are you sure about that?\" → \"Rostmi?\" (7 chars)\n" .
-                "- \"I can't believe it!\" → \"Ajoyib!\" (7 chars)\n" .
-                "Count characters. Stay under limit.\n";
+                "\nEXAMPLES of good dubbing translation with emotions (English → Uzbek):\n" .
+                "- \"Here's what it says.\" → \"Mana, ko'ring.\"\n" .
+                "- \"I don't think that's going to work.\" → \"Bu ishlamaydi.\"\n" .
+                "- \"We need to get out now!\" (urgent) → \"Tez ketamiz!\"\n" .
+                "- \"What are you talking about?\" (confused) → \"Nima deyapsan?\"\n" .
+                "- \"I told you this was bad.\" (frustrated) → \"Aytgan edim-ku!\"\n" .
+                "- \"No way I'm letting you.\" (firm) → \"Yo'q, qo'ymayman.\"\n" .
+                "- \"Can you believe it?\" (surprised) → \"Ko'rdingmi?!\"\n" .
+                "- \"I'm sorry, I didn't mean to.\" (apologetic) → \"Kechirasiz.\"\n" .
+                "- \"This is incredible!\" (excited) → \"Ajoyib!\"\n" .
+                "- \"I can't do this anymore.\" (defeated) → \"Endi qo'limdan kelmaydi.\"\n" .
+                "KEY: Translations are SHORT, emotional, and natural. Use punctuation to convey emotion (!?). Match the speaker's feeling.\n";
         }
 
         return
-            "You are a FILM DUBBING TRANSLATOR for {$targetLanguage}.\n\n" .
+            "You are an expert FILM DUBBING TRANSLATOR for {$targetLanguage}.\n\n" .
+            "YOUR MISSION: Create dubbed dialogue that sounds NATURAL and EMOTIONAL — like a native speaker would say it.\n\n" .
+            "CRITICAL RULES:\n" .
+            "1. EXTREMELY CONCISE: Use the FEWEST words possible. Dubbing MUST fit the time slot. Drop filler words. Simplify everything.\n" .
+            "2. NATURAL SPEECH: Write how people ACTUALLY TALK. Use contractions. Use colloquial phrases. Avoid formal/written style.\n" .
+            "3. EMOTIONAL AUTHENTICITY: Match the speaker's emotion EXACTLY. If they're angry, your translation must SOUND angry. If sad, it must feel heavy. Use punctuation (! ? ...) to convey emotion.\n" .
+            "4. PRESERVE INTENT: Keep the core meaning but adapt the expression. Cultural equivalents are fine.\n" .
+            "5. ONLY {$targetLanguage}: Output ONLY in {$targetLanguage}. No English except proper names.\n" .
+            "6. DIALOGUE FLOW: This is part of a conversation. It must sound natural when spoken aloud.\n" .
+            "7. PURE OUTPUT: Return ONLY the translated line. No quotes, no explanations.\n" .
             $budgetRule .
-            "\nRULES (in order of importance):\n" .
-            "1. CHARACTER LIMIT IS ABSOLUTE: Count your characters. If over the limit, CUT WORDS until under. This is non-negotiable.\n" .
-            "2. BREVITY: Use minimum words. Drop filler. Simplify aggressively. \"I don't think so\" → \"Yo'q\".\n" .
-            "3. NATURAL: Write spoken language, not written. Use contractions and colloquial phrases.\n" .
-            "4. MEANING: Preserve core intent, not literal words. Adapt freely.\n" .
-            "5. {$targetLanguage} ONLY: No English except names.\n" .
-            "6. PURE OUTPUT: Return ONLY the translation. No quotes, no explanation.\n" .
             $examples .
             $contextBlock .
             $extra;
