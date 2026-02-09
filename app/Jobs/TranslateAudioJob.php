@@ -119,6 +119,9 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
                 // Calculate slot duration for time-aware character budget
                 $slotDuration = ((float) $seg->end_time) - ((float) $seg->start_time);
 
+                // Calculate max chars (3 chars/sec to leave margin for TTS)
+                $maxChars = $slotDuration > 0 ? max(5, (int) floor($slotDuration * 5)) : 0;
+
                 // Attempt up to 2 times if English leaks
                 $translated = null;
                 $lastBody = null;
@@ -293,12 +296,12 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
             }
         }
 
-        // Time-aware character budget - STRICT limit
-        // Use 3 chars/sec (Edge TTS at normal speed is ~5 chars/sec, this leaves room for variation)
+        // Time-aware character budget
+        // Use 5 chars/sec (Edge TTS speaks ~5 chars/sec, can speed up to 7.5 with +50%)
         $budgetRule = '';
         $maxChars = 0;
         if ($slotDuration > 0) {
-            $maxChars = max(3, (int) floor($slotDuration * 3));
+            $maxChars = max(5, (int) floor($slotDuration * 5));
 
             if ($slotDuration < 1.0) {
                 $budgetRule = "⚠️ HARD LIMIT: {$maxChars} CHARACTERS MAX (only {$slotDuration}s). Use 1-2 words ONLY.\n";
