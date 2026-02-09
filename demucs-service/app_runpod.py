@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Optional
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 import torch
 
@@ -77,8 +77,8 @@ def health():
 @app.post("/separate")
 async def separate(
     audio: UploadFile = File(...),
-    model: str = "htdemucs",
-    two_stems: str = "vocals",
+    model: str = Form("htdemucs"),
+    two_stems: str = Form("vocals"),
 ):
     """
     Separate audio into stems using Demucs GPU.
