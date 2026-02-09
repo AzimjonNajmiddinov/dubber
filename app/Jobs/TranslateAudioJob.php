@@ -262,20 +262,19 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
         }
 
         // Time-aware character budget
-        // Natural speech is ~5 chars/sec for Uzbek. Use 5 to avoid any speedup.
+        // Use 4 chars/sec to leave room for TTS variation
         $budgetRule = '';
         if ($slotDuration > 0) {
-            // 5 chars/sec = natural speech pace, no speedup needed
-            $maxChars = (int) round($slotDuration * 5);
+            $maxChars = max(3, (int) floor($slotDuration * 4));
 
             if ($slotDuration < 1.0) {
-                $budgetRule = "8. ULTRA-SHORT ({$slotDuration}s): ONE word only. Max {$maxChars} chars.\n";
+                $budgetRule = "8. CRITICAL: Only {$slotDuration}s! Use 1 word, max {$maxChars} characters. Example: 'Ha' or 'Yo'q'\n";
             } elseif ($slotDuration < 2.0) {
-                $budgetRule = "8. VERY SHORT ({$slotDuration}s): 1-2 words max. Under {$maxChars} characters.\n";
-            } elseif ($slotDuration < 4.0) {
-                $budgetRule = "8. SHORT SLOT ({$slotDuration}s): Be very brief. Max {$maxChars} characters.\n";
+                $budgetRule = "8. VERY SHORT: {$slotDuration}s slot. Max 2 words, {$maxChars} characters total.\n";
+            } elseif ($slotDuration < 3.0) {
+                $budgetRule = "8. SHORT: {$slotDuration}s. Keep under {$maxChars} characters. Be extremely brief.\n";
             } else {
-                $budgetRule = "8. TIME LIMIT: {$slotDuration}s available. Maximum {$maxChars} characters.\n";
+                $budgetRule = "8. LIMIT: {$slotDuration}s = max {$maxChars} characters. Brevity is essential.\n";
             }
         }
 

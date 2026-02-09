@@ -361,11 +361,11 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
         }
 
         $ratio = $audioDuration / $slotDuration;
-        $maxTempo = 1.3;  // Keep speech natural and clear - prefer trimming over speedup
-        $minTempo = 0.85; // Don't slow down too much
+        $maxTempo = 1.15;  // Very gentle speedup only - Edge TTS now handles rate
+        $minTempo = 0.90;  // Minimal slowdown
 
-        // Skip if already close enough (within 3%)
-        if ($ratio >= 0.97 && $ratio <= 1.03) {
+        // Skip if already close enough (within 10% - Edge TTS pre-calculated rate)
+        if ($ratio >= 0.90 && $ratio <= 1.10) {
             return;
         }
 

@@ -133,25 +133,25 @@ class ProcessTtsSegmentJob implements ShouldQueue
         }
 
         $ratio = $audioDuration / $slotDuration;
-        $maxTempo = 1.3; // Keep speech clear
+        $maxTempo = 1.15; // Very gentle - Edge TTS pre-calculates rate
+        $minTempo = 0.90;
 
-        // Skip if close enough
-        if ($ratio >= 0.95 && $ratio <= 1.05) {
+        // Skip if close enough (within 10%)
+        if ($ratio >= 0.90 && $ratio <= 1.10) {
             return;
         }
 
-        if ($ratio < 1.0) {
+        if ($ratio < $minTempo) {
             // Too short - slow down slightly
-            $effectiveTempo = max($ratio, 0.85);
-            $filter = 'atempo=' . number_format($effectiveTempo, 4, '.', '');
+            $filter = 'atempo=' . number_format(max($ratio, $minTempo), 4, '.', '');
         } elseif ($ratio <= $maxTempo) {
-            // Moderate speedup
+            // Minor speedup
             $filter = 'atempo=' . number_format($ratio, 4, '.', '');
         } else {
-            // Too long - apply max tempo then trim
-            $fadeOut = max(0.05, min(0.2, $slotDuration * 0.08));
+            // Too long - trim with gentle fade (no speedup beyond 15%)
+            $fadeOut = max(0.05, min(0.15, $slotDuration * 0.05));
             $fadeStart = max(0, $slotDuration - $fadeOut);
-            $filter = "atempo={$maxTempo},atrim=0:{$slotDuration},asetpts=PTS-STARTPTS,afade=t=out:st={$fadeStart}:d={$fadeOut}";
+            $filter = "atrim=0:{$slotDuration},asetpts=PTS-STARTPTS,afade=t=out:st={$fadeStart}:d={$fadeOut}";
         }
 
         $tmpPath = $audioPath . '.fitted.wav';

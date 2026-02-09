@@ -38,21 +38,15 @@ class EdgeTtsDriver implements TtsDriverInterface
 
     /**
      * Voice profiles for same-gender speaker differentiation.
-     * Each profile has pitch and rate offsets to create distinct voices.
+     * Pitch only - rate is calculated from slot duration.
      */
     protected array $voiceProfiles = [
-        // Profile 0: Default/neutral voice
-        ['pitch_offset' => 0, 'rate_offset' => 0, 'name' => 'default'],
-        // Profile 1: Slightly deeper, slower (older/calmer character)
-        ['pitch_offset' => -15, 'rate_offset' => -8, 'name' => 'deep'],
-        // Profile 2: Higher, faster (younger/energetic character)
-        ['pitch_offset' => 12, 'rate_offset' => 5, 'name' => 'bright'],
-        // Profile 3: Very deep, authoritative
-        ['pitch_offset' => -25, 'rate_offset' => -5, 'name' => 'bass'],
-        // Profile 4: Nasal/thin quality
-        ['pitch_offset' => 20, 'rate_offset' => 3, 'name' => 'thin'],
-        // Profile 5: Warm mid-range
-        ['pitch_offset' => -8, 'rate_offset' => -3, 'name' => 'warm'],
+        ['pitch_offset' => 0, 'name' => 'default'],
+        ['pitch_offset' => -12, 'name' => 'deep'],
+        ['pitch_offset' => 10, 'name' => 'bright'],
+        ['pitch_offset' => -20, 'name' => 'bass'],
+        ['pitch_offset' => 15, 'name' => 'thin'],
+        ['pitch_offset' => -6, 'name' => 'warm'],
     ];
 
     /**
@@ -109,30 +103,34 @@ class EdgeTtsDriver implements TtsDriverInterface
         // Get emotion-based prosody
         $emotionProsody = $this->emotionProsody[$emotion] ?? $this->emotionProsody['neutral'];
 
-        // Apply age-group presets from config (if available)
-        $agePreset = config("dubber.age_presets.{$speaker->age_group}", []);
-        $ageRate = $this->parsePercentage($agePreset['rate'] ?? '+0%');
-        $agePitch = $this->parseHz($agePreset['pitch'] ?? '+0Hz');
-        $ageGainDb = (float) ($agePreset['gain_db'] ?? 0);
+        // Calculate slot-aware speaking rate
+        // Normal Edge TTS speaks at ~5 chars/sec for Uzbek
+        $slotDuration = ((float) $segment->end_time) - ((float) $segment->start_time);
+        $textLength = mb_strlen($text);
+        $normalCharsPerSec = 5.0;
 
-        // Calculate final rate: combine profile + emotion + age + speed multiplier
-        $profileRate = $profile['rate_offset'];
+        $requiredRate = 0; // Default: normal speed
+        if ($slotDuration > 0 && $textLength > 0) {
+            $requiredCharsPerSec = $textLength / $slotDuration;
+            // If we need faster speech, calculate the rate increase
+            // rate +100% = 2x speed, so rate% = (required/normal - 1) * 100
+            $speedRatio = $requiredCharsPerSec / $normalCharsPerSec;
+            $requiredRate = (int) round(($speedRatio - 1.0) * 100);
+        }
+
+        // Get emotion rate modifier
         $emotionRate = $this->parsePercentage($emotionProsody['rate']);
-        $speedRate = ($speedMultiplier - 1.0) * 100; // Convert 1.5 to +50%
-        $finalRate = (int) round($profileRate + $emotionRate + $ageRate + $speedRate);
 
-        // Cap rate to reasonable limits (-50% to +100%)
-        $finalRate = max(-50, min(100, $finalRate));
+        // Final rate: slot-based + emotion modifier
+        // Cap at +50% to keep speech intelligible (beyond this, quality degrades)
+        $finalRate = min(50, max(-20, $requiredRate + $emotionRate));
         $rate = $finalRate >= 0 ? "+{$finalRate}%" : "{$finalRate}%";
 
-        // Calculate final pitch: combine profile + emotion + age
+        // Calculate final pitch: profile + emotion
         $profilePitch = $profile['pitch_offset'];
         $emotionPitch = $this->parseHz($emotionProsody['pitch']);
-        $finalPitch = $profilePitch + $emotionPitch + $agePitch;
+        $finalPitch = $profilePitch + $emotionPitch;
         $pitch = $finalPitch >= 0 ? "+{$finalPitch}Hz" : "{$finalPitch}Hz";
-
-        // Add age gain to speaker gain
-        $options['gain_db'] = ($options['gain_db'] ?? 0) + $ageGainDb;
 
         $videoId = $segment->video_id;
         $segmentId = $segment->id;
