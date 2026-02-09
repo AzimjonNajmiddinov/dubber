@@ -203,11 +203,12 @@ class StreamDubController extends Controller
     }
 
     /**
-     * Simple HTML page with video player for testing.
+     * HTML page with HLS video player.
+     * Starts playing immediately as segments become ready (no waiting for full video).
      */
     public function player(Video $video)
     {
-        // Check if completed
+        // For completed videos, show the simple player with full video
         if (in_array($video->status, ['dubbed_complete', 'lipsync_done', 'done'])) {
             return response()->view('stream.player', [
                 'video' => $video,
@@ -215,7 +216,21 @@ class StreamDubController extends Controller
             ]);
         }
 
-        // Show waiting/progress page for all other statuses (including failed)
+        // For videos in processing: use HLS player that starts as soon as first segment is ready
+        $hasSegments = $video->segments()->exists();
+        $hasAnyTts = $video->segments()->whereNotNull('tts_audio_path')->exists();
+
+        // If we have TTS audio, show the live HLS player
+        if ($hasSegments && $hasAnyTts) {
+            return response()->view('stream.hls-player', [
+                'video' => $video,
+                'hlsUrl' => route('api.player.hls.playlist', $video),
+                'statusUrl' => route('api.stream.status', $video),
+                'manifestUrl' => route('api.player.manifest', $video),
+            ]);
+        }
+
+        // Show waiting/progress page until segments start generating
         return response()->view('stream.waiting', [
             'video' => $video,
             'progress' => $this->getProgressInfo($video)[0],

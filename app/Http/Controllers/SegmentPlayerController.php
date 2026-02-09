@@ -395,4 +395,134 @@ class SegmentPlayerController extends Controller
         $duration = (float)trim($result->output());
         return (int)ceil($duration / 12); // 12-second chunks
     }
+
+    /**
+     * Generate HLS playlist (m3u8) with ready segments.
+     * Updates dynamically as segments become ready.
+     */
+    public function hlsPlaylist(Video $video): \Illuminate\Http\Response
+    {
+        $segments = $video->segments()->orderBy('start_time')->get();
+
+        // Calculate target duration (max segment length)
+        $targetDuration = 10;
+        foreach ($segments as $seg) {
+            $duration = $seg->end_time - $seg->start_time;
+            if ($duration > $targetDuration) {
+                $targetDuration = ceil($duration);
+            }
+        }
+
+        // Check which segments are ready
+        $readySegments = [];
+        $allReady = true;
+        $hasAnyReady = false;
+
+        foreach ($segments as $seg) {
+            $isReady = $this->segmentService->isSegmentReady($seg);
+            if ($isReady) {
+                $hasAnyReady = true;
+                $readySegments[] = $seg;
+            } else {
+                $allReady = false;
+                // Stop at first non-ready segment for continuous playback
+                break;
+            }
+        }
+
+        // Build m3u8 playlist
+        $lines = [];
+        $lines[] = '#EXTM3U';
+        $lines[] = '#EXT-X-VERSION:3';
+        $lines[] = '#EXT-X-TARGETDURATION:' . (int)$targetDuration;
+        $lines[] = '#EXT-X-MEDIA-SEQUENCE:0';
+
+        // If still processing, mark as live playlist (EVENT type allows appending)
+        if (!$allReady) {
+            $lines[] = '#EXT-X-PLAYLIST-TYPE:EVENT';
+        }
+
+        foreach ($readySegments as $seg) {
+            $duration = round($seg->end_time - $seg->start_time, 3);
+            $lines[] = '#EXTINF:' . $duration . ',';
+            $lines[] = route('api.player.hls.segment', [$video, $seg]);
+        }
+
+        // Only add ENDLIST if all segments are ready
+        if ($allReady && $segments->isNotEmpty()) {
+            $lines[] = '#EXT-X-ENDLIST';
+        }
+
+        $content = implode("\n", $lines);
+
+        return response($content, 200)
+            ->header('Content-Type', 'application/vnd.apple.mpegurl')
+            ->header('Access-Control-Allow-Origin', '*')
+            ->header('Cache-Control', $allReady ? 'public, max-age=3600' : 'no-cache, no-store');
+    }
+
+    /**
+     * Serve a segment as MPEG-TS for HLS playback.
+     */
+    public function hlsSegment(Video $video, VideoSegment $segment): StreamedResponse|JsonResponse
+    {
+        if ($segment->video_id !== $video->id) {
+            return response()->json(['error' => 'Segment not found'], 404);
+        }
+
+        // Get or generate the segment video
+        $mp4Path = $this->segmentService->getOrGenerateSegment($segment);
+
+        if (!$mp4Path || !file_exists($mp4Path)) {
+            return response()->json(['error' => 'Segment not ready'], 404);
+        }
+
+        // Check if we have a cached .ts version
+        $tsPath = str_replace('.mp4', '.ts', $mp4Path);
+
+        if (!file_exists($tsPath)) {
+            // Convert MP4 to MPEG-TS on the fly
+            $result = Process::timeout(60)->run([
+                'ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
+                '-i', $mp4Path,
+                '-c:v', 'copy',
+                '-c:a', 'aac',
+                '-b:a', '128k',
+                '-muxdelay', '0',
+                '-f', 'mpegts',
+                $tsPath,
+            ]);
+
+            if (!$result->successful() || !file_exists($tsPath)) {
+                // Fallback: stream MP4 directly (most players handle this)
+                return $this->streamFile($mp4Path, 'video/mp4');
+            }
+        }
+
+        return $this->streamFile($tsPath, 'video/mp2t');
+    }
+
+    /**
+     * Stream a file with proper headers.
+     */
+    private function streamFile(string $path, string $mimeType): StreamedResponse
+    {
+        $fileSize = filesize($path);
+
+        $response = new StreamedResponse(function () use ($path) {
+            $handle = fopen($path, 'rb');
+            while (!feof($handle)) {
+                echo fread($handle, 1024 * 1024);
+                flush();
+            }
+            fclose($handle);
+        });
+
+        $response->headers->set('Content-Type', $mimeType);
+        $response->headers->set('Content-Length', $fileSize);
+        $response->headers->set('Access-Control-Allow-Origin', '*');
+        $response->headers->set('Cache-Control', 'public, max-age=3600');
+
+        return $response;
+    }
 }

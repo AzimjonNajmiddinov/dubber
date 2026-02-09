@@ -29,6 +29,10 @@ Route::prefix('player')->group(function () {
     Route::post('/{video}/prefetch', [SegmentPlayerController::class, 'prefetch'])->name('api.player.prefetch');
     Route::get('/{video}/segment/{segment}/status', [SegmentPlayerController::class, 'segmentStatus'])->name('api.player.segment.status');
 
+    // HLS streaming endpoints
+    Route::get('/{video}/hls/playlist.m3u8', [SegmentPlayerController::class, 'hlsPlaylist'])->name('api.player.hls.playlist');
+    Route::get('/{video}/hls/segment/{segment}.ts', [SegmentPlayerController::class, 'hlsSegment'])->name('api.player.hls.segment');
+
     // Download endpoints
     Route::get('/{video}/download-status', [SegmentPlayerController::class, 'downloadStatus'])->name('api.player.download.status');
     Route::get('/{video}/chunk/{index}/download', [SegmentPlayerController::class, 'downloadChunk'])->name('api.player.chunk.download');

@@ -261,6 +261,9 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
                 'path' => $relPath,
             ]);
 
+            // Generate segment video immediately for progressive HLS playback
+            GenerateSegmentVideoJob::dispatch($seg->id)->onQueue('default');
+
         } catch (\Throwable $e) {
             Log::error('TTS synthesis failed for segment', [
                 'segment_id' => $seg->id,
