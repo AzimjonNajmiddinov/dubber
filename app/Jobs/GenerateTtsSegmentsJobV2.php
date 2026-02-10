@@ -505,17 +505,19 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
     /**
      * Strip leading and trailing silence from TTS audio.
      * Edge TTS often pads output with several seconds of silence.
+     * IMPORTANT: Use conservative settings to avoid cutting off speech!
      */
     protected function stripSilence(string $audioPath): void
     {
         $tmpPath = $audioPath . '.trimmed.wav';
 
         // silenceremove: strip leading silence, then reverse+strip trailing silence
-        // -40dB threshold catches Edge TTS low-level noise padding
+        // -55dB threshold is conservative - only removes actual silence, not quiet speech
+        // start_duration=0.1 requires 100ms of silence before cutting (protects word endings)
         $result = Process::timeout(15)->run([
             'ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
             '-i', $audioPath,
-            '-af', 'silenceremove=start_periods=1:start_threshold=-40dB:start_duration=0.02,areverse,silenceremove=start_periods=1:start_threshold=-40dB:start_duration=0.02,areverse',
+            '-af', 'silenceremove=start_periods=1:start_threshold=-55dB:start_duration=0.1,areverse,silenceremove=start_periods=1:start_threshold=-55dB:start_duration=0.1,areverse',
             '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s16le',
             $tmpPath,
         ]);
@@ -524,16 +526,23 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
             $origSize = filesize($audioPath);
             $newSize = filesize($tmpPath);
 
-            // Accept trimmed version if it's smaller (any amount of silence removed helps)
-            if ($newSize < $origSize) {
+            // Only accept if we didn't remove too much (max 50% reduction)
+            // If more than 50% was "silence", something is wrong - keep original
+            $reductionPct = (1 - $newSize / $origSize) * 100;
+            if ($newSize < $origSize && $reductionPct <= 50) {
                 Log::info('Stripped silence from TTS audio', [
                     'path' => $audioPath,
                     'original_size' => $origSize,
                     'trimmed_size' => $newSize,
-                    'reduced_pct' => round((1 - $newSize / $origSize) * 100, 1),
+                    'reduced_pct' => round($reductionPct, 1),
                 ]);
                 rename($tmpPath, $audioPath);
                 return;
+            } else {
+                Log::warning('Silence removal skipped - would remove too much audio', [
+                    'path' => $audioPath,
+                    'reduction_pct' => round($reductionPct, 1),
+                ]);
             }
         }
 
