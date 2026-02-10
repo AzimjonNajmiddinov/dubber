@@ -417,34 +417,64 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
             return $result;
         }
 
-        // Audio is too long - trim with fade-out
-        $fadeOut = min(0.15, $slotDuration * 0.1);
-        $fadeStart = max(0, $slotDuration - $fadeOut);
-        $filter = "atrim=0:{$slotDuration},asetpts=PTS-STARTPTS,afade=t=out:st={$fadeStart}:d={$fadeOut}";
+        // Audio is too long - speed it up using atempo (NEVER trim - it cuts off words!)
+        // Calculate required speedup ratio
+        $speedupRatio = $audioDuration / $slotDuration;
 
-        Log::warning('TTS audio trimmed to fit slot', [
+        // Cap at 1.8x speedup to maintain intelligibility
+        // Beyond this, the translation should have been shorter
+        $maxSpeedup = 1.8;
+        $actualSpeedup = min($speedupRatio, $maxSpeedup);
+
+        Log::info('TTS audio speedup applied', [
             'path' => basename($audioPath),
             'audio_duration' => round($audioDuration, 2),
             'slot_duration' => round($slotDuration, 2),
-            'overflow' => round(($audioDuration - $slotDuration) * 1000) . 'ms',
+            'speedup_ratio' => round($actualSpeedup, 2),
+            'overflow_before' => round(($audioDuration - $slotDuration) * 1000) . 'ms',
         ]);
 
-        $result['was_trimmed'] = true;
+        // Build atempo filter chain (each atempo supports 0.5-2.0)
+        $atempoChain = $this->buildAtempoChain($actualSpeedup);
+        $result['tempo_applied'] = $actualSpeedup;
+
+        if (empty($atempoChain)) {
+            return $result;
+        }
 
         $tmpPath = $audioPath . '.fitted.wav';
 
         $processResult = Process::timeout(30)->run([
             'ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
             '-i', $audioPath,
-            '-af', $filter,
+            '-af', $atempoChain,
             '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s16le',
             $tmpPath,
         ]);
 
         if ($processResult->successful() && file_exists($tmpPath) && filesize($tmpPath) > 0) {
             rename($tmpPath, $audioPath);
+
+            // Log final duration after speedup
+            $finalProbe = Process::timeout(10)->run([
+                'ffprobe', '-v', 'error',
+                '-show_entries', 'format=duration',
+                '-of', 'csv=p=0',
+                $audioPath,
+            ]);
+            if ($finalProbe->successful()) {
+                $finalDuration = (float) trim($finalProbe->output());
+                Log::debug('TTS audio after speedup', [
+                    'path' => basename($audioPath),
+                    'final_duration' => round($finalDuration, 2),
+                    'slot_duration' => round($slotDuration, 2),
+                ]);
+            }
         } else {
             @unlink($tmpPath);
+            Log::warning('TTS speedup failed, keeping original', [
+                'path' => basename($audioPath),
+            ]);
         }
 
         return $result;

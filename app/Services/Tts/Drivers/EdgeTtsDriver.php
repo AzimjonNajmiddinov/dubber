@@ -156,8 +156,9 @@ class EdgeTtsDriver implements TtsDriverInterface
         $directionRate = $this->parsePercentage($directionProsody['rate']);
 
         // Final rate: slot-based + emotion + direction modifiers
-        // Cap at +40% for intelligibility, allow -30% for slow speech
-        $finalRate = min(40, max(-30, $requiredRate + $emotionRate + $directionRate));
+        // Cap at +60% for intelligibility (Edge TTS handles this better than post-processing)
+        // Allow -30% for slow speech
+        $finalRate = min(60, max(-30, $requiredRate + $emotionRate + $directionRate));
         $rate = $finalRate >= 0 ? "+{$finalRate}%" : "{$finalRate}%";
 
         // Calculate final pitch: profile + emotion + direction
