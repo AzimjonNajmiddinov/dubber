@@ -1,6 +1,6 @@
 #!/bin/bash
 # Start GPU services on RunPod (assumes setup already done)
-# Runs Demucs, WhisperX, and XTTS on GPU
+# Runs Demucs, WhisperX, XTTS, and Lipsync on GPU
 
 set -e
 
@@ -10,6 +10,7 @@ echo "=== Starting RunPod GPU Services ==="
 pkill -f "uvicorn.*8000" 2>/dev/null || true
 pkill -f "uvicorn.*8002" 2>/dev/null || true
 pkill -f "uvicorn.*8004" 2>/dev/null || true
+pkill -f "uvicorn.*8006" 2>/dev/null || true
 sleep 2
 
 # Pull latest code
@@ -40,15 +41,21 @@ echo "Starting XTTS on port 8004..."
 cd /workspace/dubber/xtts-service
 nohup python -m uvicorn app:app --host 0.0.0.0 --port 8004 > /tmp/xtts.log 2>&1 &
 
+# Start Lipsync on port 8006
+echo "Starting Lipsync on port 8006..."
+cd /workspace/dubber/lipsync-service
+nohup python -m uvicorn app:app --host 0.0.0.0 --port 8006 > /tmp/lipsync.log 2>&1 &
+
 echo ""
-echo "Waiting for services to load models (45s)..."
-sleep 45
+echo "Waiting for services to load models (60s)..."
+sleep 60
 
 echo ""
 echo "=== Service Status ==="
 echo -n "Demucs (8000):   " && curl -s http://localhost:8000/health | python -c "import sys,json; d=json.load(sys.stdin); print(f'OK - GPU: {d.get(\"gpu_name\", \"N/A\")}')" 2>/dev/null || echo "Still loading..."
 echo -n "WhisperX (8002): " && curl -s http://localhost:8002/health | python -c "import sys,json; d=json.load(sys.stdin); print('OK' if d.get('ok') else 'Error')" 2>/dev/null || echo "Still loading..."
 echo -n "XTTS (8004):     " && curl -s http://localhost:8004/health | python -c "import sys,json; d=json.load(sys.stdin); print('OK' if d.get('ok') else 'Error')" 2>/dev/null || echo "Still loading..."
+echo -n "Lipsync (8006):  " && curl -s http://localhost:8006/health | python -c "import sys,json; d=json.load(sys.stdin); print('OK' if d.get('ok') else 'Error')" 2>/dev/null || echo "Still loading..."
 
 echo ""
 nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader
@@ -59,5 +66,6 @@ echo "Logs:"
 echo "  tail -f /tmp/demucs.log"
 echo "  tail -f /tmp/whisperx.log"
 echo "  tail -f /tmp/xtts.log"
+echo "  tail -f /tmp/lipsync.log"
 echo ""
-echo "All logs: tail -f /tmp/demucs.log /tmp/whisperx.log /tmp/xtts.log"
+echo "All logs: tail -f /tmp/*.log"
