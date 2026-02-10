@@ -421,18 +421,33 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
         // Calculate required speedup ratio
         $speedupRatio = $audioDuration / $slotDuration;
 
-        // Cap at 1.8x speedup to maintain intelligibility
-        // Beyond this, the translation should have been shorter
-        $maxSpeedup = 1.8;
+        // Use GENTLE speedup for natural sound (max 1.35x)
+        // If more speedup needed, the translation was too long
+        $maxSpeedup = 1.35;
         $actualSpeedup = min($speedupRatio, $maxSpeedup);
+
+        // Only apply speedup if actually needed (>5% overflow)
+        if ($speedupRatio < 1.05) {
+            return $result;
+        }
 
         Log::info('TTS audio speedup applied', [
             'path' => basename($audioPath),
             'audio_duration' => round($audioDuration, 2),
             'slot_duration' => round($slotDuration, 2),
-            'speedup_ratio' => round($actualSpeedup, 2),
-            'overflow_before' => round(($audioDuration - $slotDuration) * 1000) . 'ms',
+            'speedup_needed' => round($speedupRatio, 2),
+            'speedup_applied' => round($actualSpeedup, 2),
+            'overflow_ms' => round(($audioDuration - $slotDuration) * 1000),
         ]);
+
+        // Warn if translation is too long (needed >1.35x speedup)
+        if ($speedupRatio > 1.35) {
+            Log::warning('Translation too long for slot - consider shorter text', [
+                'path' => basename($audioPath),
+                'needed_speedup' => round($speedupRatio, 2),
+                'max_applied' => $maxSpeedup,
+            ]);
+        }
 
         // Build atempo filter chain (each atempo supports 0.5-2.0)
         $atempoChain = $this->buildAtempoChain($actualSpeedup);

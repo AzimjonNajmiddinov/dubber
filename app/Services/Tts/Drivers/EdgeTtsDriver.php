@@ -131,34 +131,42 @@ class EdgeTtsDriver implements TtsDriverInterface
         $textLength = mb_strlen($text);
         $normalCharsPerSec = 12.0;
 
+        // IMPORTANT: Use NARROW rate range for CONSISTENT natural sound
+        // Large rate variations sound robotic and unnatural
+        // Better to let post-processing handle overflow with gentle atempo
         $requiredRate = 0; // Default: normal speed
         if ($slotDuration > 0.3 && $textLength > 0) {
-            // Leave 10% buffer for natural pauses
-            $effectiveSlot = $slotDuration * 0.90;
-            $requiredCharsPerSec = $textLength / $effectiveSlot;
-
-            // Calculate rate adjustment
+            $requiredCharsPerSec = $textLength / $slotDuration;
             $speedRatio = $requiredCharsPerSec / $normalCharsPerSec;
-            $requiredRate = (int) round(($speedRatio - 1.0) * 100);
+
+            // Only adjust rate if significantly different from normal
+            // Keep adjustments subtle for natural sound
+            if ($speedRatio > 1.15) {
+                // Need to speed up - but keep it gentle
+                $requiredRate = (int) round(min(($speedRatio - 1.0) * 100, 20));
+            } elseif ($speedRatio < 0.85) {
+                // Can slow down slightly for very short text
+                $requiredRate = (int) round(max(($speedRatio - 1.0) * 100, -10));
+            }
 
             Log::debug('TTS rate calculation', [
                 'segment_id' => $segment->id,
                 'text_length' => $textLength,
                 'slot' => $slotDuration,
-                'required_cps' => round($requiredCharsPerSec, 1),
+                'chars_per_sec' => round($requiredCharsPerSec, 1),
                 'speed_ratio' => round($speedRatio, 2),
                 'rate_percent' => $requiredRate,
             ]);
         }
 
-        // Get emotion and direction rate modifiers
-        $emotionRate = $this->parsePercentage($emotionProsody['rate']);
-        $directionRate = $this->parsePercentage($directionProsody['rate']);
+        // Get emotion and direction rate modifiers (keep these small too)
+        $emotionRate = (int) round($this->parsePercentage($emotionProsody['rate']) * 0.5);
+        $directionRate = (int) round($this->parsePercentage($directionProsody['rate']) * 0.5);
 
-        // Final rate: slot-based + emotion + direction modifiers
-        // Cap at +60% for intelligibility (Edge TTS handles this better than post-processing)
-        // Allow -30% for slow speech
-        $finalRate = min(60, max(-30, $requiredRate + $emotionRate + $directionRate));
+        // Final rate: NARROW range for consistent, natural speech
+        // -10% to +25% - anything beyond this sounds unnatural
+        // Post-processing atempo will handle remaining adjustment if needed
+        $finalRate = min(25, max(-10, $requiredRate + $emotionRate + $directionRate));
         $rate = $finalRate >= 0 ? "+{$finalRate}%" : "{$finalRate}%";
 
         // Calculate final pitch: profile + emotion + direction

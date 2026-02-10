@@ -329,20 +329,23 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
         }
 
         // Time-aware character budget
-        // Uzbek TTS speaks ~12 chars/sec at normal speed, up to ~19 chars/sec at +60% rate
-        // Use 14 chars/sec as budget (allows some speedup headroom)
+        // Uzbek TTS speaks ~12 chars/sec at normal speed
+        // Use 11 chars/sec as STRICT budget to ensure natural pacing
+        // Better to have slightly short translations than rushed speech
         $budgetRule = '';
         if ($slotDuration > 0) {
-            $maxChars = max(5, (int) floor($slotDuration * 14));
+            $maxChars = max(4, (int) floor($slotDuration * 11));
 
             if ($slotDuration < 1.0) {
-                $budgetRule = "8. CRITICAL TIME LIMIT: Only {$slotDuration}s! MAXIMUM {$maxChars} characters. Use shortest possible words. Drop filler words.\n";
-            } elseif ($slotDuration < 2.0) {
-                $budgetRule = "8. SHORT SLOT: {$slotDuration}s. MAXIMUM {$maxChars} characters. Be very concise.\n";
-            } elseif ($slotDuration < 3.0) {
-                $budgetRule = "8. TIME LIMIT: {$slotDuration}s. Keep under {$maxChars} characters. Brevity essential.\n";
+                $budgetRule = "8. CRITICAL: Only {$slotDuration}s! MAX {$maxChars} chars. Use 1-2 words only.\n";
+            } elseif ($slotDuration < 1.5) {
+                $budgetRule = "8. VERY SHORT: {$slotDuration}s. MAX {$maxChars} chars. Be extremely brief.\n";
+            } elseif ($slotDuration < 2.5) {
+                $budgetRule = "8. SHORT: {$slotDuration}s. MAX {$maxChars} chars. Keep concise.\n";
+            } elseif ($slotDuration < 4.0) {
+                $budgetRule = "8. LIMIT: {$slotDuration}s = max {$maxChars} chars.\n";
             } else {
-                $budgetRule = "8. LIMIT: {$slotDuration}s = max {$maxChars} characters.\n";
+                $budgetRule = "8. Time: {$slotDuration}s. Aim for {$maxChars} chars or less.\n";
             }
         }
 
