@@ -15,6 +15,61 @@ class XttsDriver implements TtsDriverInterface
 {
     protected string $baseUrl;
 
+    /**
+     * Direction to synthesis parameters mapping.
+     * These modify temperature, speed, volume, and optional audio filters
+     * to match the acting direction detected from the dialogue.
+     */
+    protected array $directionParams = [
+        'whisper' => [
+            'temperature' => 0.5,
+            'speed_mult' => 0.85,
+            'volume_db' => -6,
+            'filter' => 'highpass=f=200,lowpass=f=6000',
+        ],
+        'soft' => [
+            'temperature' => 0.6,
+            'speed_mult' => 0.92,
+            'volume_db' => -3,
+        ],
+        'normal' => [
+            'temperature' => 0.7,
+            'speed_mult' => 1.0,
+            'volume_db' => 0,
+        ],
+        'loud' => [
+            'temperature' => 0.75,
+            'speed_mult' => 1.05,
+            'volume_db' => 2,
+        ],
+        'shout' => [
+            'temperature' => 0.85,
+            'speed_mult' => 1.15,
+            'volume_db' => 4,
+            'filter' => 'acompressor=threshold=-20dB:ratio=2:attack=5:release=50',
+        ],
+        'sarcastic' => [
+            'temperature' => 0.72,
+            'speed_mult' => 0.95,
+            'volume_db' => 0,
+        ],
+        'playful' => [
+            'temperature' => 0.8,
+            'speed_mult' => 1.08,
+            'volume_db' => 1,
+        ],
+        'cold' => [
+            'temperature' => 0.5,
+            'speed_mult' => 0.98,
+            'volume_db' => -1,
+        ],
+        'warm' => [
+            'temperature' => 0.75,
+            'speed_mult' => 0.95,
+            'volume_db' => 0,
+        ],
+    ];
+
     public function __construct()
     {
         $this->baseUrl = config('services.xtts.url') ?? 'http://xtts:8000';
@@ -71,7 +126,14 @@ class XttsDriver implements TtsDriverInterface
 
         $language = $options['language'] ?? $segment->video->target_language ?? 'uz';
         $emotion = $options['emotion'] ?? $segment->emotion ?? $speaker->emotion ?? 'neutral';
+        $direction = $options['direction'] ?? $segment->direction ?? 'normal';
         $speed = $options['speed'] ?? 1.0;
+
+        // Get direction parameters
+        $dirParams = $this->directionParams[$direction] ?? $this->directionParams['normal'];
+
+        // Apply direction speed modifier
+        $speed *= ($dirParams['speed_mult'] ?? 1.0);
 
         // Normalize text for TTS (converts numbers to words, normalizes apostrophes, etc.)
         $text = TextNormalizer::normalize($text, $language);
@@ -111,13 +173,17 @@ class XttsDriver implements TtsDriverInterface
             throw new RuntimeException("XTTS output file missing for segment {$segmentId}");
         }
 
-        // Normalize audio
-        $this->normalizeAudio($outputAbs, $options);
+        // Normalize audio with direction-specific adjustments
+        $normalizeOptions = $options;
+        $normalizeOptions['direction_volume_db'] = $dirParams['volume_db'] ?? 0;
+        $normalizeOptions['direction_filter'] = $dirParams['filter'] ?? null;
+        $this->normalizeAudio($outputAbs, $normalizeOptions);
 
         Log::info('XTTS synthesis complete', [
             'segment_id' => $segmentId,
             'voice_id' => $voiceId,
             'emotion' => $emotion,
+            'direction' => $direction,
             'language' => $language,
         ]);
 
@@ -244,15 +310,24 @@ class XttsDriver implements TtsDriverInterface
     protected function normalizeAudio(string $path, array $options): void
     {
         $gainDb = $options['gain_db'] ?? 0.0;
+        $directionVolumeDb = $options['direction_volume_db'] ?? 0.0;
+        $directionFilter = $options['direction_filter'] ?? null;
         $tempPath = $path . '.tmp.wav';
 
         // Only resample to 48kHz stereo (XTTS outputs 24kHz mono).
         // No loudnorm here — the final mix handles loudness normalization once.
         $filter = 'aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo';
 
-        if (abs($gainDb) > 0.1) {
-            $sign = $gainDb >= 0 ? '+' : '';
-            $filter .= ",volume={$sign}{$gainDb}dB";
+        // Apply direction-specific filter (e.g., whisper highpass, shout compression)
+        if ($directionFilter) {
+            $filter .= ',' . $directionFilter;
+        }
+
+        // Combine base gain with direction volume adjustment
+        $totalGainDb = $gainDb + $directionVolumeDb;
+        if (abs($totalGainDb) > 0.1) {
+            $sign = $totalGainDb >= 0 ? '+' : '';
+            $filter .= ",volume={$sign}{$totalGainDb}dB";
         }
 
         $cmd = sprintf(

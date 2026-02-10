@@ -87,8 +87,9 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
                 return;
             }
 
-            // Build index for surrounding context lookup
+            // Build index for surrounding context lookup and emotional arc
             $segmentsList = $allSegments->values();
+            $segmentsById = $allSegments->keyBy('id');
 
             $apiKey = (string) config('services.openai.key');
             if (trim($apiKey) === '') {
@@ -114,6 +115,9 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
                 $prevText = $segIndex > 0 ? trim((string) $segmentsList[$segIndex - 1]->text) : '';
                 $nextText = $segIndex < $segmentsList->count() - 1 ? trim((string) $segmentsList[$segIndex + 1]->text) : '';
 
+                // Build emotional arc context from surrounding segments
+                $emotionArc = $this->buildEmotionArc($segmentsList, $segIndex);
+
                 $charCount = mb_strlen($src);
 
                 // Calculate slot duration for time-aware character budget
@@ -122,28 +126,33 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
                 // Attempt up to 2 times if English leaks
                 $translated = null;
                 $emotion = 'neutral';
+                $direction = 'normal';
                 $lastBody = null;
 
                 for ($attempt = 1; $attempt <= 2; $attempt++) {
-                    $system = $this->buildSystemPrompt($targetLanguage, $attempt, $charCount, $prevText, $nextText, $slotDuration);
+                    $system = $this->buildSystemPrompt($targetLanguage, $attempt, $charCount, $prevText, $nextText, $slotDuration, $emotionArc);
 
                     // Build messages with few-shot examples for better accuracy
                     $messages = [
                         ['role' => 'system', 'content' => $system],
                     ];
 
-                    // Add few-shot examples with emotion detection (JSON format)
+                    // Add few-shot examples with emotion and direction detection (JSON format)
                     if (str_contains($targetLanguage, 'Uzbek') || str_contains($targetLanguage, 'uz')) {
                         $messages[] = ['role' => 'user', 'content' => 'Ask.'];
-                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"So\'ra.","e":"neutral"}'];
+                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"So\'ra.","e":"neutral","d":"normal"}'];
                         $messages[] = ['role' => 'user', 'content' => 'I can\'t believe this!'];
-                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Bunga ishonolmayman!","e":"surprise"}'];
+                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Bunga ishonolmayman!","e":"surprise","d":"loud"}'];
                         $messages[] = ['role' => 'user', 'content' => 'Get out of here right now!'];
-                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Hoziroq yo\'qol bu yerdan!","e":"angry"}'];
+                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Hoziroq yo\'qol bu yerdan!","e":"angry","d":"shout"}'];
                         $messages[] = ['role' => 'user', 'content' => 'I miss you so much...'];
-                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Seni juda sog\'indim...","e":"sad"}'];
+                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Seni juda sog\'indim...","e":"sad","d":"soft"}'];
                         $messages[] = ['role' => 'user', 'content' => 'This is amazing! I love it!'];
-                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Bu ajoyib! Menga yoqdi!","e":"happy"}'];
+                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Bu ajoyib! Menga yoqdi!","e":"happy","d":"warm"}'];
+                        $messages[] = ['role' => 'user', 'content' => 'Don\'t tell anyone, but...'];
+                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Hech kimga aytma, lekin...","e":"neutral","d":"whisper"}'];
+                        $messages[] = ['role' => 'user', 'content' => 'Oh, you think you\'re so smart, don\'t you?'];
+                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Oh, o\'zingni aqlli deb o\'ylaysan, shundaymi?","e":"neutral","d":"sarcastic"}'];
                     }
 
                     $messages[] = ['role' => 'user', 'content' => $src];
@@ -179,15 +188,17 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
 
                     $out = trim($out);
 
-                    // Parse JSON response: {"t":"translation","e":"emotion"}
+                    // Parse JSON response: {"t":"translation","e":"emotion","d":"direction"}
                     $parsedText = $out;
                     $detectedEmotion = 'neutral';
+                    $detectedDirection = 'normal';
 
                     if (str_starts_with($out, '{') && str_contains($out, '"t"')) {
                         $parsed = json_decode($out, true);
                         if (is_array($parsed) && isset($parsed['t'])) {
                             $parsedText = trim($parsed['t']);
                             $detectedEmotion = strtolower(trim($parsed['e'] ?? 'neutral'));
+                            $detectedDirection = strtolower(trim($parsed['d'] ?? 'normal'));
 
                             // Validate emotion
                             $validEmotions = ['neutral', 'happy', 'sad', 'angry', 'fear', 'surprise', 'excited'];
@@ -195,9 +206,16 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
                                 $detectedEmotion = 'neutral';
                             }
 
-                            Log::info('Emotion detected from translation', [
+                            // Validate direction
+                            $validDirections = ['whisper', 'soft', 'normal', 'loud', 'shout', 'sarcastic', 'playful', 'cold', 'warm'];
+                            if (!in_array($detectedDirection, $validDirections)) {
+                                $detectedDirection = 'normal';
+                            }
+
+                            Log::info('Emotion and direction detected from translation', [
                                 'segment_id' => $seg->id,
                                 'emotion' => $detectedEmotion,
+                                'direction' => $detectedDirection,
                             ]);
                         }
                     }
@@ -218,6 +236,7 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
 
                     $translated = $parsedText;
                     $emotion = $detectedEmotion;
+                    $direction = $detectedDirection;
                     break;
                 }
 
@@ -250,6 +269,7 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
                 $seg->update([
                     'translated_text' => $translated,
                     'emotion' => $emotion,
+                    'direction' => $direction,
                 ]);
             }
 
@@ -280,7 +300,7 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
         return $raw;
     }
 
-    private function buildSystemPrompt(string $targetLanguage, int $attempt, int $charCount = 0, string $prevText = '', string $nextText = '', float $slotDuration = 0): string
+    private function buildSystemPrompt(string $targetLanguage, int $attempt, int $charCount = 0, string $prevText = '', string $nextText = '', float $slotDuration = 0, string $emotionArc = ''): string
     {
         $extra = '';
         if ($attempt >= 2) {
@@ -349,13 +369,32 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
                 "3. QISQA BO'LSIN - dublyaj uchun\n";
         }
 
+        // Emotional arc context
+        $emotionArcBlock = '';
+        if ($emotionArc !== '') {
+            $emotionArcBlock = "\nEMOTIONAL ARC (maintain consistency with scene flow):\n{$emotionArc}\n" .
+                "- Avoid jarring emotion switches (e.g., happy→sad→happy in 3 lines)\n" .
+                "- Match the scene's emotional trajectory\n";
+        }
+
         return
-            "You are a professional {$targetLanguage} translator for movie dubbing with emotional awareness.\n\n" .
+            "You are a professional {$targetLanguage} translator for movie dubbing with emotional and performance awareness.\n\n" .
             "YOUR TASK:\n" .
             "1. Translate the text accurately and naturally\n" .
             "2. Detect the emotion from context, punctuation, and meaning\n" .
-            "3. Return JSON format: {\"t\":\"translation\",\"e\":\"emotion\"}\n\n" .
+            "3. Detect the acting direction/delivery style\n" .
+            "4. Return JSON format: {\"t\":\"translation\",\"e\":\"emotion\",\"d\":\"direction\"}\n\n" .
             "EMOTIONS (choose one): neutral, happy, sad, angry, fear, surprise, excited\n\n" .
+            "DIRECTIONS (choose one based on HOW the line should be delivered):\n" .
+            "- whisper: intimate, soft, breathy (secrets, romance, fear)\n" .
+            "- soft: gentle, caring (comfort, tenderness)\n" .
+            "- normal: standard delivery\n" .
+            "- loud: raised voice, emphasis (arguments, calls across room)\n" .
+            "- shout: yelling, extreme (danger, rage)\n" .
+            "- sarcastic: ironic undertone (wit, mockery)\n" .
+            "- playful: teasing, light (jokes, flirtation)\n" .
+            "- cold: emotionless, detached (villains, formal)\n" .
+            "- warm: friendly, loving (affection, encouragement)\n\n" .
             "TRANSLATION RULES:\n" .
             "- Translate MEANING, not word-by-word\n" .
             "- Use informal speech (talking to a friend)\n" .
@@ -363,7 +402,36 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
             $budgetRule .
             $examples .
             $contextBlock .
+            $emotionArcBlock .
             $extra;
+    }
+
+    /**
+     * Build emotional arc context from surrounding segments.
+     * Returns a string describing the emotional flow for context.
+     */
+    private function buildEmotionArc($segmentsList, int $currentIndex): string
+    {
+        $emotionWindow = [];
+        $count = $segmentsList->count();
+
+        // Collect emotions from prev 2 and next 2 segments
+        for ($i = max(0, $currentIndex - 2); $i <= min($count - 1, $currentIndex + 2); $i++) {
+            $seg = $segmentsList[$i];
+            $emotion = $seg->emotion ?? null;
+
+            if ($i === $currentIndex) {
+                $emotionWindow[] = '[CURRENT]';
+            } elseif ($emotion) {
+                $emotionWindow[] = $emotion;
+            }
+        }
+
+        if (count($emotionWindow) <= 1) {
+            return '';
+        }
+
+        return 'Scene emotional flow: ' . implode(' → ', $emotionWindow);
     }
 
     /**

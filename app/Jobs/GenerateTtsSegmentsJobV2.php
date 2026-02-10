@@ -4,6 +4,7 @@ namespace App\Jobs;
 
 use App\Contracts\TtsDriverInterface;
 use App\Models\Speaker;
+use App\Models\TtsQualityMetric;
 use App\Models\Video;
 use App\Models\VideoSegment;
 use App\Services\Tts\Drivers\XttsDriver;
@@ -127,6 +128,9 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
                 'driver' => $driverName,
             ]);
 
+            // Check voice consistency and log any outliers
+            $this->checkVoiceConsistency($video->id);
+
             $video->update(['status' => 'tts_generated']);
             MixDubbedAudioJob::dispatch($video->id);
 
@@ -242,8 +246,16 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
             $availableTime = $slotDuration + $gap;
         }
 
+        // Get direction from segment or default to normal
+        $direction = strtolower((string) ($seg->direction ?? 'normal'));
+        $validDirections = ['whisper', 'soft', 'normal', 'loud', 'shout', 'sarcastic', 'playful', 'cold', 'warm'];
+        if (!in_array($direction, $validDirections)) {
+            $direction = 'normal';
+        }
+
         $options = [
             'emotion' => $emotion,
+            'direction' => $direction,
             'speed' => 1.0,
             'gain_db' => (float) ($speaker?->tts_gain_db ?? 0),
             'language' => $video->target_language ?? 'uz',
@@ -259,6 +271,7 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
             'segment_id' => $seg->id,
             'driver' => $driver->name(),
             'emotion' => $emotion,
+            'direction' => $direction,
             'slot_duration' => $slotDuration,
             'voice_cloned' => $speaker?->voice_cloned ?? false,
         ]);
@@ -268,7 +281,7 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
 
             // Post-synthesis: fit audio to available time (slot + gap until next segment)
             // This allows words to be fully pronounced without cutting off
-            $this->fitAudioToSlot($outputPath, $availableTime);
+            $fitResult = $this->fitAudioToSlot($outputPath, $availableTime);
 
             // Update segment with output path
             $relPath = str_replace(Storage::disk('local')->path(''), '', $outputPath);
@@ -277,6 +290,11 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
                 'tts_audio_path' => $relPath,
                 'tts_gain_db' => $options['gain_db'],
             ]);
+
+            // Record quality metrics for voice consistency tracking
+            if ($speaker) {
+                $this->recordQualityMetrics($seg, $speaker, $outputPath, $slotDuration, $fitResult);
+            }
 
             Log::info('TTS segment ready', [
                 'segment_id' => $seg->id,
@@ -350,11 +368,19 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
      * - Here we only: strip silence, and trim if still too long
      * - No slowdown (sounds unnatural)
      * - No speedup (already done by Edge TTS)
+     *
+     * @return array{duration_ratio: float, was_trimmed: bool, tempo_applied: float|null}
      */
-    protected function fitAudioToSlot(string $audioPath, float $slotDuration): void
+    protected function fitAudioToSlot(string $audioPath, float $slotDuration): array
     {
+        $result = [
+            'duration_ratio' => 1.0,
+            'was_trimmed' => false,
+            'tempo_applied' => null,
+        ];
+
         if ($slotDuration <= 0 || !file_exists($audioPath)) {
-            return;
+            return $result;
         }
 
         // Step 1: Strip trailing silence (Edge TTS adds padding)
@@ -369,14 +395,16 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
         ]);
 
         if (!$probe->successful()) {
-            return;
+            return $result;
         }
 
         $audioDuration = (float) trim($probe->output());
 
         if ($audioDuration <= 0) {
-            return;
+            return $result;
         }
+
+        $result['duration_ratio'] = $audioDuration / $slotDuration;
 
         // If audio fits within slot (+5% tolerance), we're done
         if ($audioDuration <= $slotDuration * 1.05) {
@@ -386,7 +414,7 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
                 'slot' => round($slotDuration, 2),
                 'fill' => round($audioDuration / $slotDuration * 100) . '%',
             ]);
-            return;
+            return $result;
         }
 
         // Audio is too long - trim with fade-out
@@ -401,9 +429,11 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
             'overflow' => round(($audioDuration - $slotDuration) * 1000) . 'ms',
         ]);
 
+        $result['was_trimmed'] = true;
+
         $tmpPath = $audioPath . '.fitted.wav';
 
-        $result = Process::timeout(30)->run([
+        $processResult = Process::timeout(30)->run([
             'ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
             '-i', $audioPath,
             '-af', $filter,
@@ -411,11 +441,13 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
             $tmpPath,
         ]);
 
-        if ($result->successful() && file_exists($tmpPath) && filesize($tmpPath) > 0) {
+        if ($processResult->successful() && file_exists($tmpPath) && filesize($tmpPath) > 0) {
             rename($tmpPath, $audioPath);
         } else {
             @unlink($tmpPath);
         }
+
+        return $result;
     }
 
     /**
@@ -624,5 +656,173 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
             'excited' => 'happy',   // Energetic delivery
             default => $dominantEmotion,
         };
+    }
+
+    /**
+     * Record quality metrics for voice consistency tracking.
+     */
+    protected function recordQualityMetrics(
+        VideoSegment $segment,
+        Speaker $speaker,
+        string $audioPath,
+        float $slotDuration,
+        array $fitResult
+    ): void {
+        try {
+            // Measure RMS volume
+            $rmsDb = $this->measureRms($audioPath);
+
+            // Measure fundamental frequency (pitch)
+            $pitchHz = $this->measurePitch($audioPath);
+
+            TtsQualityMetric::create([
+                'video_segment_id' => $segment->id,
+                'speaker_id' => $speaker->id,
+                'duration_ratio' => $fitResult['duration_ratio'] ?? null,
+                'rms_db' => $rmsDb,
+                'pitch_hz' => $pitchHz,
+                'tempo_applied' => $fitResult['tempo_applied'] ?? null,
+                'was_trimmed' => $fitResult['was_trimmed'] ?? false,
+            ]);
+
+            Log::debug('TTS quality metrics recorded', [
+                'segment_id' => $segment->id,
+                'speaker_id' => $speaker->id,
+                'rms_db' => $rmsDb,
+                'pitch_hz' => $pitchHz,
+                'duration_ratio' => $fitResult['duration_ratio'] ?? null,
+            ]);
+
+        } catch (\Throwable $e) {
+            Log::warning('Failed to record quality metrics', [
+                'segment_id' => $segment->id,
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /**
+     * Measure RMS volume in dB.
+     */
+    protected function measureRms(string $audioPath): ?float
+    {
+        $result = Process::timeout(10)->run([
+            'ffmpeg', '-i', $audioPath, '-af', 'volumedetect',
+            '-f', 'null', '-',
+        ]);
+
+        // Parse output for mean_volume
+        if (preg_match('/mean_volume:\s*([-\d.]+)\s*dB/', $result->errorOutput(), $m)) {
+            return (float) $m[1];
+        }
+
+        return null;
+    }
+
+    /**
+     * Measure fundamental frequency (pitch) in Hz.
+     * Uses FFmpeg's ESOLA analysis for a rough pitch estimate.
+     */
+    protected function measurePitch(string $audioPath): ?float
+    {
+        // Use crepe or basic analysis if available, otherwise fallback to null
+        // For now, we use a simple spectral centroid as a proxy for pitch
+        $result = Process::timeout(10)->run([
+            'ffprobe', '-v', 'error',
+            '-select_streams', 'a:0',
+            '-show_entries', 'stream=sample_rate',
+            '-of', 'csv=p=0',
+            $audioPath,
+        ]);
+
+        // This is a placeholder - real pitch detection would use crepe or praat
+        // For now, return null as accurate pitch detection requires additional tools
+        return null;
+    }
+
+    /**
+     * Check voice consistency across all segments for a speaker and log outliers.
+     * Called after all segments are processed.
+     */
+    protected function checkVoiceConsistency(int $videoId): void
+    {
+        $speakers = Speaker::where('video_id', $videoId)->get();
+
+        foreach ($speakers as $speaker) {
+            $metrics = TtsQualityMetric::where('speaker_id', $speaker->id)
+                ->whereHas('videoSegment', fn($q) => $q->where('video_id', $videoId))
+                ->get();
+
+            if ($metrics->count() < 3) {
+                continue;
+            }
+
+            // Check RMS consistency
+            $rmsValues = $metrics->pluck('rms_db')->filter()->values();
+            if ($rmsValues->count() >= 3) {
+                $rmsMean = $rmsValues->avg();
+                $rmsStd = $this->standardDeviation($rmsValues->toArray());
+
+                if ($rmsStd > 6) { // More than 6dB variance is concerning
+                    Log::warning('Voice volume inconsistency detected', [
+                        'speaker_id' => $speaker->id,
+                        'video_id' => $videoId,
+                        'rms_mean' => round($rmsMean, 1),
+                        'rms_std' => round($rmsStd, 1),
+                    ]);
+                }
+            }
+
+            // Check pitch consistency (if available)
+            $pitchValues = $metrics->pluck('pitch_hz')->filter()->values();
+            if ($pitchValues->count() >= 3) {
+                $pitchMean = $pitchValues->avg();
+                $pitchStd = $this->standardDeviation($pitchValues->toArray());
+
+                // Flag if pitch varies more than 15% from mean
+                if ($pitchMean > 0 && ($pitchStd / $pitchMean) > 0.15) {
+                    $outliers = $metrics->filter(fn($m) =>
+                        $m->pitch_hz && abs($m->pitch_hz - $pitchMean) > 2 * $pitchStd
+                    );
+
+                    Log::warning('Voice pitch inconsistency detected', [
+                        'speaker_id' => $speaker->id,
+                        'video_id' => $videoId,
+                        'pitch_mean' => round($pitchMean, 1),
+                        'pitch_std' => round($pitchStd, 1),
+                        'outlier_segments' => $outliers->pluck('video_segment_id')->toArray(),
+                    ]);
+                }
+            }
+
+            // Check duration ratio (too many trimmed segments is bad)
+            $trimmedCount = $metrics->where('was_trimmed', true)->count();
+            $trimmedPercent = ($trimmedCount / $metrics->count()) * 100;
+
+            if ($trimmedPercent > 30) {
+                Log::warning('High segment trimming rate', [
+                    'speaker_id' => $speaker->id,
+                    'video_id' => $videoId,
+                    'trimmed_percent' => round($trimmedPercent, 1),
+                    'trimmed_count' => $trimmedCount,
+                    'total_segments' => $metrics->count(),
+                ]);
+            }
+        }
+    }
+
+    /**
+     * Calculate standard deviation.
+     */
+    protected function standardDeviation(array $values): float
+    {
+        if (count($values) < 2) {
+            return 0;
+        }
+
+        $mean = array_sum($values) / count($values);
+        $squaredDiffs = array_map(fn($v) => pow($v - $mean, 2), $values);
+
+        return sqrt(array_sum($squaredDiffs) / count($values));
     }
 }

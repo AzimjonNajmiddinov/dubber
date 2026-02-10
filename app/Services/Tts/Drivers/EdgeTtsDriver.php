@@ -64,6 +64,22 @@ class EdgeTtsDriver implements TtsDriverInterface
         'neutral' => ['rate' => '+0%', 'pitch' => '+0Hz', 'volume' => '+0%'],
     ];
 
+    /**
+     * Direction to prosody mapping for acting delivery styles.
+     * These adjust rate, pitch, and volume to match how the line should be delivered.
+     */
+    protected array $directionProsody = [
+        'whisper' => ['rate' => '-15%', 'pitch' => '-3Hz', 'volume' => '-30%'],
+        'soft' => ['rate' => '-8%', 'pitch' => '-2Hz', 'volume' => '-15%'],
+        'normal' => ['rate' => '+0%', 'pitch' => '+0Hz', 'volume' => '+0%'],
+        'loud' => ['rate' => '+5%', 'pitch' => '+2Hz', 'volume' => '+15%'],
+        'shout' => ['rate' => '+10%', 'pitch' => '+5Hz', 'volume' => '+30%'],
+        'sarcastic' => ['rate' => '-5%', 'pitch' => '+0Hz', 'volume' => '+0%'],
+        'playful' => ['rate' => '+8%', 'pitch' => '+3Hz', 'volume' => '+5%'],
+        'cold' => ['rate' => '-3%', 'pitch' => '-1Hz', 'volume' => '-5%'],
+        'warm' => ['rate' => '-5%', 'pitch' => '+1Hz', 'volume' => '+0%'],
+    ];
+
     public function name(): string
     {
         return 'edge';
@@ -94,6 +110,7 @@ class EdgeTtsDriver implements TtsDriverInterface
     ): string {
         $language = $options['language'] ?? 'uz';
         $emotion = strtolower($options['emotion'] ?? 'neutral');
+        $direction = strtolower($options['direction'] ?? $segment->direction ?? 'normal');
         $speedMultiplier = (float) ($options['speed'] ?? 1.0);
 
         // Select voice based on speaker gender
@@ -104,6 +121,9 @@ class EdgeTtsDriver implements TtsDriverInterface
 
         // Get emotion-based prosody
         $emotionProsody = $this->emotionProsody[$emotion] ?? $this->emotionProsody['neutral'];
+
+        // Get direction-based prosody
+        $directionProsody = $this->directionProsody[$direction] ?? $this->directionProsody['normal'];
 
         // Calculate slot-aware speaking rate
         // Uzbek Edge TTS speaks at ~12 chars/sec at normal speed
@@ -131,19 +151,24 @@ class EdgeTtsDriver implements TtsDriverInterface
             ]);
         }
 
-        // Get emotion rate modifier
+        // Get emotion and direction rate modifiers
         $emotionRate = $this->parsePercentage($emotionProsody['rate']);
+        $directionRate = $this->parsePercentage($directionProsody['rate']);
 
-        // Final rate: slot-based + emotion modifier
+        // Final rate: slot-based + emotion + direction modifiers
         // Cap at +40% for intelligibility, allow -30% for slow speech
-        $finalRate = min(40, max(-30, $requiredRate + $emotionRate));
+        $finalRate = min(40, max(-30, $requiredRate + $emotionRate + $directionRate));
         $rate = $finalRate >= 0 ? "+{$finalRate}%" : "{$finalRate}%";
 
-        // Calculate final pitch: profile + emotion
+        // Calculate final pitch: profile + emotion + direction
         $profilePitch = $profile['pitch_offset'];
         $emotionPitch = $this->parseHz($emotionProsody['pitch']);
-        $finalPitch = $profilePitch + $emotionPitch;
+        $directionPitch = $this->parseHz($directionProsody['pitch']);
+        $finalPitch = $profilePitch + $emotionPitch + $directionPitch;
         $pitch = $finalPitch >= 0 ? "+{$finalPitch}Hz" : "{$finalPitch}Hz";
+
+        // Calculate volume adjustment from direction (stored for post-processing)
+        $directionVolume = $this->parsePercentage($directionProsody['volume']);
 
         $videoId = $segment->video_id;
         $segmentId = $segment->id;
@@ -201,6 +226,7 @@ class EdgeTtsDriver implements TtsDriverInterface
             'voice' => $voice,
             'profile' => $profile['name'],
             'emotion' => $emotion,
+            'direction' => $direction,
             'rate' => $rate,
             'pitch' => $pitch,
             'ssml' => $useSsml,
@@ -220,7 +246,9 @@ class EdgeTtsDriver implements TtsDriverInterface
 
         // Convert to normalized WAV and fit to time slot if needed
         $slotDuration = (float) $segment->end_time - (float) $segment->start_time;
-        $this->normalizeAudio($rawMp3, $outputWav, $options, $slotDuration);
+        $normalizeOptions = $options;
+        $normalizeOptions['direction_volume_percent'] = $directionVolume;
+        $this->normalizeAudio($rawMp3, $outputWav, $normalizeOptions, $slotDuration);
         @unlink($rawMp3);
 
         return $outputWav;
@@ -354,14 +382,23 @@ class EdgeTtsDriver implements TtsDriverInterface
     protected function normalizeAudio(string $input, string $output, array $options, float $slotDuration = 0): void
     {
         $gainDb = $options['gain_db'] ?? 0.0;
+        $directionVolumePercent = $options['direction_volume_percent'] ?? 0;
+
+        // Convert direction volume percent to dB adjustment
+        // +30% ≈ +2.3dB, -30% ≈ -3dB
+        $directionVolumeDb = 0.0;
+        if ($directionVolumePercent != 0) {
+            $directionVolumeDb = 20 * log10(1 + ($directionVolumePercent / 100));
+        }
 
         // Simple conversion: MP3 to WAV, 48kHz stereo
         // No tempo adjustment - Edge TTS --rate parameter handles speed
         // No loudnorm - final mix handles loudness normalization once
+        $totalGainDb = $gainDb + $directionVolumeDb;
         $volumeFilter = '';
-        if (abs($gainDb) > 0.1) {
-            $sign = $gainDb >= 0 ? '+' : '';
-            $volumeFilter = ",volume={$sign}{$gainDb}dB";
+        if (abs($totalGainDb) > 0.1) {
+            $sign = $totalGainDb >= 0 ? '+' : '';
+            $volumeFilter = ",volume={$sign}" . round($totalGainDb, 1) . "dB";
         }
 
         $filter = "aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo{$volumeFilter}";

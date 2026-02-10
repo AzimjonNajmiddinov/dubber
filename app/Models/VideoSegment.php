@@ -17,6 +17,7 @@ class VideoSegment extends Model
         'translated_text',
         'tts_audio_path',
         'emotion',
+        'direction',
         'tts_gain_db',
         'tts_lufs'
     ];
