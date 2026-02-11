@@ -447,17 +447,19 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
 
         $speedupNeeded = $audioDuration / $slotDuration;
 
-        // CASE 2: Minor overflow (5-20%) - gentle speedup
-        // CASE 3: Moderate overflow (20-50%) - moderate speedup
-        // CASE 4: Significant overflow (>50%) - max speedup + flag for review
+        // NATURAL TIMING APPROACH:
+        // Minor overflow (up to 15%) is OKAY - sounds natural, slight extension into gap
+        // Only speed up if SIGNIFICANT overflow (>15%) and keep it gentle
+        //
+        // Real dubbing allows slight timing flexibility - not robotic exact fit
+        // Max speedup 1.25x - anything more sounds unnatural/rushed
 
-        // Use higher max speedup (1.5x) for better fitting
-        // 1.5x is still natural-sounding for most speech
-        $maxSpeedup = 1.50;
+        $maxSpeedup = 1.25;  // Gentler max - less noticeable
         $actualSpeedup = min($speedupNeeded, $maxSpeedup);
 
-        // Only apply speedup if actually needed (>5% overflow)
-        if ($speedupNeeded > 1.05) {
+        // Only apply speedup if significant overflow (>15%)
+        // Minor overflow sounds natural and extends into the gap
+        if ($speedupNeeded > 1.15) {
             Log::info('TTS applying tempo adjustment', [
                 'path' => basename($audioPath),
                 'audio_duration' => round($audioDuration, 2),

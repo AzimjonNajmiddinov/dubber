@@ -120,8 +120,17 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
 
                 $charCount = mb_strlen($src);
 
-                // Calculate slot duration for time-aware character budget
+                // Calculate slot duration and gap to next segment
                 $slotDuration = ((float) $seg->end_time) - ((float) $seg->start_time);
+
+                // Check if there's a gap after this segment (can extend into it if needed)
+                $gapToNext = 0;
+                if ($segIndex < $segmentsList->count() - 1) {
+                    $nextSeg = $segmentsList[$segIndex + 1];
+                    $gapToNext = max(0, ((float) $nextSeg->start_time) - ((float) $seg->end_time));
+                }
+                // Available time = slot + up to 0.5s of gap (don't eat too much into next segment's space)
+                $availableTime = $slotDuration + min(0.5, $gapToNext);
 
                 // Attempt up to 2 times if English leaks
                 $translated = null;
@@ -132,7 +141,8 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
                 $lastBody = null;
 
                 for ($attempt = 1; $attempt <= 2; $attempt++) {
-                    $system = $this->buildSystemPrompt($targetLanguage, $attempt, $charCount, $prevText, $nextText, $slotDuration, $emotionArc);
+                    // Use availableTime (includes gap) for character budget guidance
+                    $system = $this->buildSystemPrompt($targetLanguage, $attempt, $charCount, $prevText, $nextText, $availableTime, $emotionArc);
 
                     // Build messages with few-shot examples for better accuracy
                     $messages = [
@@ -280,6 +290,21 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
                     $translated = $parsedText;
                     $emotion = $detectedEmotion;
                     $direction = $detectedDirection;
+
+                    // Log translation stats but DON'T truncate - preserve meaning!
+                    // TTS can handle slight overflows by speaking faster
+                    if ($slotDuration > 0) {
+                        $actualChars = mb_strlen($parsedText);
+                        $charsPerSec = $actualChars / $slotDuration;
+
+                        Log::debug('Translation stats', [
+                            'segment_id' => $seg->id,
+                            'slot' => round($slotDuration, 2),
+                            'chars' => $actualChars,
+                            'chars_per_sec' => round($charsPerSec, 1),
+                        ]);
+                    }
+
                     break;
                 }
 
@@ -361,9 +386,9 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
         if ($attempt >= 2) {
             $extra =
                 "\nSTRICT MODE:\n" .
-                "- If you are unsure, still produce output in the target language.\n" .
                 "- Do NOT output English words.\n" .
-                "- Use natural spoken phrases used by native speakers.\n";
+                "- Use natural spoken phrases used by native speakers.\n" .
+                "- Keep the FULL meaning of the original sentence.\n";
         }
         if ($attempt >= 3) {
             $extra .=
@@ -383,30 +408,38 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
             }
         }
 
-        // Time-aware character budget - CONSERVATIVE for natural pacing
-        // Uzbek TTS speaks at ~10-12 chars/sec depending on word complexity
-        // Use 9 chars/sec as STRICT budget to ensure:
-        // 1. Natural, unhurried speech
-        // 2. Room for TTS variation
-        // 3. No need for aggressive post-processing speedup
-        // Better to have slightly short translations than rushed/cut speech!
+        // Time-aware character budget - VERY STRICT for dubbing sync
+        // Edge TTS Uzbek speaks at ~10 chars/sec at normal speed
+        // Use aggressive budgets to PREVENT sentence cutting:
+        // - Very short slots (<1.5s): 6 chars/sec (room for TTS variation)
+        // - Short slots (1.5-3s): 7 chars/sec
+        // - Normal slots (3s+): 8 chars/sec
+        // REALISTIC character budget - preserve meaning over strict timing!
+        // Normal speaking rate: 10-12 chars/sec. Speaker can speed up slightly if needed.
+        // NEVER cut sentences - better to speak faster than lose meaning.
         $budgetRule = '';
         $isUzbek = str_contains($targetLanguage, 'Uzbek') || str_contains($targetLanguage, 'uz');
-        $charsPerSec = $isUzbek ? 9 : 10; // More conservative for Uzbek
 
         if ($slotDuration > 0) {
-            $maxChars = max(4, (int) floor($slotDuration * $charsPerSec));
+            // Realistic rates - these are GUIDES, not hard limits
+            // TTS can handle 12-14 chars/sec by speaking faster
+            $normalRate = $isUzbek ? 10 : 11;  // Normal comfortable pace
+            $fastRate = $isUzbek ? 13 : 14;    // Fast but still clear
 
-            if ($slotDuration < 1.0) {
-                $budgetRule = "8. CRITICAL: Only {$slotDuration}s! MAX {$maxChars} chars. Use 1-2 words only.\n";
-            } elseif ($slotDuration < 1.5) {
-                $budgetRule = "8. VERY SHORT: {$slotDuration}s. MAX {$maxChars} chars. Be extremely brief.\n";
-            } elseif ($slotDuration < 2.5) {
-                $budgetRule = "8. SHORT: {$slotDuration}s. MAX {$maxChars} chars. Keep concise.\n";
-            } elseif ($slotDuration < 4.0) {
-                $budgetRule = "8. LIMIT: {$slotDuration}s = max {$maxChars} chars.\n";
+            $idealChars = (int) round($slotDuration * $normalRate);
+            $maxChars = (int) round($slotDuration * $fastRate);
+
+            $slotRounded = round($slotDuration, 1);
+
+            if ($slotDuration < 1.5) {
+                // Short slots - be concise but KEEP MEANING
+                $budgetRule = "Time: {$slotRounded}s. Aim for ~{$idealChars} chars (max ~{$maxChars}).\n" .
+                    "Be concise but PRESERVE FULL MEANING. Don't cut words.\n\n";
+            } elseif ($slotDuration < 3.0) {
+                $budgetRule = "Time: {$slotRounded}s. Target ~{$idealChars} chars.\n" .
+                    "Translate naturally, preserving complete meaning.\n\n";
             } else {
-                $budgetRule = "8. Time: {$slotDuration}s. Aim for {$maxChars} chars or less.\n";
+                $budgetRule = "Time available: {$slotRounded}s (~{$idealChars} chars).\n\n";
             }
         }
 
@@ -415,6 +448,10 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
         if (str_contains($targetLanguage, 'Uzbek') || str_contains($targetLanguage, 'uz')) {
             $examples =
                 "\n### MUHIM: O'ZBEK TARJIMA QOIDALARI ###\n\n" .
+                "IMLO QOIDALARI - o' va g' harflarini TO'G'RI yozing:\n" .
+                "- o' = o + apostrof (so'ra, to'rt, o'n, bo'ldi)\n" .
+                "- g' = g + apostrof (g'alati, bog'liq, to'g'ri, g'udurla)\n" .
+                "- XATO: og, tog, bog → TO'G'RI: o'g', to'g', bo'g'\n\n" .
                 "FE'L SHAKLLARI - FAQAT NORASMIY \"SEN\" ISHLATILSIN:\n" .
                 "- \"Ask\" = \"So'ra\" (XATO: \"So'rang\")\n" .
                 "- \"Listen\" = \"Tingla\" (XATO: \"Tinglang\")\n" .
@@ -569,6 +606,75 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
         $text = preg_replace('/so\'rov qilish/ui', "so'rash", $text);
 
         return $text;
+    }
+
+    /**
+     * Calculate maximum allowed characters for a given slot duration.
+     * Uses same logic as prompt but for validation.
+     */
+    private function calculateMaxChars(float $slotDuration, string $targetLanguage): int
+    {
+        $isUzbek = str_contains($targetLanguage, 'Uzbek') || str_contains($targetLanguage, 'uz');
+
+        if ($slotDuration < 1.0) {
+            $charsPerSec = 5;
+        } elseif ($slotDuration < 1.5) {
+            $charsPerSec = 6;
+        } elseif ($slotDuration < 3.0) {
+            $charsPerSec = 7;
+        } else {
+            $charsPerSec = $isUzbek ? 8 : 9;
+        }
+
+        return max(3, (int) floor($slotDuration * $charsPerSec));
+    }
+
+    /**
+     * Truncate text to fit within character budget, breaking at word boundaries.
+     * Preserves meaning by keeping complete words and adding ellipsis if needed.
+     */
+    private function truncateToFit(string $text, int $maxChars): string
+    {
+        if (mb_strlen($text) <= $maxChars) {
+            return $text;
+        }
+
+        // Try to break at sentence boundaries first
+        $sentences = preg_split('/([.!?])\s+/u', $text, -1, PREG_SPLIT_DELIM_CAPTURE);
+        $result = '';
+        for ($i = 0; $i < count($sentences) - 1; $i += 2) {
+            $sentence = $sentences[$i] . ($sentences[$i + 1] ?? '');
+            if (mb_strlen($result . $sentence) <= $maxChars) {
+                $result .= $sentence . ' ';
+            } else {
+                break;
+            }
+        }
+
+        $result = trim($result);
+        if (mb_strlen($result) > 0 && mb_strlen($result) <= $maxChars) {
+            return $result;
+        }
+
+        // Fall back to word boundary truncation
+        $words = preg_split('/\s+/u', $text);
+        $result = '';
+        foreach ($words as $word) {
+            $test = $result === '' ? $word : $result . ' ' . $word;
+            if (mb_strlen($test) <= $maxChars) {
+                $result = $test;
+            } else {
+                break;
+            }
+        }
+
+        // If no words fit, take the first word truncated to maxChars
+        // This ensures we always return SOMETHING meaningful
+        if (mb_strlen(trim($result)) === 0 && count($words) > 0) {
+            $result = mb_substr($words[0], 0, $maxChars);
+        }
+
+        return trim($result);
     }
 
 }

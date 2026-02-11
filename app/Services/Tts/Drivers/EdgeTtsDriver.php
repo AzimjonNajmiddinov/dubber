@@ -171,55 +171,37 @@ class EdgeTtsDriver implements TtsDriverInterface
         // Get direction-based prosody
         $directionProsody = $this->directionProsody[$direction] ?? $this->directionProsody['normal'];
 
-        // Calculate slot-aware speaking rate
-        // Uzbek Edge TTS ACTUAL speaking rate is ~10-11 chars/sec at normal speed
-        // (not 12 as previously assumed - Uzbek words are phonetically longer)
-        $slotDuration = ((float) $segment->end_time) - ((float) $segment->start_time);
-        $textLength = mb_strlen($text);
+        // NATURAL SPEAKING RATE - CONSISTENT across all segments!
+        // A real human speaker maintains consistent pace throughout.
+        // They don't speed up 15% for one sentence then slow down 10% for the next.
+        //
+        // Our approach:
+        // 1. Use FIXED base rate (0% = natural TTS speed ~10-11 chars/sec)
+        // 2. Only TINY adjustments for emotion (±3% max) - natural variation
+        // 3. Let post-processing handle timing with gentle atempo if needed
+        // 4. Short segments with one word = normal pace, not artificially slow
+        // 5. Long segments = normal pace, post-processing speeds up if needed
+        //
+        // This sounds NATURAL because the speaker's pace is CONSISTENT!
 
-        // Use conservative estimate: 10 chars/sec for Uzbek, 11 for others
-        $normalCharsPerSec = ($language === 'uz' || $language === 'uzbek') ? 10.0 : 11.0;
+        // Get emotion and direction rate modifiers - VERY SMALL for natural variation
+        // Real speakers don't change pace much for emotions - they change volume/tone
+        $emotionRate = (int) round($this->parsePercentage($emotionProsody['rate']) * 0.3);  // 30% of emotion effect
+        $directionRate = (int) round($this->parsePercentage($directionProsody['rate']) * 0.3);  // 30% of direction effect
 
-        // IMPORTANT: Use NARROW rate range for CONSISTENT natural sound
-        // Large rate variations sound robotic and unnatural
-        // Better to let post-processing handle overflow with gentle atempo
-        $requiredRate = 0; // Default: normal speed
-        if ($slotDuration > 0.3 && $textLength > 0) {
-            $requiredCharsPerSec = $textLength / $slotDuration;
-            $speedRatio = $requiredCharsPerSec / $normalCharsPerSec;
-
-            // Only adjust rate if significantly different from normal
-            // Keep adjustments subtle for natural sound
-            // If translation followed 9 chars/sec budget, most segments won't need speedup
-            if ($speedRatio > 1.10) {
-                // Need to speed up - but keep it gentle (max +15%)
-                $requiredRate = (int) round(min(($speedRatio - 1.0) * 100, 15));
-            } elseif ($speedRatio < 0.85) {
-                // Can slow down slightly for very short text (max -10%)
-                $requiredRate = (int) round(max(($speedRatio - 1.0) * 100, -10));
-            }
-
-            Log::debug('TTS rate calculation', [
-                'segment_id' => $segment->id,
-                'text_length' => $textLength,
-                'slot' => round($slotDuration, 2),
-                'expected_chars_per_sec' => $normalCharsPerSec,
-                'actual_chars_per_sec' => round($requiredCharsPerSec, 1),
-                'speed_ratio' => round($speedRatio, 2),
-                'rate_percent' => $requiredRate,
-            ]);
-        }
-
-        // Get emotion and direction rate modifiers (keep these small too)
-        $emotionRate = (int) round($this->parsePercentage($emotionProsody['rate']) * 0.5);
-        $directionRate = (int) round($this->parsePercentage($directionProsody['rate']) * 0.5);
-
-        // Final rate: NARROW range for consistent, natural speech
-        // -10% to +15% - very conservative to sound natural
-        // With 9 chars/sec translation budget, we rarely need speedup
-        // Post-processing atempo will handle any remaining adjustment (max 1.5x)
-        $finalRate = min(15, max(-10, $requiredRate + $emotionRate + $directionRate));
+        // Final rate: VERY NARROW range for consistent, natural speech
+        // Max ±5% variation - barely noticeable, sounds human
+        // Post-processing atempo handles any timing adjustments needed
+        $finalRate = min(5, max(-5, $emotionRate + $directionRate));
         $rate = $finalRate >= 0 ? "+{$finalRate}%" : "{$finalRate}%";
+
+        Log::debug('TTS natural rate', [
+            'segment_id' => $segment->id,
+            'emotion' => $emotion,
+            'direction' => $direction,
+            'rate' => $rate,
+            'note' => 'Consistent pace - timing handled in post-processing',
+        ]);
 
         // PITCH = SPEAKER IDENTITY ONLY
         // Pitch comes ONLY from speaker profile - this is what makes each speaker unique
