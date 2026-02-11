@@ -61,14 +61,18 @@ if [ "$SKIP_DEPS" = false ]; then
     echo "  [4/6] Installing huggingface_hub/transformers..."
     pip install $PIP_FLAGS huggingface_hub==0.21.4 transformers==4.38.0 tokenizers==0.15.2
 
-    # Step 5: WhisperX dependencies
-    echo "  [5/6] Checking WhisperX..."
+    # Step 5: Demucs for audio separation
+    echo "  [5/7] Installing Demucs..."
+    pip install $PIP_FLAGS demucs
+
+    # Step 6: WhisperX dependencies
+    echo "  [6/7] Checking WhisperX..."
     if ! python -c "import whisperx" 2>/dev/null; then
         pip install $PIP_FLAGS whisperx
     fi
 
-    # Step 6: TTS (Coqui) for XTTS
-    echo "  [6/6] Checking TTS..."
+    # Step 7: TTS (Coqui) for XTTS
+    echo "  [7/7] Checking TTS..."
     if ! python -c "from TTS.api import TTS" 2>/dev/null; then
         pip install $PIP_FLAGS TTS
     fi
