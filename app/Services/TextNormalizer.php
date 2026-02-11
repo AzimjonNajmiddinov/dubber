@@ -32,15 +32,18 @@ class TextNormalizer
      * Normalize Uzbek special characters for TTS.
      *
      * Uzbek Latin uses o' and g' for special sounds:
-     * - o' (oʻ) - open O sound (like "ö" or "aw" in "law")
-     * - g' (gʻ) - voiced uvular fricative (like French "r" or soft "gh")
+     * - o' (oʻ) - open O sound
+     * - g' (gʻ) - voiced uvular fricative
      *
-     * XTTS doesn't natively understand these, so we convert them to
-     * phonetic approximations that produce more accurate sounds.
+     * For Edge TTS (uz-UZ-SardorNeural/MadinaNeural): Keep original o' and g'
+     * as these native Uzbek voices understand them correctly.
+     *
+     * For XTTS: Would need phonetic conversion (ö, gh) but Edge TTS is primary.
      */
     private static function normalizeUzbekCharacters(string $text): string
     {
-        // First, normalize all apostrophe variants to ASCII apostrophe
+        // Normalize all apostrophe variants to ASCII apostrophe
+        // This ensures consistent o' and g' representation
         $apostrophes = [
             "\u{2019}",  // RIGHT SINGLE QUOTATION MARK '
             "\u{2018}",  // LEFT SINGLE QUOTATION MARK '
@@ -53,15 +56,9 @@ class TextNormalizer
         ];
         $text = str_replace($apostrophes, "'", $text);
 
-        // Convert o' to phonetic "ö" (XTTS understands German/Turkish ö)
-        // This produces the correct open-mid back rounded vowel
-        $text = preg_replace("/o'/iu", "ö", $text);
-        $text = preg_replace("/O'/u", "Ö", $text);
-
-        // Convert g' to phonetic "gh" (voiced velar/uvular approximation)
-        // "gh" is commonly understood by TTS as a softer g sound
-        $text = preg_replace("/g'/iu", "gh", $text);
-        $text = preg_replace("/G'/u", "Gh", $text);
+        // DO NOT convert o' to ö or g' to gh for Edge TTS
+        // Edge TTS Uzbek voices (uz-UZ-SardorNeural) understand native Uzbek spelling
+        // Keeping original characters produces correct pronunciation
 
         return $text;
     }
@@ -143,9 +140,9 @@ class TextNormalizer
      */
     private static function digitsToWords(string $digits, string $lang): string
     {
-        // Use phonetic representations for Uzbek: o' → ö
+        // Use native Uzbek characters for Edge TTS
         $digitWords = match($lang) {
-            'uz', 'uzbek' => ['nol', 'bir', 'ikki', 'uch', 'tört', 'besh', 'olti', 'yetti', 'sakkiz', 'töqqiz'],
+            'uz', 'uzbek' => ['nol', 'bir', 'ikki', 'uch', "to'rt", 'besh', 'olti', 'yetti', 'sakkiz', "to'qqiz"],
             'ru', 'russian' => ['ноль', 'один', 'два', 'три', 'четыре', 'пять', 'шесть', 'семь', 'восемь', 'девять'],
             default => ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'],
         };
@@ -164,9 +161,9 @@ class TextNormalizer
     {
         if ($n == 0) return 'nol';
 
-        // Use phonetic representations: o' → ö, g' → gh
-        $ones = ['', 'bir', 'ikki', 'uch', 'tört', 'besh', 'olti', 'yetti', 'sakkiz', 'töqqiz'];
-        $tens = ['', 'ön', 'yigirma', 'öttiz', 'qirq', 'ellik', 'oltmish', 'yetmish', 'sakson', 'töqson'];
+        // Use native Uzbek characters for Edge TTS
+        $ones = ['', 'bir', 'ikki', 'uch', "to'rt", 'besh', 'olti', 'yetti', 'sakkiz', "to'qqiz"];
+        $tens = ['', "o'n", 'yigirma', "o'ttiz", 'qirq', 'ellik', 'oltmish', 'yetmish', 'sakson', "to'qson"];
 
         $words = [];
 
@@ -351,8 +348,8 @@ class TextNormalizer
     {
         $abbreviations = match($lang) {
             'uz', 'uzbek' => [
-                // Use phonetic: o' → ö, g' → gh
-                '/\bAQSh\b/i' => 'Amerika Qöshma Shtatlari',
+                // Use native Uzbek characters for Edge TTS
+                '/\bAQSh\b/i' => "Amerika Qo'shma Shtatlari",
                 '/\bBMT\b/i' => 'Birlashgan Millatlar Tashkiloti',
                 '/(?<=\d)\s*km\b/' => ' kilometr',
                 '/(?<=\d)\s*m\b/' => ' metr',
