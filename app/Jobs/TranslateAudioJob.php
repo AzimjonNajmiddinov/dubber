@@ -127,6 +127,8 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
                 $translated = null;
                 $emotion = 'neutral';
                 $direction = 'normal';
+                $detectedIntent = 'inform';
+                $actingNote = null;
                 $lastBody = null;
 
                 for ($attempt = 1; $attempt <= 2; $attempt++) {
@@ -137,22 +139,40 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
                         ['role' => 'system', 'content' => $system],
                     ];
 
-                    // Add few-shot examples with emotion and direction detection (JSON format)
+                    // Add few-shot examples with enhanced emotion, delivery, intent detection
                     if (str_contains($targetLanguage, 'Uzbek') || str_contains($targetLanguage, 'uz')) {
                         $messages[] = ['role' => 'user', 'content' => 'Ask.'];
-                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"So\'ra.","e":"neutral","d":"normal"}'];
+                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"So\'ra.","e":"neutral","d":"normal","i":"command","n":"simple command"}'];
+
                         $messages[] = ['role' => 'user', 'content' => 'I can\'t believe this!'];
-                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Bunga ishonolmayman!","e":"surprise","d":"loud"}'];
+                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Bunga ishonolmayman!","e":"surprise","d":"loud","i":"inform","n":"shocked, disbelief"}'];
+
                         $messages[] = ['role' => 'user', 'content' => 'Get out of here right now!'];
-                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Hoziroq yo\'qol bu yerdan!","e":"angry","d":"shout"}'];
+                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Hoziroq yo\'qol bu yerdan!","e":"angry","d":"shout","i":"command","n":"furious, commanding"}'];
+
                         $messages[] = ['role' => 'user', 'content' => 'I miss you so much...'];
-                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Seni juda sog\'indim...","e":"sad","d":"soft"}'];
+                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Seni juda sog\'indim...","e":"sad","d":"soft","i":"confide","n":"tender, vulnerable"}'];
+
                         $messages[] = ['role' => 'user', 'content' => 'This is amazing! I love it!'];
-                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Bu ajoyib! Menga yoqdi!","e":"happy","d":"warm"}'];
+                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Bu ajoyib! Menga yoqdi!","e":"excited","d":"loud","i":"celebrate","n":"joyful, enthusiastic"}'];
+
                         $messages[] = ['role' => 'user', 'content' => 'Don\'t tell anyone, but...'];
-                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Hech kimga aytma, lekin...","e":"neutral","d":"whisper"}'];
+                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Hech kimga aytma, lekin...","e":"neutral","d":"whisper","i":"confide","n":"secretive, intimate"}'];
+
                         $messages[] = ['role' => 'user', 'content' => 'Oh, you think you\'re so smart, don\'t you?'];
-                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Oh, o\'zingni aqlli deb o\'ylaysan, shundaymi?","e":"neutral","d":"sarcastic"}'];
+                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Oh, o\'zingni aqlli deb o\'ylaysan, shundaymi?","e":"contempt","d":"matter_of_fact","i":"mock","n":"sarcastic, condescending"}'];
+
+                        $messages[] = ['role' => 'user', 'content' => 'Please, I\'m begging you, don\'t do this!'];
+                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Iltimos, yolvoraman, bunday qilma!","e":"fear","d":"pleading","i":"plead","n":"desperate, trembling"}'];
+
+                        $messages[] = ['role' => 'user', 'content' => 'You have no idea what I\'m capable of.'];
+                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Men nimaga qodirligimni bilmaysan.","e":"angry","d":"tense","i":"threaten","n":"cold, menacing"}'];
+
+                        $messages[] = ['role' => 'user', 'content' => 'Everything will be okay, I promise.'];
+                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Hammasi yaxshi bo\'ladi, va\'da beraman.","e":"tender","d":"soft","i":"comfort","n":"warm, reassuring"}'];
+
+                        $messages[] = ['role' => 'user', 'content' => 'We did it! We actually did it!'];
+                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Uddaladik! Haqiqatan ham uddaladik!","e":"excited","d":"loud","i":"celebrate","n":"ecstatic, triumphant"}'];
                     }
 
                     $messages[] = ['role' => 'user', 'content' => $src];
@@ -188,10 +208,12 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
 
                     $out = trim($out);
 
-                    // Parse JSON response: {"t":"translation","e":"emotion","d":"direction"}
+                    // Parse JSON response: {"t":"translation","e":"emotion","d":"delivery","i":"intent","n":"acting_note"}
                     $parsedText = $out;
                     $detectedEmotion = 'neutral';
                     $detectedDirection = 'normal';
+                    $detectedIntent = 'inform';
+                    $actingNote = null;
 
                     if (str_starts_with($out, '{') && str_contains($out, '"t"')) {
                         $parsed = json_decode($out, true);
@@ -199,23 +221,44 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
                             $parsedText = trim($parsed['t']);
                             $detectedEmotion = strtolower(trim($parsed['e'] ?? 'neutral'));
                             $detectedDirection = strtolower(trim($parsed['d'] ?? 'normal'));
+                            $detectedIntent = strtolower(trim($parsed['i'] ?? 'inform'));
+                            $actingNote = trim($parsed['n'] ?? '');
 
-                            // Validate emotion
-                            $validEmotions = ['neutral', 'happy', 'sad', 'angry', 'fear', 'surprise', 'excited'];
+                            // Validate emotion (expanded list)
+                            $validEmotions = ['neutral', 'happy', 'sad', 'angry', 'fear', 'surprise', 'excited', 'tender', 'anxious', 'contempt', 'disgusted'];
                             if (!in_array($detectedEmotion, $validEmotions)) {
                                 $detectedEmotion = 'neutral';
                             }
 
-                            // Validate direction
-                            $validDirections = ['whisper', 'soft', 'normal', 'loud', 'shout', 'sarcastic', 'playful', 'cold', 'warm'];
+                            // Validate direction (expanded list)
+                            $validDirections = [
+                                'whisper', 'soft', 'normal', 'loud', 'shout',
+                                'breathy', 'tense', 'trembling', 'strained', 'pleading', 'matter_of_fact',
+                                'sarcastic', 'playful', 'cold', 'warm' // Legacy support
+                            ];
                             if (!in_array($detectedDirection, $validDirections)) {
-                                $detectedDirection = 'normal';
+                                // Map legacy values
+                                $detectedDirection = match($detectedDirection) {
+                                    'sarcastic' => 'matter_of_fact',
+                                    'playful' => 'normal',
+                                    'cold' => 'tense',
+                                    'warm' => 'soft',
+                                    default => 'normal',
+                                };
                             }
 
-                            Log::info('Emotion and direction detected from translation', [
+                            // Validate intent
+                            $validIntents = ['inform', 'persuade', 'comfort', 'threaten', 'mock', 'confide', 'question', 'command', 'plead', 'accuse', 'apologize', 'celebrate', 'mourn'];
+                            if (!in_array($detectedIntent, $validIntents)) {
+                                $detectedIntent = 'inform';
+                            }
+
+                            Log::info('Acting direction detected', [
                                 'segment_id' => $seg->id,
                                 'emotion' => $detectedEmotion,
-                                'direction' => $detectedDirection,
+                                'delivery' => $detectedDirection,
+                                'intent' => $detectedIntent,
+                                'acting_note' => $actingNote,
                             ]);
                         }
                     }
@@ -266,10 +309,22 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
                     $translated = $out;
                 }
 
+                // Debug: Log what we're about to save
+                Log::debug('About to update segment', [
+                    'segment_id' => $seg->id,
+                    'translated' => mb_substr($translated ?? '', 0, 30),
+                    'emotion' => $emotion,
+                    'direction' => $direction,
+                    'detectedIntent' => $detectedIntent,
+                    'actingNote' => $actingNote,
+                ]);
+
                 $seg->update([
                     'translated_text' => $translated,
                     'emotion' => $emotion,
                     'direction' => $direction,
+                    'intent' => $detectedIntent ?? 'inform',
+                    'acting_note' => $actingNote ?: null,
                 ]);
             }
 
@@ -390,20 +445,33 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
             "You are a professional {$targetLanguage} translator for movie dubbing with emotional and performance awareness.\n\n" .
             "YOUR TASK:\n" .
             "1. Translate the text accurately and naturally\n" .
-            "2. Detect the emotion from context, punctuation, and meaning\n" .
-            "3. Detect the acting direction/delivery style\n" .
-            "4. Return JSON format: {\"t\":\"translation\",\"e\":\"emotion\",\"d\":\"direction\"}\n\n" .
-            "EMOTIONS (choose one): neutral, happy, sad, angry, fear, surprise, excited\n\n" .
-            "DIRECTIONS (choose one based on HOW the line should be delivered):\n" .
+            "2. Detect the PRIMARY emotion from context, punctuation, and meaning\n" .
+            "3. Detect the DELIVERY style (how to physically speak the line)\n" .
+            "4. Detect the INTENT (what speaker is trying to achieve)\n" .
+            "5. Return JSON format with ALL fields:\n" .
+            "   {\"t\":\"translation\",\"e\":\"emotion\",\"d\":\"delivery\",\"i\":\"intent\",\"n\":\"acting_note\"}\n\n" .
+            "EMOTIONS (primary feeling - choose one):\n" .
+            "neutral, happy, sad, angry, fear, surprise, excited, tender, anxious, contempt\n\n" .
+            "DELIVERY STYLES (physical voice quality - choose one):\n" .
             "- whisper: intimate, soft, breathy (secrets, romance, fear)\n" .
             "- soft: gentle, caring (comfort, tenderness)\n" .
-            "- normal: standard delivery\n" .
-            "- loud: raised voice, emphasis (arguments, calls across room)\n" .
+            "- normal: standard conversational delivery\n" .
+            "- loud: raised voice, emphasis (arguments, calls)\n" .
             "- shout: yelling, extreme (danger, rage)\n" .
-            "- sarcastic: ironic undertone (wit, mockery)\n" .
-            "- playful: teasing, light (jokes, flirtation)\n" .
-            "- cold: emotionless, detached (villains, formal)\n" .
-            "- warm: friendly, loving (affection, encouragement)\n\n" .
+            "- breathy: intimate, exhausted, romantic\n" .
+            "- tense: barely controlled emotion, restraint\n" .
+            "- trembling: voice shaking (fear, overwhelming emotion)\n" .
+            "- strained: physical effort, pain\n" .
+            "- pleading: desperate begging\n" .
+            "- matter_of_fact: flat, emotionless exposition\n\n" .
+            "INTENT (speaker's goal - choose one):\n" .
+            "inform, persuade, comfort, threaten, mock, confide, question, command, plead, accuse, apologize, celebrate, mourn\n\n" .
+            "ACTING NOTE (n): 3-5 word direction for voice actor. Examples:\n" .
+            "- 'intensely angry, threatening'\n" .
+            "- 'whispered, sharing a secret'\n" .
+            "- 'sarcastic, mocking undertone'\n" .
+            "- 'trembling with fear'\n" .
+            "- 'tender, comforting a child'\n\n" .
             "TRANSLATION RULES:\n" .
             "- Translate MEANING, not word-by-word\n" .
             "- Use informal speech (talking to a friend)\n" .

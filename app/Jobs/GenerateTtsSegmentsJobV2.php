@@ -7,6 +7,8 @@ use App\Models\Speaker;
 use App\Models\TtsQualityMetric;
 use App\Models\Video;
 use App\Models\VideoSegment;
+use App\Services\ActingDirector;
+use App\Services\NaturalSpeechProcessor;
 use App\Services\Tts\Drivers\XttsDriver;
 use App\Services\Tts\TtsManager;
 use App\Traits\DetectsEnglish;
@@ -248,14 +250,34 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
 
         // Get direction from segment or default to normal
         $direction = strtolower((string) ($seg->direction ?? 'normal'));
-        $validDirections = ['whisper', 'soft', 'normal', 'loud', 'shout', 'sarcastic', 'playful', 'cold', 'warm'];
+        $validDirections = [
+            'whisper', 'soft', 'normal', 'loud', 'shout',
+            'breathy', 'tense', 'trembling', 'strained', 'pleading', 'matter_of_fact',
+            'sarcastic', 'playful', 'cold', 'warm'
+        ];
         if (!in_array($direction, $validDirections)) {
             $direction = 'normal';
         }
 
+        // Get intent for enhanced TTS control
+        $intent = strtolower((string) ($seg->intent ?? 'inform'));
+
+        // Build comprehensive acting direction
+        $actingDirection = [
+            'emotion' => $emotion,
+            'emotion_intensity' => $this->getEmotionIntensity($seg->text ?? '', $emotion),
+            'delivery' => $direction,
+            'intent' => $intent,
+            'vocal_quality' => $this->getVocalQualities($emotion, $direction),
+            'acting_note' => $seg->acting_note ?? null,
+            'paralinguistics' => [],
+        ];
+
         $options = [
             'emotion' => $emotion,
             'direction' => $direction,
+            'intent' => $intent,
+            'acting_direction' => $actingDirection,
             'speed' => 1.0,
             'gain_db' => (float) ($speaker?->tts_gain_db ?? 0),
             'language' => $video->target_language ?? 'uz',
@@ -279,7 +301,19 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
         try {
             $outputPath = $driver->synthesize($text, $speaker, $seg, $options);
 
-            // Post-synthesis: fit audio to available time (slot + gap until next segment)
+            // Post-synthesis Step 1: Apply natural speech processing for human-like sound
+            $naturalProcessor = app(NaturalSpeechProcessor::class);
+
+            // Add breath sounds for long sentences or emotional delivery
+            if ($naturalProcessor->shouldInsertBreath($actingDirection, mb_strlen($text))) {
+                $breathType = $naturalProcessor->getBreathType($actingDirection);
+                $naturalProcessor->insertBreath($outputPath, $breathType, $emotion);
+            }
+
+            // Apply emotion-specific audio processing (warmth, tension, tremolo)
+            $naturalProcessor->process($outputPath, $actingDirection);
+
+            // Post-synthesis Step 2: Fit audio to available time (slot + gap until next segment)
             // This allows words to be fully pronounced without cutting off
             $fitResult = $this->fitAudioToSlot($outputPath, $availableTime);
 
@@ -897,5 +931,90 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
         $squaredDiffs = array_map(fn($v) => pow($v - $mean, 2), $values);
 
         return sqrt(array_sum($squaredDiffs) / count($values));
+    }
+
+    /**
+     * Estimate emotion intensity from text characteristics.
+     * Returns 0.0 - 1.0 scale.
+     */
+    protected function getEmotionIntensity(string $text, string $emotion): float
+    {
+        $baseIntensity = 0.5;
+
+        // Punctuation intensity
+        $exclamations = substr_count($text, '!');
+        if ($exclamations >= 3) $baseIntensity += 0.3;
+        elseif ($exclamations >= 2) $baseIntensity += 0.2;
+        elseif ($exclamations >= 1) $baseIntensity += 0.1;
+
+        // ALL CAPS words indicate intensity
+        if (preg_match('/\b[A-Z]{3,}\b/', $text)) {
+            $baseIntensity += 0.2;
+        }
+
+        // Multiple question marks
+        if (preg_match('/\?{2,}/', $text)) {
+            $baseIntensity += 0.15;
+        }
+
+        // Emotion-specific adjustments
+        $baseIntensity = match($emotion) {
+            'angry', 'fear' => $baseIntensity + 0.1,
+            'excited' => $baseIntensity + 0.15,
+            'neutral' => max(0.3, $baseIntensity - 0.2),
+            default => $baseIntensity,
+        };
+
+        return min(1.0, max(0.1, $baseIntensity));
+    }
+
+    /**
+     * Determine vocal qualities based on emotion and delivery.
+     */
+    protected function getVocalQualities(string $emotion, string $delivery): array
+    {
+        $qualities = [];
+
+        // Delivery-based qualities
+        switch ($delivery) {
+            case 'whisper':
+            case 'breathy':
+                $qualities[] = 'breathy';
+                break;
+            case 'tense':
+            case 'strained':
+                $qualities[] = 'tense';
+                break;
+            case 'trembling':
+                $qualities[] = 'trembling';
+                break;
+            case 'shout':
+                $qualities[] = 'strained';
+                break;
+        }
+
+        // Emotion-based qualities
+        switch ($emotion) {
+            case 'sad':
+                if (!in_array('breathy', $qualities)) {
+                    $qualities[] = 'nasal';
+                }
+                break;
+            case 'fear':
+                if (!in_array('trembling', $qualities)) {
+                    $qualities[] = 'tense';
+                }
+                break;
+            case 'angry':
+                if (!in_array('tense', $qualities)) {
+                    $qualities[] = 'tense';
+                }
+                break;
+            case 'tender':
+                $qualities[] = 'breathy';
+                break;
+        }
+
+        return array_unique($qualities);
     }
 }

@@ -65,12 +65,23 @@ class EdgeTtsDriver implements TtsDriverInterface
      * NO PITCH CHANGES - same speaker must sound like same person regardless of emotion!
      */
     protected array $emotionProsody = [
+        // Positive emotions
         'happy'    => ['rate' => '+5%',  'pitch' => '+0Hz', 'volume' => '+5%'],
         'excited'  => ['rate' => '+8%',  'pitch' => '+0Hz', 'volume' => '+8%'],
+        'tender'   => ['rate' => '-5%',  'pitch' => '+0Hz', 'volume' => '-10%'],
+
+        // Negative emotions
         'sad'      => ['rate' => '-8%',  'pitch' => '+0Hz', 'volume' => '-5%'],
         'angry'    => ['rate' => '+3%',  'pitch' => '+0Hz', 'volume' => '+10%'],
         'fear'     => ['rate' => '+5%',  'pitch' => '+0Hz', 'volume' => '-3%'],
+        'anxious'  => ['rate' => '+3%',  'pitch' => '+0Hz', 'volume' => '-3%'],
+        'contempt' => ['rate' => '-3%',  'pitch' => '+0Hz', 'volume' => '+3%'],
+        'disgusted'=> ['rate' => '-2%',  'pitch' => '+0Hz', 'volume' => '+0%'],
+
+        // Reactive emotions
         'surprise' => ['rate' => '+5%',  'pitch' => '+0Hz', 'volume' => '+5%'],
+
+        // Neutral
         'neutral'  => ['rate' => '+0%',  'pitch' => '+0Hz', 'volume' => '+0%'],
     ];
 
@@ -78,22 +89,41 @@ class EdgeTtsDriver implements TtsDriverInterface
      * Direction to prosody mapping for acting delivery styles.
      *
      * Direction = physical delivery style, NOT emotional state
-     * - whisper/soft: physical volume reduction
-     * - loud/shout: physical volume increase
-     * - sarcastic/playful/cold/warm: subtle rate changes only
+     * - whisper/soft/breathy: physical volume reduction, slower
+     * - loud/shout: physical volume increase, faster
+     * - tense/trembling/strained: controlled delivery
+     * - pleading: faster with desperation
+     * - matter_of_fact: flat, neutral delivery
      *
      * Again, NO significant pitch changes to maintain speaker identity!
      */
     protected array $directionProsody = [
-        'whisper'  => ['rate' => '-10%', 'pitch' => '+0Hz', 'volume' => '-35%'],
-        'soft'     => ['rate' => '-5%',  'pitch' => '+0Hz', 'volume' => '-15%'],
-        'normal'   => ['rate' => '+0%',  'pitch' => '+0Hz', 'volume' => '+0%'],
-        'loud'     => ['rate' => '+3%',  'pitch' => '+0Hz', 'volume' => '+15%'],
-        'shout'    => ['rate' => '+5%',  'pitch' => '+0Hz', 'volume' => '+25%'],
-        'sarcastic'=> ['rate' => '-3%',  'pitch' => '+0Hz', 'volume' => '+0%'],
-        'playful'  => ['rate' => '+5%',  'pitch' => '+0Hz', 'volume' => '+3%'],
-        'cold'     => ['rate' => '-5%',  'pitch' => '+0Hz', 'volume' => '-3%'],
-        'warm'     => ['rate' => '-3%',  'pitch' => '+0Hz', 'volume' => '+3%'],
+        // Soft deliveries
+        'whisper'       => ['rate' => '-10%', 'pitch' => '+0Hz', 'volume' => '-35%'],
+        'soft'          => ['rate' => '-5%',  'pitch' => '+0Hz', 'volume' => '-15%'],
+        'breathy'       => ['rate' => '-8%',  'pitch' => '+0Hz', 'volume' => '-20%'],
+
+        // Standard
+        'normal'        => ['rate' => '+0%',  'pitch' => '+0Hz', 'volume' => '+0%'],
+
+        // Loud deliveries
+        'loud'          => ['rate' => '+3%',  'pitch' => '+0Hz', 'volume' => '+15%'],
+        'shout'         => ['rate' => '+5%',  'pitch' => '+0Hz', 'volume' => '+25%'],
+
+        // Controlled/tense deliveries
+        'tense'         => ['rate' => '-3%',  'pitch' => '+0Hz', 'volume' => '+5%'],
+        'trembling'     => ['rate' => '-5%',  'pitch' => '+0Hz', 'volume' => '-5%'],
+        'strained'      => ['rate' => '-5%',  'pitch' => '+0Hz', 'volume' => '+8%'],
+
+        // Emotional deliveries
+        'pleading'      => ['rate' => '+5%',  'pitch' => '+0Hz', 'volume' => '-5%'],
+        'matter_of_fact'=> ['rate' => '-2%',  'pitch' => '+0Hz', 'volume' => '-3%'],
+
+        // Legacy mappings (for backwards compatibility)
+        'sarcastic'     => ['rate' => '-3%',  'pitch' => '+0Hz', 'volume' => '+0%'],
+        'playful'       => ['rate' => '+5%',  'pitch' => '+0Hz', 'volume' => '+3%'],
+        'cold'          => ['rate' => '-5%',  'pitch' => '+0Hz', 'volume' => '-3%'],
+        'warm'          => ['rate' => '-3%',  'pitch' => '+0Hz', 'volume' => '+3%'],
     ];
 
     public function name(): string

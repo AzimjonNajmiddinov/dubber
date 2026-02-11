@@ -18,6 +18,8 @@ class VideoSegment extends Model
         'tts_audio_path',
         'emotion',
         'direction',
+        'intent',
+        'acting_note',
         'tts_gain_db',
         'tts_lufs'
     ];
