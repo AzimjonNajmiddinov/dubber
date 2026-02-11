@@ -38,42 +38,45 @@ git pull --ff-only 2>/dev/null || git fetch && git reset --hard origin/main
 if [ "$SKIP_DEPS" = false ]; then
     echo "Checking and installing dependencies..."
 
+    # Use --ignore-installed to bypass distutils uninstall issues (e.g., blinker)
+    PIP_FLAGS="--ignore-installed --no-warn-script-location"
+
     # Check if uvicorn is installed
     if ! python -c "import uvicorn" 2>/dev/null; then
         echo "Installing uvicorn and fastapi..."
-        pip install uvicorn fastapi python-multipart aiofiles
+        pip install $PIP_FLAGS uvicorn fastapi python-multipart aiofiles
     fi
 
     # Check torch version and CUDA compatibility
     TORCH_VERSION=$(python -c "import torch; print(torch.__version__)" 2>/dev/null || echo "none")
     if [[ "$TORCH_VERSION" == "none" ]] || [[ ! "$TORCH_VERSION" == *"cu"* ]]; then
         echo "Installing PyTorch with CUDA support..."
-        pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+        pip install $PIP_FLAGS torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
     fi
 
     # Check transformers for WhisperX
     if ! python -c "from transformers import GPT2PreTrainedModel" 2>/dev/null; then
         echo "Installing transformers..."
-        pip install transformers==4.38.0
+        pip install $PIP_FLAGS transformers==4.38.0
     fi
 
     # Fix numpy/numba compatibility (required for WhisperX)
     NUMPY_VERSION=$(python -c "import numpy; print(numpy.__version__)" 2>/dev/null || echo "none")
     if [[ "$NUMPY_VERSION" == "2."* ]] || [[ "$NUMPY_VERSION" == "none" ]]; then
         echo "Fixing numpy/numba versions for compatibility..."
-        pip install numpy==1.26.4 numba==0.59.0 pandas==1.5.3
+        pip install $PIP_FLAGS numpy==1.26.4 numba==0.59.0 pandas==1.5.3
     fi
 
     # Install WhisperX dependencies
     if ! python -c "import whisperx" 2>/dev/null; then
         echo "Installing WhisperX..."
-        pip install whisperx
+        pip install $PIP_FLAGS whisperx
     fi
 
     # Install TTS for XTTS
     if ! python -c "from TTS.api import TTS" 2>/dev/null; then
         echo "Installing TTS (Coqui)..."
-        pip install TTS
+        pip install $PIP_FLAGS TTS
     fi
 
     echo "Dependencies OK"
