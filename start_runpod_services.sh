@@ -33,53 +33,57 @@ cd /workspace/dubber
 git pull --ff-only 2>/dev/null || git fetch && git reset --hard origin/main
 
 # ===========================================
-# INSTALL/FIX DEPENDENCIES (run once or after pod restart)
+# INSTALL/FIX DEPENDENCIES
 # ===========================================
 if [ "$SKIP_DEPS" = false ]; then
-    echo "Checking and installing dependencies..."
+    echo "Installing/fixing dependencies..."
 
     # Use --ignore-installed to bypass distutils uninstall issues (e.g., blinker)
-    PIP_FLAGS="--ignore-installed --no-warn-script-location"
+    PIP_FLAGS="--ignore-installed --no-warn-script-location -q"
 
-    # Check if uvicorn is installed
-    if ! python -c "import uvicorn" 2>/dev/null; then
-        echo "Installing uvicorn and fastapi..."
-        pip install $PIP_FLAGS uvicorn fastapi python-multipart aiofiles
-    fi
+    # Step 1: Core packages - uvicorn/fastapi
+    echo "  [1/6] Installing uvicorn/fastapi..."
+    pip install $PIP_FLAGS uvicorn fastapi python-multipart aiofiles
 
-    # Check torch version and CUDA compatibility
-    TORCH_VERSION=$(python -c "import torch; print(torch.__version__)" 2>/dev/null || echo "none")
-    if [[ "$TORCH_VERSION" == "none" ]] || [[ ! "$TORCH_VERSION" == *"cu"* ]]; then
-        echo "Installing PyTorch with CUDA support..."
-        pip install $PIP_FLAGS torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-    fi
+    # Step 2: PyTorch with CUDA 12.4 support (matching versions)
+    echo "  [2/6] Installing PyTorch 2.4.1 with CUDA 12.4..."
+    pip uninstall -y torch torchvision torchaudio 2>/dev/null || true
+    pip install $PIP_FLAGS torch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1 --index-url https://download.pytorch.org/whl/cu124
 
-    # Check transformers for WhisperX
-    if ! python -c "from transformers import GPT2PreTrainedModel" 2>/dev/null; then
-        echo "Installing transformers..."
-        pip install $PIP_FLAGS transformers==4.38.0
-    fi
+    # Step 3: NumPy/Pandas/SciPy compatible versions (critical for WhisperX)
+    echo "  [3/6] Installing numpy/pandas/scipy compatible versions..."
+    pip uninstall -y pandas scipy numpy 2>/dev/null || true
+    pip cache purge 2>/dev/null || true
+    pip install $PIP_FLAGS numpy==1.26.4
+    pip install pandas==1.5.3 scipy==1.11.4
 
-    # Fix numpy/numba compatibility (required for WhisperX)
-    NUMPY_VERSION=$(python -c "import numpy; print(numpy.__version__)" 2>/dev/null || echo "none")
-    if [[ "$NUMPY_VERSION" == "2."* ]] || [[ "$NUMPY_VERSION" == "none" ]]; then
-        echo "Fixing numpy/numba versions for compatibility..."
-        pip install $PIP_FLAGS numpy==1.26.4 numba==0.59.0 pandas==1.5.3
-    fi
+    # Step 4: HuggingFace/Transformers compatible versions
+    echo "  [4/6] Installing huggingface_hub/transformers..."
+    pip install $PIP_FLAGS huggingface_hub==0.21.4 transformers==4.38.0 tokenizers==0.15.2
 
-    # Install WhisperX dependencies
+    # Step 5: WhisperX dependencies
+    echo "  [5/6] Checking WhisperX..."
     if ! python -c "import whisperx" 2>/dev/null; then
-        echo "Installing WhisperX..."
         pip install $PIP_FLAGS whisperx
     fi
 
-    # Install TTS for XTTS
+    # Step 6: TTS (Coqui) for XTTS
+    echo "  [6/6] Checking TTS..."
     if ! python -c "from TTS.api import TTS" 2>/dev/null; then
-        echo "Installing TTS (Coqui)..."
         pip install $PIP_FLAGS TTS
     fi
 
-    echo "Dependencies OK"
+    echo "Dependencies installed!"
+
+    # Verify key packages
+    echo ""
+    echo "Package versions:"
+    python -c "import torch; print(f'  torch: {torch.__version__}')"
+    python -c "import numpy; print(f'  numpy: {numpy.__version__}')"
+    python -c "import pandas; print(f'  pandas: {pandas.__version__}')"
+    python -c "import scipy; print(f'  scipy: {scipy.__version__}')"
+    python -c "import transformers; print(f'  transformers: {transformers.__version__}')"
+    echo ""
 else
     echo "Skipping dependency check (--skip-deps)"
 fi
@@ -102,6 +106,17 @@ fi
 
 # HF token for WhisperX (set in RunPod secrets or env)
 export HF_TOKEN="${HF_TOKEN:-}"
+export DEVICE="cuda"
+
+# Verify HF_TOKEN is set
+if [ -z "$HF_TOKEN" ]; then
+    echo "WARNING: HF_TOKEN not set. WhisperX will fail!"
+    echo "Set it with: export HF_TOKEN='your_token'"
+fi
+
+# ===========================================
+# START SERVICES
+# ===========================================
 
 # Start Demucs on port 8000
 echo "Starting Demucs on port 8000..."
@@ -131,7 +146,7 @@ echo ""
 echo "=== Service Status ==="
 echo -n "Demucs (8000):   " && curl -s http://localhost:8000/health | python -c "import sys,json; d=json.load(sys.stdin); print(f'OK - GPU: {d.get(\"gpu_name\", \"N/A\")}')" 2>/dev/null || echo "Still loading..."
 echo -n "WhisperX (8002): " && curl -s http://localhost:8002/health | python -c "import sys,json; d=json.load(sys.stdin); print('OK' if d.get('ok') else 'Error')" 2>/dev/null || echo "Still loading..."
-echo -n "XTTS (8004):     " && curl -s http://localhost:8004/health | python -c "import sys,json; d=json.load(sys.stdin); print('OK' if d.get('ok') else 'Error')" 2>/dev/null || echo "Still loading..."
+echo -n "XTTS (8004):     " && curl -s http://localhost:8004/health | python -c "import sys,json; d=json.load(sys.stdin); print('OK' if d.get('status')=='healthy' else 'Error')" 2>/dev/null || echo "Still loading..."
 echo -n "Lipsync (8006):  " && curl -s http://localhost:8006/health | python -c "import sys,json; d=json.load(sys.stdin); print('OK' if d.get('ok') else 'Error')" 2>/dev/null || echo "Still loading..."
 
 echo ""
