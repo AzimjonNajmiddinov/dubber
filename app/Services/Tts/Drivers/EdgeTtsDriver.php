@@ -126,10 +126,13 @@ class EdgeTtsDriver implements TtsDriverInterface
         $directionProsody = $this->directionProsody[$direction] ?? $this->directionProsody['normal'];
 
         // Calculate slot-aware speaking rate
-        // Uzbek Edge TTS speaks at ~12 chars/sec at normal speed
+        // Uzbek Edge TTS ACTUAL speaking rate is ~10-11 chars/sec at normal speed
+        // (not 12 as previously assumed - Uzbek words are phonetically longer)
         $slotDuration = ((float) $segment->end_time) - ((float) $segment->start_time);
         $textLength = mb_strlen($text);
-        $normalCharsPerSec = 12.0;
+
+        // Use conservative estimate: 10 chars/sec for Uzbek, 11 for others
+        $normalCharsPerSec = ($language === 'uz' || $language === 'uzbek') ? 10.0 : 11.0;
 
         // IMPORTANT: Use NARROW rate range for CONSISTENT natural sound
         // Large rate variations sound robotic and unnatural
@@ -141,19 +144,21 @@ class EdgeTtsDriver implements TtsDriverInterface
 
             // Only adjust rate if significantly different from normal
             // Keep adjustments subtle for natural sound
-            if ($speedRatio > 1.15) {
-                // Need to speed up - but keep it gentle
-                $requiredRate = (int) round(min(($speedRatio - 1.0) * 100, 20));
+            // If translation followed 9 chars/sec budget, most segments won't need speedup
+            if ($speedRatio > 1.10) {
+                // Need to speed up - but keep it gentle (max +15%)
+                $requiredRate = (int) round(min(($speedRatio - 1.0) * 100, 15));
             } elseif ($speedRatio < 0.85) {
-                // Can slow down slightly for very short text
+                // Can slow down slightly for very short text (max -10%)
                 $requiredRate = (int) round(max(($speedRatio - 1.0) * 100, -10));
             }
 
             Log::debug('TTS rate calculation', [
                 'segment_id' => $segment->id,
                 'text_length' => $textLength,
-                'slot' => $slotDuration,
-                'chars_per_sec' => round($requiredCharsPerSec, 1),
+                'slot' => round($slotDuration, 2),
+                'expected_chars_per_sec' => $normalCharsPerSec,
+                'actual_chars_per_sec' => round($requiredCharsPerSec, 1),
                 'speed_ratio' => round($speedRatio, 2),
                 'rate_percent' => $requiredRate,
             ]);
@@ -164,9 +169,10 @@ class EdgeTtsDriver implements TtsDriverInterface
         $directionRate = (int) round($this->parsePercentage($directionProsody['rate']) * 0.5);
 
         // Final rate: NARROW range for consistent, natural speech
-        // -10% to +25% - anything beyond this sounds unnatural
-        // Post-processing atempo will handle remaining adjustment if needed
-        $finalRate = min(25, max(-10, $requiredRate + $emotionRate + $directionRate));
+        // -10% to +15% - very conservative to sound natural
+        // With 9 chars/sec translation budget, we rarely need speedup
+        // Post-processing atempo will handle any remaining adjustment (max 1.5x)
+        $finalRate = min(15, max(-10, $requiredRate + $emotionRate + $directionRate));
         $rate = $finalRate >= 0 ? "+{$finalRate}%" : "{$finalRate}%";
 
         // Calculate final pitch: profile + emotion + direction

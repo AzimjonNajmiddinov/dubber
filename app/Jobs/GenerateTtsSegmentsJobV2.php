@@ -361,15 +361,17 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
     }
 
     /**
-     * Fit TTS audio to the available time slot.
+     * Fit TTS audio to the available time slot using HYBRID strategy.
      *
-     * Strategy:
-     * - Edge TTS --rate parameter already handles speed adjustment
-     * - Here we only: strip silence, and trim if still too long
-     * - No slowdown (sounds unnatural)
-     * - No speedup (already done by Edge TTS)
+     * CRITICAL: NEVER cut or trim audio - sentences must ALWAYS be fully spoken!
      *
-     * @return array{duration_ratio: float, was_trimmed: bool, tempo_applied: float|null}
+     * Strategy (in order):
+     * 1. Strip only TRUE silence (very conservative threshold)
+     * 2. Apply gentle atempo speedup (max 1.5x) if needed
+     * 3. If still too long: signal for re-translation with shorter text
+     * 4. Ultimate fallback: allow overflow (better than cutting words)
+     *
+     * @return array{duration_ratio: float, was_trimmed: bool, tempo_applied: float|null, needs_retranslation: bool, final_duration: float}
      */
     protected function fitAudioToSlot(string $audioPath, float $slotDuration): array
     {
@@ -377,38 +379,30 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
             'duration_ratio' => 1.0,
             'was_trimmed' => false,
             'tempo_applied' => null,
+            'needs_retranslation' => false,
+            'final_duration' => 0,
         ];
 
         if ($slotDuration <= 0 || !file_exists($audioPath)) {
             return $result;
         }
 
-        // Step 1: Strip trailing silence (Edge TTS adds padding)
+        // Step 1: Strip ONLY true silence (very conservative -60dB threshold)
+        // This protects quiet speech endings from being cut
         $this->stripSilence($audioPath);
 
         // Probe actual TTS duration (after silence removal)
-        $probe = Process::timeout(15)->run([
-            'ffprobe', '-v', 'error',
-            '-show_entries', 'format=duration',
-            '-of', 'csv=p=0',
-            $audioPath,
-        ]);
-
-        if (!$probe->successful()) {
-            return $result;
-        }
-
-        $audioDuration = (float) trim($probe->output());
-
+        $audioDuration = $this->probeAudioDuration($audioPath);
         if ($audioDuration <= 0) {
             return $result;
         }
 
         $result['duration_ratio'] = $audioDuration / $slotDuration;
+        $result['final_duration'] = $audioDuration;
 
-        // If audio fits within slot (+5% tolerance), we're done
+        // CASE 1: Audio fits within slot (+5% tolerance) - perfect!
         if ($audioDuration <= $slotDuration * 1.05) {
-            Log::debug('TTS audio fits slot', [
+            Log::debug('TTS audio fits slot perfectly', [
                 'path' => basename($audioPath),
                 'audio' => round($audioDuration, 2),
                 'slot' => round($slotDuration, 2),
@@ -417,82 +411,98 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
             return $result;
         }
 
-        // Audio is too long - speed it up using atempo (NEVER trim - it cuts off words!)
-        // Calculate required speedup ratio
-        $speedupRatio = $audioDuration / $slotDuration;
+        $speedupNeeded = $audioDuration / $slotDuration;
 
-        // Use GENTLE speedup for natural sound (max 1.35x)
-        // If more speedup needed, the translation was too long
-        $maxSpeedup = 1.35;
-        $actualSpeedup = min($speedupRatio, $maxSpeedup);
+        // CASE 2: Minor overflow (5-20%) - gentle speedup
+        // CASE 3: Moderate overflow (20-50%) - moderate speedup
+        // CASE 4: Significant overflow (>50%) - max speedup + flag for review
+
+        // Use higher max speedup (1.5x) for better fitting
+        // 1.5x is still natural-sounding for most speech
+        $maxSpeedup = 1.50;
+        $actualSpeedup = min($speedupNeeded, $maxSpeedup);
 
         // Only apply speedup if actually needed (>5% overflow)
-        if ($speedupRatio < 1.05) {
-            return $result;
-        }
-
-        Log::info('TTS audio speedup applied', [
-            'path' => basename($audioPath),
-            'audio_duration' => round($audioDuration, 2),
-            'slot_duration' => round($slotDuration, 2),
-            'speedup_needed' => round($speedupRatio, 2),
-            'speedup_applied' => round($actualSpeedup, 2),
-            'overflow_ms' => round(($audioDuration - $slotDuration) * 1000),
-        ]);
-
-        // Warn if translation is too long (needed >1.35x speedup)
-        if ($speedupRatio > 1.35) {
-            Log::warning('Translation too long for slot - consider shorter text', [
+        if ($speedupNeeded > 1.05) {
+            Log::info('TTS applying tempo adjustment', [
                 'path' => basename($audioPath),
-                'needed_speedup' => round($speedupRatio, 2),
-                'max_applied' => $maxSpeedup,
+                'audio_duration' => round($audioDuration, 2),
+                'slot_duration' => round($slotDuration, 2),
+                'speedup_needed' => round($speedupNeeded, 2),
+                'speedup_applied' => round($actualSpeedup, 2),
+                'overflow_pct' => round(($speedupNeeded - 1.0) * 100) . '%',
             ]);
-        }
 
-        // Build atempo filter chain (each atempo supports 0.5-2.0)
-        $atempoChain = $this->buildAtempoChain($actualSpeedup);
-        $result['tempo_applied'] = $actualSpeedup;
+            // Apply tempo adjustment
+            $atempoChain = $this->buildAtempoChain($actualSpeedup);
+            $result['tempo_applied'] = $actualSpeedup;
 
-        if (empty($atempoChain)) {
-            return $result;
-        }
+            if (!empty($atempoChain)) {
+                $tmpPath = $audioPath . '.fitted.wav';
 
-        $tmpPath = $audioPath . '.fitted.wav';
-
-        $processResult = Process::timeout(30)->run([
-            'ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
-            '-i', $audioPath,
-            '-af', $atempoChain,
-            '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s16le',
-            $tmpPath,
-        ]);
-
-        if ($processResult->successful() && file_exists($tmpPath) && filesize($tmpPath) > 0) {
-            rename($tmpPath, $audioPath);
-
-            // Log final duration after speedup
-            $finalProbe = Process::timeout(10)->run([
-                'ffprobe', '-v', 'error',
-                '-show_entries', 'format=duration',
-                '-of', 'csv=p=0',
-                $audioPath,
-            ]);
-            if ($finalProbe->successful()) {
-                $finalDuration = (float) trim($finalProbe->output());
-                Log::debug('TTS audio after speedup', [
-                    'path' => basename($audioPath),
-                    'final_duration' => round($finalDuration, 2),
-                    'slot_duration' => round($slotDuration, 2),
+                $processResult = Process::timeout(30)->run([
+                    'ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
+                    '-i', $audioPath,
+                    '-af', $atempoChain,
+                    '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s16le',
+                    $tmpPath,
                 ]);
+
+                if ($processResult->successful() && file_exists($tmpPath) && filesize($tmpPath) > 0) {
+                    rename($tmpPath, $audioPath);
+
+                    // Update final duration after speedup
+                    $result['final_duration'] = $this->probeAudioDuration($audioPath);
+                    $result['duration_ratio'] = $result['final_duration'] / $slotDuration;
+
+                    Log::debug('TTS audio after tempo adjustment', [
+                        'path' => basename($audioPath),
+                        'final_duration' => round($result['final_duration'], 2),
+                        'slot_duration' => round($slotDuration, 2),
+                        'final_fill' => round($result['final_duration'] / $slotDuration * 100) . '%',
+                    ]);
+                } else {
+                    @unlink($tmpPath);
+                    Log::warning('TTS tempo adjustment failed, keeping original', [
+                        'path' => basename($audioPath),
+                    ]);
+                }
             }
-        } else {
-            @unlink($tmpPath);
-            Log::warning('TTS speedup failed, keeping original', [
+        }
+
+        // CASE 5: If after max speedup we're still >20% over, flag for potential re-translation
+        // But NEVER cut - allow overflow if necessary
+        if ($result['final_duration'] > $slotDuration * 1.20) {
+            $result['needs_retranslation'] = true;
+            Log::warning('TTS audio overflow - translation may be too long', [
                 'path' => basename($audioPath),
+                'final_duration' => round($result['final_duration'], 2),
+                'slot_duration' => round($slotDuration, 2),
+                'overflow_pct' => round(($result['final_duration'] / $slotDuration - 1.0) * 100) . '%',
+                'suggestion' => 'Consider re-translating with shorter character limit',
             ]);
         }
 
         return $result;
+    }
+
+    /**
+     * Probe audio file duration in seconds.
+     */
+    protected function probeAudioDuration(string $audioPath): float
+    {
+        $probe = Process::timeout(15)->run([
+            'ffprobe', '-v', 'error',
+            '-show_entries', 'format=duration',
+            '-of', 'csv=p=0',
+            $audioPath,
+        ]);
+
+        if (!$probe->successful()) {
+            return 0;
+        }
+
+        return (float) trim($probe->output());
     }
 
     /**
@@ -518,21 +528,24 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
     }
 
     /**
-     * Strip leading and trailing silence from TTS audio.
+     * Strip ONLY true silence from TTS audio - very conservative!
+     *
      * Edge TTS often pads output with several seconds of silence.
-     * IMPORTANT: Use conservative settings to avoid cutting off speech!
+     * CRITICAL: Use very conservative threshold to NEVER cut actual speech!
+     * It's better to keep extra silence than to cut word endings.
      */
     protected function stripSilence(string $audioPath): void
     {
         $tmpPath = $audioPath . '.trimmed.wav';
 
-        // silenceremove: strip leading silence, then reverse+strip trailing silence
-        // -55dB threshold is conservative - only removes actual silence, not quiet speech
-        // start_duration=0.1 requires 100ms of silence before cutting (protects word endings)
+        // VERY CONSERVATIVE settings:
+        // -60dB threshold: only removes absolute silence, protects quiet speech
+        // 0.15s duration: requires 150ms of silence before cutting (protects word endings)
+        // This is safer than cutting words
         $result = Process::timeout(15)->run([
             'ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
             '-i', $audioPath,
-            '-af', 'silenceremove=start_periods=1:start_threshold=-55dB:start_duration=0.1,areverse,silenceremove=start_periods=1:start_threshold=-55dB:start_duration=0.1,areverse',
+            '-af', 'silenceremove=start_periods=1:start_threshold=-60dB:start_duration=0.15,areverse,silenceremove=start_periods=1:start_threshold=-60dB:start_duration=0.15,areverse',
             '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s16le',
             $tmpPath,
         ]);
@@ -540,23 +553,29 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
         if ($result->successful() && file_exists($tmpPath) && filesize($tmpPath) > 1000) {
             $origSize = filesize($audioPath);
             $newSize = filesize($tmpPath);
+            $origDuration = $this->probeAudioDuration($audioPath);
+            $newDuration = $this->probeAudioDuration($tmpPath);
 
-            // Only accept if we didn't remove too much (max 50% reduction)
-            // If more than 50% was "silence", something is wrong - keep original
-            $reductionPct = (1 - $newSize / $origSize) * 100;
-            if ($newSize < $origSize && $reductionPct <= 50) {
-                Log::info('Stripped silence from TTS audio', [
-                    'path' => $audioPath,
-                    'original_size' => $origSize,
-                    'trimmed_size' => $newSize,
-                    'reduced_pct' => round($reductionPct, 1),
+            // Safety checks - NEVER accept if we removed too much
+            // Max 40% size reduction (silence should never be >40% of audio)
+            // Max 40% duration reduction
+            $sizeReductionPct = (1 - $newSize / $origSize) * 100;
+            $durationReductionPct = $origDuration > 0 ? (1 - $newDuration / $origDuration) * 100 : 0;
+
+            if ($sizeReductionPct <= 40 && $durationReductionPct <= 40 && $newDuration > 0.1) {
+                Log::debug('Stripped silence from TTS audio', [
+                    'path' => basename($audioPath),
+                    'orig_duration' => round($origDuration, 2),
+                    'new_duration' => round($newDuration, 2),
+                    'removed_sec' => round($origDuration - $newDuration, 2),
                 ]);
                 rename($tmpPath, $audioPath);
                 return;
             } else {
-                Log::warning('Silence removal skipped - would remove too much audio', [
-                    'path' => $audioPath,
-                    'reduction_pct' => round($reductionPct, 1),
+                Log::warning('Silence removal rejected - would remove too much', [
+                    'path' => basename($audioPath),
+                    'size_reduction_pct' => round($sizeReductionPct, 1),
+                    'duration_reduction_pct' => round($durationReductionPct, 1),
                 ]);
             }
         }

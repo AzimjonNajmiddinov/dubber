@@ -328,13 +328,19 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
             }
         }
 
-        // Time-aware character budget
-        // Uzbek TTS speaks ~12 chars/sec at normal speed
-        // Use 11 chars/sec as STRICT budget to ensure natural pacing
-        // Better to have slightly short translations than rushed speech
+        // Time-aware character budget - CONSERVATIVE for natural pacing
+        // Uzbek TTS speaks at ~10-12 chars/sec depending on word complexity
+        // Use 9 chars/sec as STRICT budget to ensure:
+        // 1. Natural, unhurried speech
+        // 2. Room for TTS variation
+        // 3. No need for aggressive post-processing speedup
+        // Better to have slightly short translations than rushed/cut speech!
         $budgetRule = '';
+        $isUzbek = str_contains($targetLanguage, 'Uzbek') || str_contains($targetLanguage, 'uz');
+        $charsPerSec = $isUzbek ? 9 : 10; // More conservative for Uzbek
+
         if ($slotDuration > 0) {
-            $maxChars = max(4, (int) floor($slotDuration * 11));
+            $maxChars = max(4, (int) floor($slotDuration * $charsPerSec));
 
             if ($slotDuration < 1.0) {
                 $budgetRule = "8. CRITICAL: Only {$slotDuration}s! MAX {$maxChars} chars. Use 1-2 words only.\n";
