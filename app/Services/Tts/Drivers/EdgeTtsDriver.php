@@ -51,33 +51,49 @@ class EdgeTtsDriver implements TtsDriverInterface
 
     /**
      * Emotion to prosody mapping for expressive speech.
-     * IMPORTANT: Keep pitch changes minimal (±3Hz) to maintain voice consistency.
-     * Large pitch swings make same speaker sound like different people.
+     *
+     * CRITICAL FOR VOICE CONSISTENCY:
+     * - Pitch defines WHO is speaking (speaker identity) - DO NOT change for emotions!
+     * - Rate and Volume define HOW they feel (emotion) - these CAN change
+     *
+     * Emotions are expressed through:
+     * 1. Speaking rate (faster = excited/angry, slower = sad/thoughtful)
+     * 2. Volume (louder = confident/angry, softer = sad/intimate)
+     * 3. Pauses/breaks (handled in SsmlBuilder)
+     * 4. Emphasis patterns (handled in SsmlBuilder)
+     *
+     * NO PITCH CHANGES - same speaker must sound like same person regardless of emotion!
      */
     protected array $emotionProsody = [
-        'happy' => ['rate' => '+5%', 'pitch' => '+2Hz', 'volume' => '+3%'],
-        'excited' => ['rate' => '+8%', 'pitch' => '+3Hz', 'volume' => '+5%'],
-        'sad' => ['rate' => '-5%', 'pitch' => '-2Hz', 'volume' => '-3%'],
-        'angry' => ['rate' => '+5%', 'pitch' => '+1Hz', 'volume' => '+5%'],
-        'fear' => ['rate' => '+8%', 'pitch' => '+2Hz', 'volume' => '-3%'],
-        'surprise' => ['rate' => '+3%', 'pitch' => '+3Hz', 'volume' => '+3%'],
-        'neutral' => ['rate' => '+0%', 'pitch' => '+0Hz', 'volume' => '+0%'],
+        'happy'    => ['rate' => '+5%',  'pitch' => '+0Hz', 'volume' => '+5%'],
+        'excited'  => ['rate' => '+8%',  'pitch' => '+0Hz', 'volume' => '+8%'],
+        'sad'      => ['rate' => '-8%',  'pitch' => '+0Hz', 'volume' => '-5%'],
+        'angry'    => ['rate' => '+3%',  'pitch' => '+0Hz', 'volume' => '+10%'],
+        'fear'     => ['rate' => '+5%',  'pitch' => '+0Hz', 'volume' => '-3%'],
+        'surprise' => ['rate' => '+5%',  'pitch' => '+0Hz', 'volume' => '+5%'],
+        'neutral'  => ['rate' => '+0%',  'pitch' => '+0Hz', 'volume' => '+0%'],
     ];
 
     /**
      * Direction to prosody mapping for acting delivery styles.
-     * These adjust rate, pitch, and volume to match how the line should be delivered.
+     *
+     * Direction = physical delivery style, NOT emotional state
+     * - whisper/soft: physical volume reduction
+     * - loud/shout: physical volume increase
+     * - sarcastic/playful/cold/warm: subtle rate changes only
+     *
+     * Again, NO significant pitch changes to maintain speaker identity!
      */
     protected array $directionProsody = [
-        'whisper' => ['rate' => '-15%', 'pitch' => '-3Hz', 'volume' => '-30%'],
-        'soft' => ['rate' => '-8%', 'pitch' => '-2Hz', 'volume' => '-15%'],
-        'normal' => ['rate' => '+0%', 'pitch' => '+0Hz', 'volume' => '+0%'],
-        'loud' => ['rate' => '+5%', 'pitch' => '+2Hz', 'volume' => '+15%'],
-        'shout' => ['rate' => '+10%', 'pitch' => '+5Hz', 'volume' => '+30%'],
-        'sarcastic' => ['rate' => '-5%', 'pitch' => '+0Hz', 'volume' => '+0%'],
-        'playful' => ['rate' => '+8%', 'pitch' => '+3Hz', 'volume' => '+5%'],
-        'cold' => ['rate' => '-3%', 'pitch' => '-1Hz', 'volume' => '-5%'],
-        'warm' => ['rate' => '-5%', 'pitch' => '+1Hz', 'volume' => '+0%'],
+        'whisper'  => ['rate' => '-10%', 'pitch' => '+0Hz', 'volume' => '-35%'],
+        'soft'     => ['rate' => '-5%',  'pitch' => '+0Hz', 'volume' => '-15%'],
+        'normal'   => ['rate' => '+0%',  'pitch' => '+0Hz', 'volume' => '+0%'],
+        'loud'     => ['rate' => '+3%',  'pitch' => '+0Hz', 'volume' => '+15%'],
+        'shout'    => ['rate' => '+5%',  'pitch' => '+0Hz', 'volume' => '+25%'],
+        'sarcastic'=> ['rate' => '-3%',  'pitch' => '+0Hz', 'volume' => '+0%'],
+        'playful'  => ['rate' => '+5%',  'pitch' => '+0Hz', 'volume' => '+3%'],
+        'cold'     => ['rate' => '-5%',  'pitch' => '+0Hz', 'volume' => '-3%'],
+        'warm'     => ['rate' => '-3%',  'pitch' => '+0Hz', 'volume' => '+3%'],
     ];
 
     public function name(): string
@@ -175,15 +191,23 @@ class EdgeTtsDriver implements TtsDriverInterface
         $finalRate = min(15, max(-10, $requiredRate + $emotionRate + $directionRate));
         $rate = $finalRate >= 0 ? "+{$finalRate}%" : "{$finalRate}%";
 
-        // Calculate final pitch: profile + emotion + direction
+        // PITCH = SPEAKER IDENTITY ONLY
+        // Pitch comes ONLY from speaker profile - this is what makes each speaker unique
+        // Emotions/directions do NOT change pitch - they use rate/volume instead
+        // This ensures the same speaker sounds consistent across all emotional states
         $profilePitch = $profile['pitch_offset'];
-        $emotionPitch = $this->parseHz($emotionProsody['pitch']);
-        $directionPitch = $this->parseHz($directionProsody['pitch']);
-        $finalPitch = $profilePitch + $emotionPitch + $directionPitch;
-        $pitch = $finalPitch >= 0 ? "+{$finalPitch}Hz" : "{$finalPitch}Hz";
+        $pitch = $profilePitch >= 0 ? "+{$profilePitch}Hz" : "{$profilePitch}Hz";
 
-        // Calculate volume adjustment from direction (stored for post-processing)
+        // Calculate combined volume adjustment from emotion + direction
+        // Emotion volume: expresses feelings (louder when angry, softer when sad)
+        // Direction volume: physical delivery (whisper, shout, etc.)
+        $emotionVolume = $this->parsePercentage($emotionProsody['volume']);
         $directionVolume = $this->parsePercentage($directionProsody['volume']);
+        $totalVolumePercent = $emotionVolume + $directionVolume;
+
+        // Build volume string for SSML (clamped to reasonable range)
+        $volumePercent = max(-50, min(50, $totalVolumePercent));
+        $volume = $volumePercent >= 0 ? "+{$volumePercent}%" : "{$volumePercent}%";
 
         $videoId = $segment->video_id;
         $segmentId = $segment->id;
@@ -205,10 +229,11 @@ class EdgeTtsDriver implements TtsDriverInterface
 
         if ($useSsml) {
             // SSML mode: per-sentence prosody control with breaks and intonation
+            // Volume is included for emotional expression (pitch stays constant per speaker)
             $locale = SsmlBuilder::languageToLocale($language);
             $ssml = SsmlBuilder::fromTextWithEmotion(
                 $text, $voice, $emotion,
-                ['rate' => $rate, 'pitch' => $pitch],
+                ['rate' => $rate, 'pitch' => $pitch, 'volume' => $volume],
                 $locale
             );
             $tmpFile .= '.xml';
@@ -259,10 +284,11 @@ class EdgeTtsDriver implements TtsDriverInterface
             throw new RuntimeException("Edge TTS synthesis failed for segment {$segmentId}");
         }
 
-        // Convert to normalized WAV and fit to time slot if needed
+        // Convert to normalized WAV
+        // Note: volume is already applied via SSML prosody, so no additional volume adjustment needed
         $slotDuration = (float) $segment->end_time - (float) $segment->start_time;
         $normalizeOptions = $options;
-        $normalizeOptions['direction_volume_percent'] = $directionVolume;
+        $normalizeOptions['direction_volume_percent'] = 0; // Volume already in SSML
         $this->normalizeAudio($rawMp3, $outputWav, $normalizeOptions, $slotDuration);
         @unlink($rawMp3);
 

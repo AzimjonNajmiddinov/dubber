@@ -20,6 +20,9 @@ class SsmlBuilder
 
     /**
      * Add text with prosody attributes (rate, pitch, volume).
+     *
+     * Note: pitch should only come from speaker profile, NOT from emotions.
+     * Emotions are expressed through rate, volume, emphasis, and pauses.
      */
     public function addProsody(string $text, array $prosody = []): self
     {
@@ -37,6 +40,17 @@ class SsmlBuilder
             $this->elements[] = "<prosody {$attrStr}>{$escaped}</prosody>";
         }
 
+        return $this;
+    }
+
+    /**
+     * Add text with emphasis for emotional expression.
+     * Level: strong, moderate, reduced, none
+     */
+    public function addEmphasis(string $text, string $level = 'moderate'): self
+    {
+        $escaped = htmlspecialchars($text, ENT_XML1, 'UTF-8');
+        $this->elements[] = "<emphasis level=\"{$level}\">{$escaped}</emphasis>";
         return $this;
     }
 
@@ -121,24 +135,29 @@ class SsmlBuilder
 
     /**
      * Adjust prosody for individual sentence characteristics.
+     *
+     * IMPORTANT: Do NOT change pitch - it defines speaker identity!
+     * Express sentence types through rate and volume only.
+     * Edge TTS naturally handles question intonation from punctuation.
      */
     private static function adjustProsodyForSentence(string $sentence, array $prosody, string $emotion): array
     {
         $adjusted = $prosody;
         $trimmed = rtrim($sentence);
 
-        // Exclamatory sentences: boost pitch and rate slightly
+        // Exclamatory sentences: slightly faster, louder (NO pitch change)
         if (str_ends_with($trimmed, '!')) {
-            $adjusted['pitch'] = self::adjustHz($adjusted['pitch'] ?? '+0Hz', 5);
             $adjusted['rate'] = self::adjustPercent($adjusted['rate'] ?? '+0%', 3);
+            $adjusted['volume'] = self::adjustPercent($adjusted['volume'] ?? '+0%', 5);
         }
 
-        // Questions: rise pitch for natural intonation
+        // Questions: Edge TTS auto-handles intonation from "?" punctuation
+        // Just slightly slower for natural questioning rhythm
         if (str_ends_with($trimmed, '?')) {
-            $adjusted['pitch'] = self::adjustHz($adjusted['pitch'] ?? '+0Hz', 8);
+            $adjusted['rate'] = self::adjustPercent($adjusted['rate'] ?? '+0%', -2);
         }
 
-        // Ellipsis: slow down slightly for dramatic effect
+        // Ellipsis: slow down for dramatic/thoughtful effect
         if (str_contains($sentence, '...') || str_contains($sentence, '…')) {
             $adjusted['rate'] = self::adjustPercent($adjusted['rate'] ?? '+0%', -5);
         }
