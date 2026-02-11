@@ -1,8 +1,23 @@
 #!/bin/bash
-# Start GPU services on RunPod (assumes setup already done)
+# Start GPU services on RunPod
 # Runs Demucs, WhisperX, XTTS, and Lipsync on GPU
+#
+# Usage:
+#   ./start_runpod_services.sh           # Full start with dependency check
+#   ./start_runpod_services.sh --skip-deps  # Skip dependency installation
+#   ./start_runpod_services.sh --deps-only  # Only install dependencies, don't start services
 
 set -e
+
+SKIP_DEPS=false
+DEPS_ONLY=false
+
+for arg in "$@"; do
+    case $arg in
+        --skip-deps) SKIP_DEPS=true ;;
+        --deps-only) DEPS_ONLY=true ;;
+    esac
+done
 
 echo "=== Starting RunPod GPU Services ==="
 
@@ -17,13 +32,72 @@ sleep 2
 cd /workspace/dubber
 git pull --ff-only 2>/dev/null || git fetch && git reset --hard origin/main
 
+# ===========================================
+# INSTALL/FIX DEPENDENCIES (run once or after pod restart)
+# ===========================================
+if [ "$SKIP_DEPS" = false ]; then
+    echo "Checking and installing dependencies..."
+
+    # Check if uvicorn is installed
+    if ! python -c "import uvicorn" 2>/dev/null; then
+        echo "Installing uvicorn and fastapi..."
+        pip install uvicorn fastapi python-multipart aiofiles
+    fi
+
+    # Check torch version and CUDA compatibility
+    TORCH_VERSION=$(python -c "import torch; print(torch.__version__)" 2>/dev/null || echo "none")
+    if [[ "$TORCH_VERSION" == "none" ]] || [[ ! "$TORCH_VERSION" == *"cu"* ]]; then
+        echo "Installing PyTorch with CUDA support..."
+        pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+    fi
+
+    # Check transformers for WhisperX
+    if ! python -c "from transformers import GPT2PreTrainedModel" 2>/dev/null; then
+        echo "Installing transformers..."
+        pip install transformers==4.38.0
+    fi
+
+    # Fix numpy/numba compatibility (required for WhisperX)
+    NUMPY_VERSION=$(python -c "import numpy; print(numpy.__version__)" 2>/dev/null || echo "none")
+    if [[ "$NUMPY_VERSION" == "2."* ]] || [[ "$NUMPY_VERSION" == "none" ]]; then
+        echo "Fixing numpy/numba versions for compatibility..."
+        pip install numpy==1.26.4 numba==0.59.0 pandas==1.5.3
+    fi
+
+    # Install WhisperX dependencies
+    if ! python -c "import whisperx" 2>/dev/null; then
+        echo "Installing WhisperX..."
+        pip install whisperx
+    fi
+
+    # Install TTS for XTTS
+    if ! python -c "from TTS.api import TTS" 2>/dev/null; then
+        echo "Installing TTS (Coqui)..."
+        pip install TTS
+    fi
+
+    echo "Dependencies OK"
+else
+    echo "Skipping dependency check (--skip-deps)"
+fi
+
+# Exit early if only installing dependencies
+if [ "$DEPS_ONLY" = true ]; then
+    echo "Dependencies installed. Exiting (--deps-only mode)."
+    exit 0
+fi
+
+# ===========================================
+# ENVIRONMENT SETUP
+# ===========================================
+
 # Ensure cuDNN libraries are on the path
 CUDNN_PATH=$(python -c "import nvidia.cudnn; print(nvidia.cudnn.__path__[0] + '/lib')" 2>/dev/null || true)
 if [ -n "$CUDNN_PATH" ]; then
     export LD_LIBRARY_PATH="${CUDNN_PATH}:${LD_LIBRARY_PATH}"
 fi
 
-# HF token for WhisperX
+# HF token for WhisperX (set in RunPod secrets or env)
 export HF_TOKEN="${HF_TOKEN:-}"
 
 # Start Demucs on port 8000
