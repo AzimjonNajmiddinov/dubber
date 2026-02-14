@@ -45,8 +45,9 @@ if [ "$SKIP_DEPS" = false ]; then
     pip uninstall -y torch torchvision torchaudio 2>/dev/null || true
 
     # Step 2: Fix numpy (system install lacks RECORD file, blocking upgrades)
+    # --ignore-installed skips uninstall (which fails without RECORD) and installs over it
     echo "  [2/7] Fixing numpy..."
-    pip install $PIP_FLAGS --force-reinstall --no-deps numpy==2.3.0
+    pip install $PIP_FLAGS --ignore-installed --no-deps numpy==2.3.0
 
     # Step 3: PyTorch 2.8.0 with CUDA 12.6 (pinned to match whisperx ~=2.8.0)
     echo "  [3/7] Installing PyTorch 2.8.0 with CUDA 12.6..."
