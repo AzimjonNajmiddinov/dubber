@@ -44,10 +44,12 @@ if [ "$SKIP_DEPS" = false ]; then
     echo "  [1/7] Cleaning up old packages..."
     pip uninstall -y torch torchvision torchaudio 2>/dev/null || true
 
-    # Step 2: Fix system packages that lack RECORD files (blocking upgrades)
-    # --ignore-installed skips uninstall (which fails without RECORD) and installs over them
+    # Step 2: Remove system packages that lack RECORD files (pip can't uninstall them)
+    # then reinstall compatible versions fresh
     echo "  [2/7] Fixing system packages (numpy/pandas/scipy)..."
-    pip install $PIP_FLAGS --ignore-installed --no-deps numpy==2.3.0 "pandas>=2.2.3,<3" "scipy>=1.12"
+    rm -rf /usr/local/lib/python3.11/dist-packages/{numpy,pandas,scipy}* 2>/dev/null || true
+    rm -rf /usr/lib/python3/dist-packages/{numpy,pandas,scipy}* 2>/dev/null || true
+    pip install $PIP_FLAGS numpy==2.3.0 "pandas>=2.2.3,<3" "scipy>=1.12"
 
     # Step 3: PyTorch 2.8.0 with CUDA 12.6 (pinned to match whisperx ~=2.8.0)
     echo "  [3/7] Installing PyTorch 2.8.0 with CUDA 12.6..."
