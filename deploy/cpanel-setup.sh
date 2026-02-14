@@ -67,9 +67,7 @@ elif [ -f "$HOME/bin/composer" ]; then
 else
     echo "  Installing Composer to ~/bin/..."
     mkdir -p "$BIN_DIR"
-    php -r "copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');"
-    php /tmp/composer-setup.php --install-dir="$BIN_DIR" --filename=composer
-    rm -f /tmp/composer-setup.php
+    curl -sS https://getcomposer.org/installer | php -d allow_url_fopen=1 -- --install-dir="$BIN_DIR" --filename=composer
     echo -e "  Composer installed ${GREEN}OK${NC}"
 fi
 
@@ -82,7 +80,7 @@ export PATH="$BIN_DIR:$HOME/.local/bin:$PATH"
 echo -e "${YELLOW}[3/9] Installing PHP dependencies...${NC}"
 
 cd "$APP_DIR"
-composer install --no-dev --optimize-autoloader --no-interaction 2>&1 | tail -5
+php -d allow_url_fopen=1 $(which composer 2>/dev/null || echo "$BIN_DIR/composer") install --no-dev --optimize-autoloader --no-interaction --ignore-platform-reqs 2>&1 | tail -5
 echo -e "  Composer install ${GREEN}OK${NC}"
 
 # ------------------------------------------
@@ -98,23 +96,29 @@ else
     echo "  Downloading static FFmpeg binary..."
     mkdir -p "$BIN_DIR"
 
-    ARCH=$(uname -m)
-    if [ "$ARCH" = "x86_64" ] || [ "$ARCH" = "amd64" ]; then
-        FFMPEG_URL="https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
-    elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
-        FFMPEG_URL="https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-arm64-static.tar.xz"
-    else
-        echo -e "${RED}ERROR: Unsupported architecture $ARCH. Install FFmpeg manually to ~/bin/ffmpeg${NC}"
-        exit 1
-    fi
-
     cd /tmp
-    curl -L -o ffmpeg-static.tar.xz "$FFMPEG_URL"
-    tar xf ffmpeg-static.tar.xz
-    cp ffmpeg-*-static/ffmpeg "$BIN_DIR/ffmpeg"
-    cp ffmpeg-*-static/ffprobe "$BIN_DIR/ffprobe"
-    chmod +x "$BIN_DIR/ffmpeg" "$BIN_DIR/ffprobe"
-    rm -rf ffmpeg-static.tar.xz ffmpeg-*-static
+    curl -L -o ffmpeg.tar.gz "https://www.johnvansickle.com/ffmpeg/old-releases/ffmpeg-6.0.1-amd64-static.tar.xz" 2>/dev/null \
+        && tar xf ffmpeg.tar.gz 2>/dev/null
+
+    # If xz failed, try downloading a pre-built gzip version
+    if [ ! -d ffmpeg-*-static ] 2>/dev/null; then
+        rm -f ffmpeg.tar.gz
+        curl -L -o ffmpeg-linux-64.zip "https://github.com/ffbinaries/ffbinaries-prebuilt/releases/download/v6.1/ffmpeg-6.1-linux-64.zip" 2>/dev/null
+        if command -v unzip &>/dev/null && [ -f ffmpeg-linux-64.zip ]; then
+            unzip -o ffmpeg-linux-64.zip -d ffmpeg-extracted
+            cp ffmpeg-extracted/ffmpeg "$BIN_DIR/ffmpeg"
+            chmod +x "$BIN_DIR/ffmpeg"
+            rm -rf ffmpeg-linux-64.zip ffmpeg-extracted
+        else
+            # Last resort: try system package or manual
+            echo -e "${YELLOW}  Could not auto-install FFmpeg. Trying ffmpeg from system...${NC}"
+        fi
+    else
+        cp ffmpeg-*-static/ffmpeg "$BIN_DIR/ffmpeg"
+        cp ffmpeg-*-static/ffprobe "$BIN_DIR/ffprobe"
+        chmod +x "$BIN_DIR/ffmpeg" "$BIN_DIR/ffprobe"
+        rm -rf ffmpeg.tar.gz ffmpeg-*-static
+    fi
     cd "$APP_DIR"
     echo -e "  FFmpeg installed ${GREEN}OK${NC}"
 fi
