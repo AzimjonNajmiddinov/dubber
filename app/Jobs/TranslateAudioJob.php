@@ -150,18 +150,19 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
                     ];
 
                     // Add few-shot examples with enhanced emotion, delivery, intent detection
+                    // IMPORTANT: Use Unicode ʻ (U+02BB) for Uzbek oʻ and gʻ
                     if (str_contains($targetLanguage, 'Uzbek') || str_contains($targetLanguage, 'uz')) {
                         $messages[] = ['role' => 'user', 'content' => 'Ask.'];
-                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"So\'ra.","e":"neutral","d":"normal","i":"command","n":"simple command"}'];
+                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Soʻra.","e":"neutral","d":"normal","i":"command","n":"simple command"}'];
 
                         $messages[] = ['role' => 'user', 'content' => 'I can\'t believe this!'];
                         $messages[] = ['role' => 'assistant', 'content' => '{"t":"Bunga ishonolmayman!","e":"surprise","d":"loud","i":"inform","n":"shocked, disbelief"}'];
 
                         $messages[] = ['role' => 'user', 'content' => 'Get out of here right now!'];
-                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Hoziroq yo\'qol bu yerdan!","e":"angry","d":"shout","i":"command","n":"furious, commanding"}'];
+                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Hoziroq yoʻqol bu yerdan!","e":"angry","d":"shout","i":"command","n":"furious, commanding"}'];
 
                         $messages[] = ['role' => 'user', 'content' => 'I miss you so much...'];
-                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Seni juda sog\'indim...","e":"sad","d":"soft","i":"confide","n":"tender, vulnerable"}'];
+                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Seni juda sogʻindim...","e":"sad","d":"soft","i":"confide","n":"tender, vulnerable"}'];
 
                         $messages[] = ['role' => 'user', 'content' => 'This is amazing! I love it!'];
                         $messages[] = ['role' => 'assistant', 'content' => '{"t":"Bu ajoyib! Menga yoqdi!","e":"excited","d":"loud","i":"celebrate","n":"joyful, enthusiastic"}'];
@@ -170,7 +171,7 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
                         $messages[] = ['role' => 'assistant', 'content' => '{"t":"Hech kimga aytma, lekin...","e":"neutral","d":"whisper","i":"confide","n":"secretive, intimate"}'];
 
                         $messages[] = ['role' => 'user', 'content' => 'Oh, you think you\'re so smart, don\'t you?'];
-                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Oh, o\'zingni aqlli deb o\'ylaysan, shundaymi?","e":"contempt","d":"matter_of_fact","i":"mock","n":"sarcastic, condescending"}'];
+                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Oh, oʻzingni aqlli deb oʻylaysan, shundaymi?","e":"contempt","d":"matter_of_fact","i":"mock","n":"sarcastic, condescending"}'];
 
                         $messages[] = ['role' => 'user', 'content' => 'Please, I\'m begging you, don\'t do this!'];
                         $messages[] = ['role' => 'assistant', 'content' => '{"t":"Iltimos, yolvoraman, bunday qilma!","e":"fear","d":"pleading","i":"plead","n":"desperate, trembling"}'];
@@ -179,10 +180,13 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
                         $messages[] = ['role' => 'assistant', 'content' => '{"t":"Men nimaga qodirligimni bilmaysan.","e":"angry","d":"tense","i":"threaten","n":"cold, menacing"}'];
 
                         $messages[] = ['role' => 'user', 'content' => 'Everything will be okay, I promise.'];
-                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Hammasi yaxshi bo\'ladi, va\'da beraman.","e":"tender","d":"soft","i":"comfort","n":"warm, reassuring"}'];
+                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Hammasi yaxshi boʻladi, vaʻda beraman.","e":"tender","d":"soft","i":"comfort","n":"warm, reassuring"}'];
 
                         $messages[] = ['role' => 'user', 'content' => 'We did it! We actually did it!'];
                         $messages[] = ['role' => 'assistant', 'content' => '{"t":"Uddaladik! Haqiqatan ham uddaladik!","e":"excited","d":"loud","i":"celebrate","n":"ecstatic, triumphant"}'];
+
+                        $messages[] = ['role' => 'user', 'content' => 'There is no paper with my goals written.'];
+                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Maqsadlarim yozilgan qogʻoz yoʻq.","e":"neutral","d":"normal","i":"inform","n":"matter of fact"}'];
                     }
 
                     $messages[] = ['role' => 'user', 'content' => $src];
@@ -345,7 +349,7 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
                 ]);
 
                 $seg->update([
-                    'translated_text' => $translated,
+                    'translated_text' => $this->normalizeUzbekApostrophes($translated),
                     'emotion' => $emotion,
                     'direction' => $direction,
                     'intent' => $detectedIntent ?? 'inform',
@@ -447,27 +451,28 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
         $examples = '';
         if (str_contains($targetLanguage, 'Uzbek') || str_contains($targetLanguage, 'uz')) {
             $examples =
-                "\n### MUHIM: O'ZBEK TARJIMA QOIDALARI ###\n\n" .
-                "IMLO QOIDALARI - o' va g' harflarini TO'G'RI yozing:\n" .
-                "- o' = o + apostrof (so'ra, to'rt, o'n, bo'ldi)\n" .
-                "- g' = g + apostrof (g'alati, bog'liq, to'g'ri, g'udurla)\n" .
-                "- XATO: og, tog, bog → TO'G'RI: o'g', to'g', bo'g'\n\n" .
-                "FE'L SHAKLLARI - FAQAT NORASMIY \"SEN\" ISHLATILSIN:\n" .
-                "- \"Ask\" = \"So'ra\" (XATO: \"So'rang\")\n" .
+                "\n### MUHIM: OʻZBEK TARJIMA QOIDALARI ###\n\n" .
+                "IMLO QOIDALARI - oʻ va gʻ harflarini TOʻGʻRI yozing:\n" .
+                "- oʻ = o + ʻ (ALWAYS use: soʻra, toʻrt, oʻn, boʻldi, yoʻq, koʻp)\n" .
+                "- gʻ = g + ʻ (ALWAYS use: gʻalati, bogʻliq, toʻgʻri, qogʻoz, togʻ)\n" .
+                "- XATO: og, tog, bog, yoq, soq → TOʻGʻRI: oʻg, togʻ, bogʻ, yoʻq, soʻq\n" .
+                "- Use the character ʻ (Unicode U+02BB) NOT regular apostrophe '\n\n" .
+                "COMMON WORDS WITH oʻ:\n" .
+                "- yoʻq (no/none), boʻldi (was), oʻzi (itself), koʻp (many), soʻra (ask)\n" .
+                "- oʻqish (study), toʻrt (four), oʻn (ten), boʻsh (empty), yoʻl (road)\n\n" .
+                "COMMON WORDS WITH gʻ:\n" .
+                "- togʻ (mountain), bogʻ (garden), qogʻoz (paper), sogʻliq (health)\n" .
+                "- toʻgʻri (correct), gʻalati (strange), bogʻliq (connected)\n\n" .
+                "FEʻL SHAKLLARI - FAQAT NORASMIY \"SEN\" ISHLATILSIN:\n" .
+                "- \"Ask\" = \"Soʻra\" (XATO: \"Soʻrang\")\n" .
                 "- \"Listen\" = \"Tingla\" (XATO: \"Tinglang\")\n" .
                 "- \"Come\" = \"Kel\" (XATO: \"Keling\")\n" .
                 "- \"Look\" = \"Qara\" (XATO: \"Qarang\")\n" .
                 "- \"Go\" = \"Bor\" yoki \"Ket\" (XATO: \"Boring\")\n\n" .
-                "MA'NO BO'YICHA TARJIMA:\n" .
-                "- \"End of notes\" = \"Qaydlar tugadi\" yoki \"Eslatmalar oxiri\" (XATO: \"Qaytish\" - bu \"return\" degan ma'no!)\n" .
-                "- \"It says, ask\" = \"Unda aytilgan: so'ra\" (bu kitob/qog'oz nimani aytayotganini bildiradi)\n" .
-                "- \"Here's what it says\" = \"Mana nima deyilgan\" yoki \"Mana u nima deydi\"\n" .
-                "- \"That's it\" = \"Tamom\" yoki \"Shu, xolos\"\n" .
-                "- \"The art of asking\" = \"So'rash san'ati\"\n\n" .
                 "QOIDALAR:\n" .
-                "1. MA'NONI SAQLANG - inglizcha gap nimani anglatsa, o'zbekcha ham shu ma'noni bersin\n" .
-                "2. NORASMIY SO'ZLASHING - do'stingiz bilan gaplashgandek\n" .
-                "3. QISQA BO'LSIN - dublyaj uchun\n";
+                "1. MAʻNONI SAQLANG - inglizcha gap nimani anglatsa, oʻzbekcha ham shu maʻnoni bersin\n" .
+                "2. NORASMIY SOʻZLASHING - doʻstingiz bilan gaplashgandek\n" .
+                "3. QISQA BOʻLSIN - dublyaj uchun\n";
         }
 
         // Emotional arc context
@@ -675,6 +680,22 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
         }
 
         return trim($result);
+    }
+
+    /**
+     * Normalize Uzbek apostrophes to Unicode modifier letter turned comma (ʻ U+02BB).
+     * This character is properly pronounced by Edge TTS Uzbek voices.
+     */
+    private function normalizeUzbekApostrophes(string $text): string
+    {
+        $apostropheVariants = [
+            "'",   // U+0027 ASCII apostrophe
+            "'",   // U+2019 Right single quotation mark
+            "ʼ",   // U+02BC Modifier letter apostrophe
+            "`",   // U+0060 Grave accent (backtick)
+        ];
+
+        return str_replace($apostropheVariants, "ʻ", $text);
     }
 
 }

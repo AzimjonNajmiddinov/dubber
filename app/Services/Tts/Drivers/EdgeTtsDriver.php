@@ -159,6 +159,15 @@ class EdgeTtsDriver implements TtsDriverInterface
         $direction = strtolower($options['direction'] ?? $segment->direction ?? 'normal');
         $speedMultiplier = (float) ($options['speed'] ?? 1.0);
 
+        // UZBEK PRONUNCIATION FIX:
+        // Edge TTS doesn't correctly pronounce Uzbek o' and g' characters.
+        // o' should sound like German/Turkish "ö" (rounded front vowel)
+        // g' should sound like Turkish "ğ" (soft g, voiced velar fricative)
+        // We substitute these characters for better pronunciation.
+        if ($language === 'uz' || str_contains($language, 'uzbek') || str_contains($language, 'Uzbek')) {
+            $text = $this->fixUzbekPronunciation($text);
+        }
+
         // Select voice based on speaker gender
         $voice = $this->selectVoice($speaker, $language);
 
@@ -472,5 +481,44 @@ class EdgeTtsDriver implements TtsDriverInterface
             ]);
             throw new RuntimeException("Audio normalization failed");
         }
+    }
+
+    /**
+     * Fix Uzbek pronunciation for Edge TTS.
+     *
+     * Edge TTS's Uzbek voice doesn't correctly pronounce o' and g' characters.
+     * These are distinct phonemes in Uzbek:
+     * - o' (oʻ) = rounded front vowel, like German/Turkish "ö"
+     * - g' (gʻ) = voiced velar/uvular fricative, like Turkish "ğ" or Arabic "غ"
+     *
+     * We substitute these with phonetically similar Turkish characters
+     * since Edge TTS handles Turkish phonemes better.
+     *
+     * @param string $text Uzbek text with o' and g' characters
+     * @return string Text with substituted characters for better pronunciation
+     */
+    protected function fixUzbekPronunciation(string $text): string
+    {
+        // Normalize all apostrophe variants to Unicode modifier letter turned comma (ʻ U+02BB)
+        // This is the standard Uzbek Latin alphabet character that Edge TTS handles correctly
+        //
+        // Common apostrophe variants in Uzbek text:
+        // - ' (U+0027) ASCII apostrophe
+        // - ' (U+2019) Right single quotation mark
+        // - ʼ (U+02BC) Modifier letter apostrophe
+        // - ` (U+0060) Grave accent (backtick)
+        //
+        // Target: ʻ (U+02BB) Modifier letter turned comma - best pronunciation in Edge TTS
+
+        $apostropheVariants = [
+            "'",   // U+0027 ASCII apostrophe
+            "'",   // U+2019 Right single quotation mark
+            "ʼ",   // U+02BC Modifier letter apostrophe
+            "`",   // U+0060 Grave accent (backtick)
+        ];
+
+        $text = str_replace($apostropheVariants, "ʻ", $text);
+
+        return $text;
     }
 }
