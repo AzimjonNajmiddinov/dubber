@@ -44,20 +44,18 @@ if [ "$SKIP_DEPS" = false ]; then
     echo "  [1/7] Cleaning up old packages..."
     pip uninstall -y torch torchvision torchaudio 2>/dev/null || true
 
-    # Step 2: Fix numpy (system install lacks RECORD file, blocking upgrades)
-    # --ignore-installed skips uninstall (which fails without RECORD) and installs over it
-    echo "  [2/7] Fixing numpy..."
-    pip install $PIP_FLAGS --ignore-installed --no-deps numpy==2.3.0
+    # Step 2: Fix system packages that lack RECORD files (blocking upgrades)
+    # --ignore-installed skips uninstall (which fails without RECORD) and installs over them
+    echo "  [2/7] Fixing system packages (numpy/pandas/scipy)..."
+    pip install $PIP_FLAGS --ignore-installed --no-deps numpy==2.3.0 "pandas>=2.2.3,<3" "scipy>=1.12"
 
     # Step 3: PyTorch 2.8.0 with CUDA 12.6 (pinned to match whisperx ~=2.8.0)
     echo "  [3/7] Installing PyTorch 2.8.0 with CUDA 12.6..."
     pip install $PIP_FLAGS torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu126
 
-    # Step 4: Data & HuggingFace stack
-    echo "  [4/7] Installing pandas/scipy/transformers..."
+    # Step 4: HuggingFace stack + web packages
+    echo "  [4/7] Installing transformers/huggingface..."
     pip install $PIP_FLAGS \
-        "pandas>=2.2.3,<3" \
-        "scipy>=1.12" \
         "huggingface_hub>=0.25,<1.0.0" \
         "transformers>=4.48" \
         "tokenizers>=0.22,<0.24" \
