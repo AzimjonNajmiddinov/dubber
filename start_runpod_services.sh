@@ -44,9 +44,9 @@ if [ "$SKIP_DEPS" = false ]; then
     echo "  [1/5] Installing uvicorn/fastapi..."
     pip install $PIP_FLAGS uvicorn fastapi python-multipart aiofiles pydantic
 
-    # Step 2: PyTorch 2.8.0 with CUDA 12.4 (pinned to match whisperx ~=2.8.0)
-    echo "  [2/5] Installing PyTorch 2.8.0 with CUDA 12.4..."
-    pip install $PIP_FLAGS torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu124
+    # Step 2: PyTorch 2.8.0 with CUDA 12.6 (pinned to match whisperx ~=2.8.0)
+    echo "  [2/5] Installing PyTorch 2.8.0 with CUDA 12.6..."
+    pip install $PIP_FLAGS torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu126
 
     # Constraints file prevents later packages from upgrading/downgrading torch
     CONSTRAINTS="/tmp/torch-constraints.txt"
