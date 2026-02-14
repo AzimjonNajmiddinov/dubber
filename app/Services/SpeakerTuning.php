@@ -32,9 +32,15 @@ class SpeakerTuning
             'uz' => [
                 'male' => [
                     'uz-UZ-SardorNeural',
+                    'tr-TR-AhmetNeural',      // Turkish - phonetically close
+                    'az-AZ-BabekNeural',      // Azerbaijani - very close to Uzbek
+                    'kk-KZ-DauletNeural',     // Kazakh - Turkic family
                 ],
                 'female' => [
                     'uz-UZ-MadinaNeural',
+                    'tr-TR-EmelNeural',       // Turkish
+                    'az-AZ-BanuNeural',       // Azerbaijani
+                    'kk-KZ-AigulNeural',      // Kazakh
                 ],
             ],
             'ru' => [
@@ -145,7 +151,7 @@ class SpeakerTuning
 
         // Clamp to safe ranges (avoid ultrasound-like high pitches)
         $rate = $this->clampRate($rate, -10, +12);      // percent
-        $pitch = $this->clampPitchHz($pitch, -20, +20); // Hz - reduced from -40/+60 to avoid unnatural sound
+        $pitch = $this->clampPitchHz($pitch, -45, +35); // Hz - widened for distinct speaker differentiation
         $gain = $this->clampFloat($gain, -3.0, +3.0);   // dB
 
         $speaker->tts_rate = $rate;

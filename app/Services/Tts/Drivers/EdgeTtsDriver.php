@@ -19,8 +19,18 @@ class EdgeTtsDriver implements TtsDriverInterface
      */
     protected array $voiceMap = [
         'uz' => [
-            'male' => ['uz-UZ-SardorNeural'],
-            'female' => ['uz-UZ-MadinaNeural'],
+            'male' => [
+                'uz-UZ-SardorNeural',
+                'tr-TR-AhmetNeural',      // Turkish - phonetically close
+                'az-AZ-BabekNeural',      // Azerbaijani - very close to Uzbek
+                'kk-KZ-DauletNeural',     // Kazakh - Turkic family
+            ],
+            'female' => [
+                'uz-UZ-MadinaNeural',
+                'tr-TR-EmelNeural',       // Turkish
+                'az-AZ-BanuNeural',       // Azerbaijani
+                'kk-KZ-AigulNeural',      // Kazakh
+            ],
         ],
         'ru' => [
             'male' => ['ru-RU-DmitryNeural'],
@@ -41,12 +51,12 @@ class EdgeTtsDriver implements TtsDriverInterface
      * Pitch only - rate is calculated from slot duration.
      */
     protected array $voiceProfiles = [
-        ['pitch_offset' => 0, 'name' => 'default'],
-        ['pitch_offset' => -12, 'name' => 'deep'],
-        ['pitch_offset' => 10, 'name' => 'bright'],
-        ['pitch_offset' => -20, 'name' => 'bass'],
-        ['pitch_offset' => 15, 'name' => 'thin'],
-        ['pitch_offset' => -6, 'name' => 'warm'],
+        ['pitch_offset' => 0,   'name' => 'default'],
+        ['pitch_offset' => -25, 'name' => 'deep'],
+        ['pitch_offset' => 20,  'name' => 'bright'],
+        ['pitch_offset' => -40, 'name' => 'bass'],
+        ['pitch_offset' => 30,  'name' => 'thin'],
+        ['pitch_offset' => -12, 'name' => 'warm'],
     ];
 
     /**

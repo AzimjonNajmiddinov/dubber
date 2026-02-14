@@ -29,16 +29,17 @@ DEVICE = os.environ.get("DEVICE", "cpu")
 BASE_DIR = "/var/www/storage/app"
 HF_TOKEN = os.environ.get("HF_TOKEN")
 if not HF_TOKEN:
-    raise RuntimeError("HF_TOKEN is required")
+    logger.warning("HF_TOKEN not set - speaker diarization will be disabled")
 
 # Login to HuggingFace Hub so all downloads use the token automatically
 # (avoids deprecated use_auth_token parameter)
-try:
-    from huggingface_hub import login as hf_login
-    hf_login(token=HF_TOKEN, add_to_git_credential=False)
-    logger.info("HuggingFace Hub login successful")
-except Exception as e:
-    logger.warning(f"HuggingFace Hub login failed: {e}")
+if HF_TOKEN:
+    try:
+        from huggingface_hub import login as hf_login
+        hf_login(token=HF_TOKEN, add_to_git_credential=False)
+        logger.info("HuggingFace Hub login successful")
+    except Exception as e:
+        logger.warning(f"HuggingFace Hub login failed: {e}")
 
 # You can override these via env if you want
 WHISPER_MODEL_NAME = os.environ.get("WHISPER_MODEL", "base")
@@ -54,7 +55,7 @@ EMOTION_MODEL_ID = os.environ.get(
 )
 
 # Optional toggles (to reduce load if needed)
-ENABLE_DIARIZATION = os.environ.get("ENABLE_DIARIZATION", "1") == "1"
+ENABLE_DIARIZATION = os.environ.get("ENABLE_DIARIZATION", "1") == "1" and bool(HF_TOKEN)
 ENABLE_GENDER = os.environ.get("ENABLE_GENDER", "1") == "1"
 ENABLE_EMOTION = os.environ.get("ENABLE_EMOTION", "1") == "1"
 

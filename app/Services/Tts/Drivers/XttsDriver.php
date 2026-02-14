@@ -199,18 +199,13 @@ class XttsDriver implements TtsDriverInterface
         $language = $options['language'] ?? 'uz';
         $description = $options['description'] ?? "Cloned voice: {$name}";
 
-        // Send audio as base64 encoded data (XTTS server prefers this)
-        $audioContent = file_get_contents($audioPath);
-        $audioBase64 = base64_encode($audioContent);
-
+        // Send audio as multipart file upload (XTTS /clone expects UploadFile + Form fields)
         $response = Http::timeout(120)
-            ->asJson()
+            ->attach('audio', file_get_contents($audioPath), 'sample.wav')
             ->post("{$this->baseUrl}/clone", [
                 'name' => $name,
                 'description' => $description,
                 'language' => $language,
-                'audio_base64' => $audioBase64,
-                'audio_format' => 'wav',
             ]);
 
         if ($response->failed()) {
