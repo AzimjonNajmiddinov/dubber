@@ -74,9 +74,9 @@ if [ "$SKIP_DEPS" = false ]; then
     CONSTRAINTS="/tmp/torch-constraints.txt"
     printf "torch==2.8.0\ntorchaudio==2.8.0\n" > "$CONSTRAINTS"
 
-    # Step 5: WhisperX
+    # Step 5: WhisperX + speechbrain (used by whisperx-service for speaker diarization)
     echo "  [5/7] Installing WhisperX..."
-    pip install $PIP_FLAGS -c "$CONSTRAINTS" whisperx
+    pip install $PIP_FLAGS -c "$CONSTRAINTS" whisperx speechbrain
 
     # Step 6: Demucs + TTS with --no-deps to avoid conflicts
     # TTS 0.22.0 requires pandas<2 and gruut needs numpy<2, which conflict
