@@ -180,20 +180,17 @@ class MixDubbedAudioJob implements ShouldQueue, ShouldBeUnique
                 $slotEnd = (float) $seg->end_time;
                 $slotDuration = $slotEnd - $slotStart;
 
-                // Center TTS within the slot if it's shorter
-                // This prevents awkward pauses at segment boundaries
-                $centerOffset = 0;
-                if ($ttsDuration > 0 && $ttsDuration < $slotDuration) {
-                    $centerOffset = ($slotDuration - $ttsDuration) / 2;
-                }
-
-                $delayMs = max(0, (int) round(($slotStart + $centerOffset) * 1000));
+                // START TTS AT SEGMENT START - no centering!
+                // Centering adds unnatural pauses. Better to start speaking immediately
+                // and let natural speech rhythm fill the slot.
+                $delayMs = max(0, (int) round($slotStart * 1000));
                 $label = "tts{$i}";
 
-                // TTS processing - delay to centered position with smooth fades
-                // Small fade-in/out prevents clicks and makes transitions natural
-                $fadeIn = 0.03;  // 30ms fade-in
-                $fadeOut = 0.05; // 50ms fade-out
+                // TTS processing - minimal fade to prevent clicks only
+                // Very short fades (10-15ms) - just enough to avoid audio pops
+                // NO aggressive fade-out that cuts word endings!
+                $fadeIn = 0.01;   // 10ms fade-in (click prevention only)
+                $fadeOut = 0.015; // 15ms fade-out (click prevention only)
                 $fadeOutStart = max(0, $ttsDuration - $fadeOut);
 
                 $filtersBase[] =

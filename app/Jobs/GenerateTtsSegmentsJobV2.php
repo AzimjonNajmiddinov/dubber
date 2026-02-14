@@ -574,14 +574,13 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
     {
         $tmpPath = $audioPath . '.trimmed.wav';
 
-        // VERY CONSERVATIVE settings:
-        // -60dB threshold: only removes absolute silence, protects quiet speech
-        // 0.15s duration: requires 150ms of silence before cutting (protects word endings)
-        // This is safer than cutting words
+        // ONLY STRIP LEADING SILENCE - NEVER touch the end!
+        // Edge TTS sometimes adds leading silence but word endings must be preserved.
+        // Trailing silence stripping was cutting off words like "etilgan" -> "etil"
         $result = Process::timeout(15)->run([
             'ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
             '-i', $audioPath,
-            '-af', 'silenceremove=start_periods=1:start_threshold=-60dB:start_duration=0.15,areverse,silenceremove=start_periods=1:start_threshold=-60dB:start_duration=0.15,areverse',
+            '-af', 'silenceremove=start_periods=1:start_threshold=-50dB:start_duration=0.1',
             '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s16le',
             $tmpPath,
         ]);
@@ -593,12 +592,12 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
             $newDuration = $this->probeAudioDuration($tmpPath);
 
             // Safety checks - NEVER accept if we removed too much
-            // Max 40% size reduction (silence should never be >40% of audio)
-            // Max 40% duration reduction
+            // Max 20% duration reduction - leading silence should be minimal
+            // If more is removed, something is wrong - keep original
             $sizeReductionPct = (1 - $newSize / $origSize) * 100;
             $durationReductionPct = $origDuration > 0 ? (1 - $newDuration / $origDuration) * 100 : 0;
 
-            if ($sizeReductionPct <= 40 && $durationReductionPct <= 40 && $newDuration > 0.1) {
+            if ($sizeReductionPct <= 20 && $durationReductionPct <= 20 && $newDuration > 0.1) {
                 Log::debug('Stripped silence from TTS audio', [
                     'path' => basename($audioPath),
                     'orig_duration' => round($origDuration, 2),
