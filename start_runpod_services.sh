@@ -38,44 +38,37 @@ git pull --ff-only 2>/dev/null || git fetch && git reset --hard origin/main
 if [ "$SKIP_DEPS" = false ]; then
     echo "Installing/fixing dependencies..."
 
-    # Use --ignore-installed to bypass distutils uninstall issues (e.g., blinker)
-    PIP_FLAGS="--ignore-installed --no-warn-script-location -q"
+    PIP_FLAGS="--no-warn-script-location -q"
 
-    # Step 1: Core packages - uvicorn/fastapi
-    echo "  [1/6] Installing uvicorn/fastapi..."
-    pip install $PIP_FLAGS uvicorn fastapi python-multipart aiofiles
+    # Step 1: Core web packages
+    echo "  [1/5] Installing uvicorn/fastapi..."
+    pip install $PIP_FLAGS uvicorn fastapi python-multipart aiofiles pydantic
 
-    # Step 2: PyTorch with CUDA 12.4 support (matching versions)
-    echo "  [2/6] Installing PyTorch 2.4.1 with CUDA 12.4..."
-    pip uninstall -y torch torchvision torchaudio 2>/dev/null || true
-    pip install $PIP_FLAGS torch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1 --index-url https://download.pytorch.org/whl/cu124
+    # Step 2: PyTorch 2.8.0 with CUDA 12.4 (pinned to match whisperx ~=2.8.0)
+    echo "  [2/5] Installing PyTorch 2.8.0 with CUDA 12.4..."
+    pip install $PIP_FLAGS torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu124
 
-    # Step 3: NumPy/Pandas/SciPy compatible versions (critical for WhisperX)
-    echo "  [3/6] Installing numpy/pandas/scipy compatible versions..."
-    pip uninstall -y pandas scipy numpy 2>/dev/null || true
-    pip cache purge 2>/dev/null || true
-    pip install $PIP_FLAGS numpy==1.26.4
-    pip install pandas==1.5.3 scipy==1.11.4
+    # Constraints file prevents later packages from upgrading/downgrading torch
+    CONSTRAINTS="/tmp/torch-constraints.txt"
+    printf "torch==2.8.0\ntorchaudio==2.8.0\n" > "$CONSTRAINTS"
 
-    # Step 4: HuggingFace/Transformers compatible versions
-    echo "  [4/6] Installing huggingface_hub/transformers..."
-    pip install $PIP_FLAGS huggingface_hub==0.21.4 transformers==4.38.0 tokenizers==0.15.2
+    # Step 3: Data & HuggingFace stack (modern versions for whisperx/pyannote)
+    echo "  [3/5] Installing numpy/pandas/scipy/transformers..."
+    pip install $PIP_FLAGS -c "$CONSTRAINTS" \
+        "numpy>=2.1,<2.5" \
+        "pandas>=2.2.3" \
+        "scipy>=1.12" \
+        "huggingface_hub>=0.25,<1.0.0" \
+        "transformers>=4.48" \
+        "tokenizers>=0.22,<0.24"
 
-    # Step 5: Demucs for audio separation
-    echo "  [5/7] Installing Demucs..."
-    pip install $PIP_FLAGS demucs
+    # Step 4: WhisperX (strictest torch requirement: ~=2.8.0)
+    echo "  [4/5] Installing WhisperX..."
+    pip install $PIP_FLAGS -c "$CONSTRAINTS" whisperx
 
-    # Step 6: WhisperX dependencies
-    echo "  [6/7] Checking WhisperX..."
-    if ! python -c "import whisperx" 2>/dev/null; then
-        pip install $PIP_FLAGS whisperx
-    fi
-
-    # Step 7: TTS (Coqui) for XTTS
-    echo "  [7/7] Checking TTS..."
-    if ! python -c "from TTS.api import TTS" 2>/dev/null; then
-        pip install $PIP_FLAGS TTS
-    fi
+    # Step 5: Demucs + TTS (constrained to keep torch 2.8.0)
+    echo "  [5/5] Installing Demucs & TTS..."
+    pip install $PIP_FLAGS -c "$CONSTRAINTS" demucs TTS
 
     echo "Dependencies installed!"
 
@@ -87,6 +80,9 @@ if [ "$SKIP_DEPS" = false ]; then
     python -c "import pandas; print(f'  pandas: {pandas.__version__}')"
     python -c "import scipy; print(f'  scipy: {scipy.__version__}')"
     python -c "import transformers; print(f'  transformers: {transformers.__version__}')"
+    python -c "import whisperx; print(f'  whisperx: OK')"
+    python -c "import demucs; print(f'  demucs: OK')"
+    python -c "from TTS.api import TTS; print(f'  TTS: OK')"
     echo ""
 else
     echo "Skipping dependency check (--skip-deps)"
