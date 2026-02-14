@@ -40,35 +40,55 @@ if [ "$SKIP_DEPS" = false ]; then
 
     PIP_FLAGS="--no-warn-script-location -q"
 
-    # Step 1: Core web packages
-    echo "  [1/5] Installing uvicorn/fastapi..."
-    pip install $PIP_FLAGS uvicorn fastapi python-multipart aiofiles pydantic
+    # Step 1: Clean up broken state from previous installs
+    echo "  [1/7] Cleaning up old packages..."
+    pip uninstall -y torch torchvision torchaudio 2>/dev/null || true
 
-    # Step 2: PyTorch 2.8.0 with CUDA 12.6 (pinned to match whisperx ~=2.8.0)
-    echo "  [2/5] Installing PyTorch 2.8.0 with CUDA 12.6..."
+    # Step 2: Fix numpy (system install lacks RECORD file, blocking upgrades)
+    echo "  [2/7] Fixing numpy..."
+    pip install $PIP_FLAGS --force-reinstall --no-deps numpy==2.3.0
+
+    # Step 3: PyTorch 2.8.0 with CUDA 12.6 (pinned to match whisperx ~=2.8.0)
+    echo "  [3/7] Installing PyTorch 2.8.0 with CUDA 12.6..."
     pip install $PIP_FLAGS torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu126
 
-    # Constraints file prevents later packages from upgrading/downgrading torch
-    CONSTRAINTS="/tmp/torch-constraints.txt"
-    printf "torch==2.8.0\ntorchaudio==2.8.0\n" > "$CONSTRAINTS"
-
-    # Step 3: Data & HuggingFace stack (modern versions for whisperx/pyannote)
-    echo "  [3/5] Installing numpy/pandas/scipy/transformers..."
-    pip install $PIP_FLAGS -c "$CONSTRAINTS" \
-        "numpy>=2.1,<2.5" \
-        "pandas>=2.2.3" \
+    # Step 4: Data & HuggingFace stack
+    echo "  [4/7] Installing pandas/scipy/transformers..."
+    pip install $PIP_FLAGS \
+        "pandas>=2.2.3,<3" \
         "scipy>=1.12" \
         "huggingface_hub>=0.25,<1.0.0" \
         "transformers>=4.48" \
-        "tokenizers>=0.22,<0.24"
+        "tokenizers>=0.22,<0.24" \
+        uvicorn fastapi python-multipart aiofiles pydantic
 
-    # Step 4: WhisperX (strictest torch requirement: ~=2.8.0)
-    echo "  [4/5] Installing WhisperX..."
+    # Verify torch wasn't changed by transitive dependencies
+    TORCH_VER=$(python -c "import torch; print(torch.__version__)" 2>/dev/null)
+    if [[ ! "$TORCH_VER" == 2.8.0* ]]; then
+        echo "  WARNING: torch changed to $TORCH_VER, reinstalling 2.8.0..."
+        pip install $PIP_FLAGS torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu126
+    fi
+
+    # Constraints file prevents later packages from upgrading torch
+    CONSTRAINTS="/tmp/torch-constraints.txt"
+    printf "torch==2.8.0\ntorchaudio==2.8.0\n" > "$CONSTRAINTS"
+
+    # Step 5: WhisperX
+    echo "  [5/7] Installing WhisperX..."
     pip install $PIP_FLAGS -c "$CONSTRAINTS" whisperx
 
-    # Step 5: Demucs + TTS (constrained to keep torch 2.8.0)
-    echo "  [5/5] Installing Demucs & TTS..."
-    pip install $PIP_FLAGS -c "$CONSTRAINTS" demucs TTS
+    # Step 6: Demucs + TTS with --no-deps to avoid conflicts
+    # TTS 0.22.0 requires pandas<2 and gruut needs numpy<2, which conflict
+    # with whisperx. XTTS v2 works fine with modern numpy/pandas in practice.
+    echo "  [6/7] Installing Demucs & TTS..."
+    pip install $PIP_FLAGS --no-deps demucs TTS
+
+    # Step 7: Install demucs/TTS dependencies (non-conflicting ones only)
+    echo "  [7/7] Installing demucs/TTS dependencies..."
+    pip install $PIP_FLAGS -c "$CONSTRAINTS" \
+        dora-search lameenc julius diffq einops openunmix treetable \
+        trainer coqpit librosa soundfile pysbd pypinyin umap-learn \
+        encodec inflect anyascii
 
     echo "Dependencies installed!"
 
