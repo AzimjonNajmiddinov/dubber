@@ -77,13 +77,19 @@ class DownloadVideoFromUrlJob implements ShouldQueue, ShouldBeUnique
         $relativePath = "videos/originals/{$filename}";
         $absolutePath = Storage::disk('local')->path($relativePath);
 
-        // Try yt-dlp first (handles YouTube, Vimeo, and many other sites)
+        // Strategy 1: yt-dlp (handles YouTube, Vimeo, and many other sites)
         if ($this->tryYtDlp($url, $absolutePath)) {
             $this->finalizeDownload($video, $relativePath, $absolutePath);
             return;
         }
 
-        // Fallback to direct HTTP download
+        // Strategy 2: Cobalt API (free, no auth, works for YouTube/Twitter/TikTok/etc)
+        if ($this->tryCobaltApi($url, $absolutePath)) {
+            $this->finalizeDownload($video, $relativePath, $absolutePath);
+            return;
+        }
+
+        // Strategy 3: Direct HTTP download (for direct video URLs)
         if ($this->tryDirectDownload($url, $absolutePath)) {
             $this->finalizeDownload($video, $relativePath, $absolutePath);
             return;
@@ -96,24 +102,14 @@ class DownloadVideoFromUrlJob implements ShouldQueue, ShouldBeUnique
     {
         Log::info('Attempting yt-dlp download', ['url' => $url]);
 
-        // Try different client configurations to bypass bot detection
-        $clients = [
-            'default',       // Let yt-dlp choose (latest versions handle this best)
-            'mweb',          // Mobile web - often bypasses bot detection
-            'web',           // Default web client
-            'android',       // Android client
-        ];
+        $clients = ['default', 'mweb', 'web', 'android'];
 
-        // Check for cookies file (needed for YouTube bot detection bypass)
         $cookiesFile = $this->findCookiesFile();
         if ($cookiesFile) {
             Log::info('Using cookies file for yt-dlp', ['cookies' => $cookiesFile]);
         }
 
         foreach ($clients as $client) {
-            Log::info("Trying yt-dlp with client: {$client}", ['url' => $url]);
-
-            // Clean up any partial download
             @unlink($outputPath);
 
             $cmd = [
@@ -129,13 +125,11 @@ class DownloadVideoFromUrlJob implements ShouldQueue, ShouldBeUnique
                 '--fragment-retries', '3',
             ];
 
-            // Add cookies if available
             if ($cookiesFile) {
                 $cmd[] = '--cookies';
                 $cmd[] = $cookiesFile;
             }
 
-            // Add client-specific args (skip for 'default' to let yt-dlp decide)
             if ($client !== 'default') {
                 $cmd[] = '--extractor-args';
                 $cmd[] = "youtube:player_client={$client}";
@@ -164,13 +158,104 @@ class DownloadVideoFromUrlJob implements ShouldQueue, ShouldBeUnique
         return false;
     }
 
+    /**
+     * Download video using Cobalt API (cobalt.tools).
+     * Free, open-source, no authentication needed.
+     * Supports YouTube, Twitter, TikTok, Instagram, Reddit, etc.
+     */
+    private function tryCobaltApi(string $url, string $outputPath): bool
+    {
+        // Clean YouTube URL - remove timestamp and tracking params
+        $cleanUrl = preg_replace('/[&?](t|si|feature|pp)=[^&]*/', '', $url);
+        $cleanUrl = rtrim($cleanUrl, '?&');
+
+        $instances = [
+            'https://api.cobalt.tools',
+            'https://cobalt-api.kwiatekmiki.com',
+        ];
+
+        foreach ($instances as $apiBase) {
+            Log::info('Attempting Cobalt API download', ['url' => $cleanUrl, 'instance' => $apiBase]);
+
+            try {
+                $response = Http::timeout(30)
+                    ->withHeaders([
+                        'Accept' => 'application/json',
+                        'Content-Type' => 'application/json',
+                    ])
+                    ->post($apiBase, [
+                        'url' => $cleanUrl,
+                        'videoQuality' => '720',
+                        'filenameStyle' => 'basic',
+                    ]);
+
+                if (!$response->successful()) {
+                    Log::warning('Cobalt API request failed', [
+                        'instance' => $apiBase,
+                        'status' => $response->status(),
+                        'body' => mb_substr($response->body(), 0, 500),
+                    ]);
+                    continue;
+                }
+
+                $data = $response->json();
+                $status = $data['status'] ?? '';
+                $downloadUrl = $data['url'] ?? null;
+
+                if (!$downloadUrl || !in_array($status, ['redirect', 'tunnel', 'stream'])) {
+                    Log::warning('Cobalt API no download URL', [
+                        'instance' => $apiBase,
+                        'status' => $status,
+                        'error' => $data['error'] ?? null,
+                    ]);
+                    continue;
+                }
+
+                Log::info('Cobalt API got download URL', [
+                    'instance' => $apiBase,
+                    'status' => $status,
+                ]);
+
+                // Download the actual video file
+                $dlResponse = Http::withOptions([
+                    'sink' => $outputPath,
+                    'timeout' => 3600,
+                    'connect_timeout' => 30,
+                ])->withHeaders([
+                    'User-Agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                ])->get($downloadUrl);
+
+                if (file_exists($outputPath) && filesize($outputPath) > 10000) {
+                    Log::info('Cobalt API download successful', [
+                        'url' => $cleanUrl,
+                        'instance' => $apiBase,
+                        'size' => filesize($outputPath),
+                    ]);
+                    return true;
+                }
+
+                Log::warning('Cobalt API download file too small or missing', [
+                    'instance' => $apiBase,
+                    'exists' => file_exists($outputPath),
+                    'size' => file_exists($outputPath) ? filesize($outputPath) : 0,
+                ]);
+
+            } catch (\Throwable $e) {
+                Log::warning('Cobalt API error', [
+                    'instance' => $apiBase,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+
+        return false;
+    }
+
     private function tryDirectDownload(string $url, string $outputPath): bool
     {
-        // Skip direct download for known video platforms (they don't serve videos directly)
         $skipDomains = ['youtube.com', 'youtu.be', 'vimeo.com', 'dailymotion.com', 'tiktok.com'];
         foreach ($skipDomains as $domain) {
             if (str_contains($url, $domain)) {
-                Log::info('Skipping direct download for video platform', ['url' => $url, 'domain' => $domain]);
                 return false;
             }
         }
@@ -178,7 +263,6 @@ class DownloadVideoFromUrlJob implements ShouldQueue, ShouldBeUnique
         Log::info('Attempting direct HTTP download', ['url' => $url]);
 
         try {
-            // Stream download to file
             $response = Http::withOptions([
                 'sink' => $outputPath,
                 'timeout' => 3600,
@@ -206,7 +290,6 @@ class DownloadVideoFromUrlJob implements ShouldQueue, ShouldBeUnique
 
     private function finalizeDownload(Video $video, string $relativePath, string $absolutePath): void
     {
-        // Verify it's a valid video file using ffprobe
         $probeResult = Process::timeout(60)->run([
             'ffprobe',
             '-v', 'error',
@@ -241,14 +324,9 @@ class DownloadVideoFromUrlJob implements ShouldQueue, ShouldBeUnique
             'status' => 'uploaded',
         ]);
 
-        // Dispatch the regular pipeline
         ExtractAudioJob::dispatch($video->id);
     }
 
-    /**
-     * Find a YouTube cookies file from common locations.
-     * Users should export cookies from their browser using "Get cookies.txt" extension.
-     */
     private function findCookiesFile(): ?string
     {
         $home = is_string($_SERVER['HOME'] ?? null) ? $_SERVER['HOME'] : (getenv('HOME') ?: '/home/' . get_current_user());

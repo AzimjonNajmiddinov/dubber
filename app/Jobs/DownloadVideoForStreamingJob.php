@@ -9,6 +9,7 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Facades\Storage;
@@ -71,9 +72,12 @@ class DownloadVideoForStreamingJob implements ShouldQueue, ShouldBeUnique
 
         // Try yt-dlp download
         if (!$this->downloadWithYtDlp($video->source_url, $absolutePath)) {
-            // Try direct download as fallback
-            if (!$this->downloadDirect($video->source_url, $absolutePath)) {
-                throw new \RuntimeException("Failed to download video");
+            // Try Cobalt API as fallback
+            if (!$this->downloadWithCobalt($video->source_url, $absolutePath)) {
+                // Try direct download as last resort
+                if (!$this->downloadDirect($video->source_url, $absolutePath)) {
+                    throw new \RuntimeException("Failed to download video");
+                }
             }
         }
 
@@ -137,6 +141,65 @@ class DownloadVideoForStreamingJob implements ShouldQueue, ShouldBeUnique
                     'size' => filesize($outputPath),
                 ]);
                 return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function downloadWithCobalt(string $url, string $outputPath): bool
+    {
+        $cleanUrl = preg_replace('/[&?](t|si|feature|pp)=[^&]*/', '', $url);
+        $cleanUrl = rtrim($cleanUrl, '?&');
+
+        $instances = [
+            'https://api.cobalt.tools',
+            'https://cobalt-api.kwiatekmiki.com',
+        ];
+
+        foreach ($instances as $apiBase) {
+            Log::info('Attempting Cobalt API download', ['url' => $cleanUrl, 'instance' => $apiBase]);
+
+            try {
+                $response = Http::timeout(30)
+                    ->withHeaders([
+                        'Accept' => 'application/json',
+                        'Content-Type' => 'application/json',
+                    ])
+                    ->post($apiBase, [
+                        'url' => $cleanUrl,
+                        'videoQuality' => '720',
+                        'filenameStyle' => 'basic',
+                    ]);
+
+                if (!$response->successful()) {
+                    continue;
+                }
+
+                $data = $response->json();
+                $downloadUrl = $data['url'] ?? null;
+                $status = $data['status'] ?? '';
+
+                if (!$downloadUrl || !in_array($status, ['redirect', 'tunnel', 'stream'])) {
+                    continue;
+                }
+
+                $dlResponse = Http::withOptions([
+                    'sink' => $outputPath,
+                    'timeout' => 3600,
+                    'connect_timeout' => 30,
+                ])->get($downloadUrl);
+
+                if (file_exists($outputPath) && filesize($outputPath) > 10000) {
+                    Log::info('Cobalt API download successful', [
+                        'url' => $cleanUrl,
+                        'instance' => $apiBase,
+                        'size' => filesize($outputPath),
+                    ]);
+                    return true;
+                }
+            } catch (\Throwable $e) {
+                Log::warning('Cobalt API error', ['instance' => $apiBase, 'error' => $e->getMessage()]);
             }
         }
 

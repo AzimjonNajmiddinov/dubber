@@ -272,6 +272,11 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
             }
         }
 
+        // Fallback: try Cobalt API if yt-dlp failed
+        if (!$downloaded) {
+            $downloaded = $this->downloadWithCobalt($url, $absolutePath);
+        }
+
         if (!$downloaded) {
             $video->update(['status' => 'download_failed']);
             throw new \RuntimeException('Video download failed: ' . substr($lastError, -200));
@@ -338,6 +343,65 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
             // Very long videos (> 30 min): 15 second chunks to reduce overhead
             return 15;
         }
+    }
+
+    private function downloadWithCobalt(string $url, string $outputPath): bool
+    {
+        $cleanUrl = preg_replace('/[&?](t|si|feature|pp)=[^&]*/', '', $url);
+        $cleanUrl = rtrim($cleanUrl, '?&');
+
+        $instances = [
+            'https://api.cobalt.tools',
+            'https://cobalt-api.kwiatekmiki.com',
+        ];
+
+        foreach ($instances as $apiBase) {
+            Log::info('Attempting Cobalt API download', ['url' => $cleanUrl, 'instance' => $apiBase]);
+
+            try {
+                $response = Http::timeout(30)
+                    ->withHeaders([
+                        'Accept' => 'application/json',
+                        'Content-Type' => 'application/json',
+                    ])
+                    ->post($apiBase, [
+                        'url' => $cleanUrl,
+                        'videoQuality' => '720',
+                        'filenameStyle' => 'basic',
+                    ]);
+
+                if (!$response->successful()) {
+                    continue;
+                }
+
+                $data = $response->json();
+                $downloadUrl = $data['url'] ?? null;
+                $status = $data['status'] ?? '';
+
+                if (!$downloadUrl || !in_array($status, ['redirect', 'tunnel', 'stream'])) {
+                    continue;
+                }
+
+                $dlResponse = Http::withOptions([
+                    'sink' => $outputPath,
+                    'timeout' => 3600,
+                    'connect_timeout' => 30,
+                ])->get($downloadUrl);
+
+                if (file_exists($outputPath) && filesize($outputPath) > 10000) {
+                    Log::info('Cobalt API download successful', [
+                        'url' => $cleanUrl,
+                        'instance' => $apiBase,
+                        'size' => filesize($outputPath),
+                    ]);
+                    return true;
+                }
+            } catch (\Throwable $e) {
+                Log::warning('Cobalt API error', ['instance' => $apiBase, 'error' => $e->getMessage()]);
+            }
+        }
+
+        return false;
     }
 
     private function findCookiesFile(): ?string
