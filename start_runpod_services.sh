@@ -60,7 +60,7 @@ if [ "$SKIP_DEPS" = false ]; then
     echo "  [4/7] Installing transformers/huggingface..."
     pip install $PIP_FLAGS \
         "huggingface_hub>=0.25,<1.0.0" \
-        "transformers>=4.48" \
+        "transformers>=4.48,<4.50" \
         "tokenizers>=0.22,<0.24" \
         uvicorn fastapi python-multipart aiofiles pydantic
 
