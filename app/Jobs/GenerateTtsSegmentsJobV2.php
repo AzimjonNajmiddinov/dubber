@@ -85,20 +85,10 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
             $driverName = config('dubber.tts.default', 'xtts');
             $autoClone = config('dubber.tts.auto_clone', true);
 
-            // For Uzbek target language, prefer Edge-TTS over XTTS cloning.
-            // Edge-TTS has native Uzbek/Turkish/Azerbaijani/Kazakh voices that
-            // sound more natural than XTTS clones of English speakers.
-            $targetLang = strtolower(trim($video->target_language ?? 'uz'));
-            $isUzbek = str_contains($targetLang, 'uz') || str_contains($targetLang, 'uzbek');
-
-            if ($isUzbek && $driverName === 'xtts') {
-                $driverName = 'edge';
-                Log::info('Using Edge-TTS for Uzbek target instead of XTTS', [
-                    'video_id' => $video->id,
-                    'target_language' => $targetLang,
-                ]);
-            }
-
+            // XTTS voice cloning works for Uzbek via Turkish (tr) phonemization.
+            // Both are Turkic languages with similar phonology.
+            // XTTS gives each speaker a UNIQUE cloned voice + emotion control.
+            // Edge-TTS is kept as fallback only.
             $driver = $ttsManager->driver($driverName);
 
             Log::info('TTS generation starting', [
@@ -108,7 +98,7 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
             ]);
 
             // Step 1: Clone voices if enabled and driver supports it
-            if ($autoClone && $driver->supportsVoiceCloning() && !$isUzbek) {
+            if ($autoClone && $driver->supportsVoiceCloning()) {
                 $this->cloneSpeakerVoices($video, $driver);
             }
 
