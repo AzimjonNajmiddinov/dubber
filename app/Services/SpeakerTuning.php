@@ -79,19 +79,26 @@ class SpeakerTuning
         /**
          * Baseline "cinema" cadence:
          * - Slightly slower by default for clarity
-         * - Small pitch offsets only (Edge pitch in Hz is sensitive)
+         * - Per-speaker pitch offsets to clearly differentiate same-gender speakers
          */
         $rate  = '-2%';
         $pitch = '+0Hz';
         $gain  = 0.0;
 
-        // Gender-based micro tuning (very mild to avoid unnatural high pitches)
+        // Per-speaker pitch offsets: [0, -15, +15, -30, +30, ...]
+        // Makes same-gender speakers clearly distinguishable
+        $pitchOffsets = [0, -15, +15, -30, +30];
+        $speakerPitchOffset = $pitchOffsets[$speakerIndex % count($pitchOffsets)];
+
+        // Gender-based base pitch + speaker differentiation
         if ($gender === 'female') {
-            $pitch = '+3Hz';   // Reduced from +10Hz - more natural
+            $pitch = $this->formatPitchHz(3 + $speakerPitchOffset);
             $gain  = 0.3;
         } elseif ($gender === 'male') {
-            $pitch = '-3Hz';   // Reduced from -5Hz
+            $pitch = $this->formatPitchHz(-3 + $speakerPitchOffset);
             $gain  = 0.0;
+        } else {
+            $pitch = $this->formatPitchHz($speakerPitchOffset);
         }
 
         // Age adjustments (mild values to keep it natural, avoid ultrasound-like high pitches)
@@ -234,5 +241,10 @@ class SpeakerTuning
     private function clampFloat(float $v, float $min, float $max): float
     {
         return max($min, min($max, $v));
+    }
+
+    private function formatPitchHz(int $hz): string
+    {
+        return ($hz >= 0 ? '+' : '') . $hz . 'Hz';
     }
 }

@@ -122,8 +122,9 @@ class TranscribeWithWhisperXJob implements ShouldQueue, ShouldBeUnique
             $whisperxUrl = config('services.whisperx.url', 'http://whisperx:8000');
 
             // Split long audio into chunks to avoid proxy timeouts
-            if ($dur !== null && $dur > 120) {
-                Log::info('Audio exceeds 120s, splitting into chunks', [
+            // 900s threshold lets pyannote diarize full conversations (correct speaker IDs)
+            if ($dur !== null && $dur > 900) {
+                Log::info('Audio exceeds 900s, splitting into chunks', [
                     'video_id' => $video->id,
                     'duration' => $dur,
                 ]);
@@ -152,7 +153,7 @@ class TranscribeWithWhisperXJob implements ShouldQueue, ShouldBeUnique
                 }
             } else {
                 // Short audio — single request (original flow)
-                $res = Http::timeout(300)
+                $res = Http::timeout(600)
                     ->connectTimeout(5)
                     ->retry(5, 500)
                     ->post("{$whisperxUrl}/analyze", [
@@ -164,7 +165,7 @@ class TranscribeWithWhisperXJob implements ShouldQueue, ShouldBeUnique
                         'video_id' => $video->id,
                         'audio_path' => $audioRel,
                     ]);
-                    $res = Http::timeout(300)
+                    $res = Http::timeout(600)
                         ->connectTimeout(5)
                         ->attach('audio', file_get_contents($audioAbs), basename($audioAbs))
                         ->post("{$whisperxUrl}/analyze-upload");
@@ -261,7 +262,7 @@ class TranscribeWithWhisperXJob implements ShouldQueue, ShouldBeUnique
                         'emotion_confidence' => $emotionConf,
                         'pitch_median_hz' => $pitchMed,
 
-                        'tts_voice' => null,
+                        'tts_voice' => 'pending',
                         'tts_gain_db' => 0,
                         'tts_rate' => '+0%',
                         'tts_pitch' => '+0Hz',
@@ -335,7 +336,7 @@ class TranscribeWithWhisperXJob implements ShouldQueue, ShouldBeUnique
                             'gender_confidence' => null,
                             'emotion_confidence' => null,
                             'pitch_median_hz' => null,
-                            'tts_voice' => null,
+                            'tts_voice' => 'pending',
                             'tts_gain_db' => 0,
                             'tts_rate' => '+0%',
                             'tts_pitch' => '+0Hz',
@@ -396,7 +397,7 @@ class TranscribeWithWhisperXJob implements ShouldQueue, ShouldBeUnique
             mkdir($chunkDir, 0755, true);
         }
 
-        $chunkDuration = 120;
+        $chunkDuration = 900;
         $chunks = [];
         $offset = 0.0;
         $index = 0;
@@ -444,7 +445,7 @@ class TranscribeWithWhisperXJob implements ShouldQueue, ShouldBeUnique
      */
     private function transcribeChunk(string $chunkPath, string $whisperxUrl): array
     {
-        $res = Http::timeout(300)
+        $res = Http::timeout(600)
             ->connectTimeout(5)
             ->attach('audio', file_get_contents($chunkPath), basename($chunkPath))
             ->post("{$whisperxUrl}/analyze-upload");
@@ -510,30 +511,44 @@ class TranscribeWithWhisperXJob implements ShouldQueue, ShouldBeUnique
 
                 // Try to match to an existing global speaker
                 $matchedGlobal = null;
-                foreach ($globalSpeakers as $gid => $gs) {
-                    // Gender must match (or one is unknown)
-                    $genderMatch = ($gender === $gs['gender'])
-                        || $gender === 'unknown'
-                        || $gs['gender'] === 'unknown';
 
-                    // Pitch must be within ±30Hz (if both available)
-                    $pitchMatch = true;
-                    if ($pitch !== null && $gs['pitch'] !== null) {
-                        $pitchMatch = abs($pitch - $gs['pitch']) <= 30;
-                    }
+                // Only attempt cross-chunk matching when we have actual evidence.
+                // If both gender is unknown and pitch is null, we cannot distinguish
+                // speakers — keep them separate to avoid collapsing distinct speakers.
+                $hasEvidence = ($gender !== 'unknown') || ($pitch !== null);
 
-                    if ($genderMatch && $pitchMatch) {
-                        $matchedGlobal = $gid;
-                        // Update pitch with more recent data if global had none
-                        if ($gs['pitch'] === null && $pitch !== null) {
-                            $globalSpeakers[$gid]['pitch'] = $pitch;
+                if ($hasEvidence) {
+                    foreach ($globalSpeakers as $gid => $gs) {
+                        // Gender must match (or one is unknown)
+                        $genderMatch = ($gender === $gs['gender'])
+                            || $gender === 'unknown'
+                            || $gs['gender'] === 'unknown';
+
+                        // Pitch must be within ±30Hz (if both available)
+                        $pitchMatch = true;
+                        if ($pitch !== null && $gs['pitch'] !== null) {
+                            $pitchMatch = abs($pitch - $gs['pitch']) <= 30;
                         }
-                        // Update gender if global was unknown
-                        if ($gs['gender'] === 'unknown' && $gender !== 'unknown') {
-                            $globalSpeakers[$gid]['gender'] = $gender;
-                            $globalSpeakers[$gid]['meta']['gender'] = $gender;
+
+                        // Require at least one side to have pitch data when gender is unknown
+                        if ($gender === 'unknown' && $gs['gender'] === 'unknown'
+                            && $pitch === null && $gs['pitch'] === null) {
+                            continue;
                         }
-                        break;
+
+                        if ($genderMatch && $pitchMatch) {
+                            $matchedGlobal = $gid;
+                            // Update pitch with more recent data if global had none
+                            if ($gs['pitch'] === null && $pitch !== null) {
+                                $globalSpeakers[$gid]['pitch'] = $pitch;
+                            }
+                            // Update gender if global was unknown
+                            if ($gs['gender'] === 'unknown' && $gender !== 'unknown') {
+                                $globalSpeakers[$gid]['gender'] = $gender;
+                                $globalSpeakers[$gid]['meta']['gender'] = $gender;
+                            }
+                            break;
+                        }
                     }
                 }
 
