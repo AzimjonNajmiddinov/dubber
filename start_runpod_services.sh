@@ -89,7 +89,10 @@ if [ "$SKIP_DEPS" = false ]; then
     pip install $PIP_FLAGS -c "$CONSTRAINTS" \
         dora-search lameenc julius diffq einops openunmix treetable \
         trainer coqpit librosa soundfile pysbd pypinyin umap-learn \
-        encodec inflect anyascii
+        encodec inflect anyascii \
+        bangla bnnumerizer bnunicodenormalizer \
+        g2pkk hangul-romanize jamo jieba num2words unidecode \
+        flask "spacy>=3"
 
     echo "Dependencies installed!"
 
