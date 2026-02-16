@@ -28,6 +28,17 @@ from typing import Optional, List
 from contextlib import asynccontextmanager
 
 import torch
+
+# PyTorch 2.6+ defaults torch.load to weights_only=True, but TTS 0.22.0
+# checkpoints contain pickled config objects (XttsConfig) that require unsafe loading.
+# Patch torch.load to restore old default for TTS compatibility.
+_original_torch_load = torch.load
+def _patched_torch_load(*args, **kwargs):
+    if "weights_only" not in kwargs:
+        kwargs["weights_only"] = False
+    return _original_torch_load(*args, **kwargs)
+torch.load = _patched_torch_load
+
 import torchaudio
 import numpy as np
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
