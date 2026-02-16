@@ -342,11 +342,13 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
 
     private function findCookiesFile(): ?string
     {
+        $home = is_string($_SERVER['HOME'] ?? null) ? $_SERVER['HOME'] : (getenv('HOME') ?: '/home/' . get_current_user());
+
         $paths = [
             base_path('cookies.txt'),
             storage_path('app/cookies.txt'),
-            $_SERVER['HOME'] . '/.config/yt-dlp/cookies.txt',
-            $_SERVER['HOME'] . '/cookies.txt',
+            $home . '/.config/yt-dlp/cookies.txt',
+            $home . '/cookies.txt',
         ];
 
         foreach ($paths as $path) {
