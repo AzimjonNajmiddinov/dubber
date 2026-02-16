@@ -105,12 +105,68 @@
             transform: translateY(-2px);
             box-shadow: 0 8px 24px rgba(34, 197, 94, 0.3);
         }
+        .btn-primary:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
         .error-message {
             color: #ef4444;
             font-size: 14px;
             margin-top: 8px;
             text-align: left;
         }
+        .mode-tabs {
+            display: flex;
+            gap: 0;
+            margin-bottom: 20px;
+            border-radius: 10px;
+            overflow: hidden;
+            border: 2px solid #333;
+        }
+        .mode-tab {
+            flex: 1;
+            padding: 12px 16px;
+            background: transparent;
+            color: #888;
+            border: none;
+            font-size: 15px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .mode-tab:first-child { border-right: 1px solid #333; }
+        .mode-tab.active {
+            background: rgba(34, 197, 94, 0.1);
+            color: #22c55e;
+        }
+        .mode-tab:hover:not(.active) { color: #fff; }
+        .mode-panel { display: none; }
+        .mode-panel.active { display: block; }
+        .file-drop {
+            border: 2px dashed #333;
+            border-radius: 12px;
+            padding: 32px 20px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.2s;
+            background: rgba(0,0,0,0.3);
+        }
+        .file-drop:hover, .file-drop.dragover {
+            border-color: #22c55e;
+            background: rgba(34, 197, 94, 0.05);
+        }
+        .file-drop-icon { font-size: 36px; margin-bottom: 8px; }
+        .file-drop-text { color: #888; font-size: 14px; }
+        .file-drop-text strong { color: #22c55e; }
+        .file-name {
+            margin-top: 8px;
+            font-size: 14px;
+            color: #22c55e;
+            font-weight: 500;
+        }
+        .file-input { display: none; }
         .features {
             display: grid;
             grid-template-columns: repeat(3, 1fr);
@@ -195,18 +251,41 @@
     <div class="container">
         <div class="logo">🎬</div>
         <h1>Online Video Dubber</h1>
-        <p class="subtitle">Paste any video URL, pick a language, and get a dubbed video.<br>Supports YouTube, Vimeo, and direct video links.</p>
+        <p class="subtitle">Upload a video file or paste a URL, pick a language, and get a dubbed video.</p>
 
         <div class="form-card">
-            <form action="{{ route('dub.submit') }}" method="POST">
+            <form action="{{ route('dub.submit') }}" method="POST" enctype="multipart/form-data" id="dubForm">
                 @csrf
+
+                <div class="mode-tabs">
+                    <button type="button" class="mode-tab active" data-mode="upload">Upload File</button>
+                    <button type="button" class="mode-tab" data-mode="url">Paste URL</button>
+                </div>
+
                 <div class="input-group">
-                    <div>
+                    <!-- File Upload Panel -->
+                    <div class="mode-panel active" id="panel-upload">
+                        <div class="file-drop" id="fileDrop">
+                            <div class="file-drop-icon">📁</div>
+                            <div class="file-drop-text">
+                                <strong>Click to choose</strong> or drag & drop<br>
+                                MP4, MKV, AVI, WebM, MOV (max 500MB)
+                            </div>
+                            <div class="file-name" id="fileName"></div>
+                        </div>
+                        <input type="file" name="video" id="videoFile" class="file-input"
+                               accept=".mp4,.mkv,.avi,.webm,.mov">
+                        @error('video')
+                            <div class="error-message">{{ $message }}</div>
+                        @enderror
+                    </div>
+
+                    <!-- URL Panel -->
+                    <div class="mode-panel" id="panel-url">
                         <input type="url" name="url" id="videoUrl"
                                placeholder="Paste YouTube or video URL..."
                                value="{{ old('url') }}"
-                               class="@error('url') input-error @enderror"
-                               required>
+                               class="@error('url') input-error @enderror">
                         @error('url')
                             <div class="error-message">{{ $message }}</div>
                         @enderror
@@ -230,7 +309,7 @@
 
                 <input type="hidden" name="target_language" id="targetLanguage" value="{{ old('target_language', 'uz') }}">
 
-                <button type="submit" class="btn btn-primary">
+                <button type="submit" class="btn btn-primary" id="submitBtn">
                     Start Dubbing
                 </button>
             </form>
@@ -260,7 +339,7 @@
             <div class="recent-list">
                 @foreach($recentDubs as $dub)
                     <a href="{{ route('dub.progress', $dub) }}" class="recent-item">
-                        <span class="recent-url">{{ $dub->source_url }}</span>
+                        <span class="recent-url">{{ $dub->source_url ?: ('Uploaded: ' . basename($dub->original_path ?? 'video')) }}</span>
                         <span class="recent-lang">{{ $dub->target_language }}</span>
                         @if(in_array($dub->status, ['dubbed_complete', 'lipsync_done', 'done']))
                             <span class="badge badge-done">Done</span>
@@ -283,9 +362,9 @@
     </div>
 
     <script>
+        // Language selector
         const langOptions = document.querySelectorAll('.lang-option');
         const langInput = document.getElementById('targetLanguage');
-
         langOptions.forEach(btn => {
             btn.addEventListener('click', () => {
                 langOptions.forEach(b => b.classList.remove('active'));
@@ -294,7 +373,67 @@
             });
         });
 
-        document.getElementById('videoUrl').focus();
+        // Mode tabs (Upload / URL)
+        const modeTabs = document.querySelectorAll('.mode-tab');
+        const urlInput = document.getElementById('videoUrl');
+        const fileInput = document.getElementById('videoFile');
+
+        modeTabs.forEach(tab => {
+            tab.addEventListener('click', () => {
+                modeTabs.forEach(t => t.classList.remove('active'));
+                tab.classList.add('active');
+                document.querySelectorAll('.mode-panel').forEach(p => p.classList.remove('active'));
+                document.getElementById('panel-' + tab.dataset.mode).classList.add('active');
+
+                // Clear the inactive input so validation works
+                if (tab.dataset.mode === 'upload') {
+                    urlInput.value = '';
+                    urlInput.removeAttribute('required');
+                } else {
+                    fileInput.value = '';
+                    document.getElementById('fileName').textContent = '';
+                    urlInput.focus();
+                }
+            });
+        });
+
+        // File drop zone
+        const fileDrop = document.getElementById('fileDrop');
+        const fileNameEl = document.getElementById('fileName');
+
+        fileDrop.addEventListener('click', () => fileInput.click());
+
+        fileDrop.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            fileDrop.classList.add('dragover');
+        });
+        fileDrop.addEventListener('dragleave', () => fileDrop.classList.remove('dragover'));
+        fileDrop.addEventListener('drop', (e) => {
+            e.preventDefault();
+            fileDrop.classList.remove('dragover');
+            if (e.dataTransfer.files.length) {
+                fileInput.files = e.dataTransfer.files;
+                showFileName(e.dataTransfer.files[0]);
+            }
+        });
+
+        fileInput.addEventListener('change', () => {
+            if (fileInput.files.length) {
+                showFileName(fileInput.files[0]);
+            }
+        });
+
+        function showFileName(file) {
+            const sizeMB = (file.size / 1024 / 1024).toFixed(1);
+            fileNameEl.textContent = file.name + ' (' + sizeMB + ' MB)';
+        }
+
+        // Form submit - show loading state
+        document.getElementById('dubForm').addEventListener('submit', function() {
+            const btn = document.getElementById('submitBtn');
+            btn.disabled = true;
+            btn.textContent = 'Uploading...';
+        });
     </script>
 </body>
 </html>

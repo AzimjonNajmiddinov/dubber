@@ -78,6 +78,8 @@ _emotion_clf: Optional[Any] = None
 # ---------------- SCHEMA ----------------
 class AnalyzeRequest(BaseModel):
     audio_path: str
+    min_speakers: Optional[int] = None
+    max_speakers: Optional[int] = None
 
 
 # ---------------- HELPERS ----------------
@@ -353,7 +355,7 @@ def ready():
         return {"ok": False, "error": str(e)}
 
 
-def _analyze_audio(audio_path: str) -> dict:
+def _analyze_audio(audio_path: str, min_speakers: Optional[int] = None, max_speakers: Optional[int] = None) -> dict:
     """Core analysis logic shared by path-based and upload endpoints."""
     # 1) TRANSCRIBE
     whisper_model = get_whisper_model()
@@ -369,7 +371,13 @@ def _analyze_audio(audio_path: str) -> dict:
         try:
             diarize = get_diarize_pipeline()
             if diarize is not None:
-                diarization_df = diarize(audio_path)
+                diarize_kwargs = {}
+                if min_speakers is not None:
+                    diarize_kwargs["min_speakers"] = min_speakers
+                if max_speakers is not None:
+                    diarize_kwargs["max_speakers"] = max_speakers
+                print(f"[DIARIZE] Calling with kwargs: {diarize_kwargs}", flush=True)
+                diarization_df = diarize(audio_path, **diarize_kwargs)
                 diar_rows = diarization_df.to_dict("records")
 
                 # Debug: log diarization results
@@ -501,7 +509,7 @@ def analyze(req: AnalyzeRequest):
     with _analyze_lock:
         try:
             audio_path = resolve_audio_path(req.audio_path)
-            return _analyze_audio(audio_path)
+            return _analyze_audio(audio_path, min_speakers=req.min_speakers, max_speakers=req.max_speakers)
         except HTTPException:
             raise
         except Exception as e:
@@ -510,7 +518,11 @@ def analyze(req: AnalyzeRequest):
 
 
 @app.post("/analyze-upload")
-def analyze_upload(audio: UploadFile = File(...)):
+def analyze_upload(
+    audio: UploadFile = File(...),
+    min_speakers: Optional[int] = Form(None),
+    max_speakers: Optional[int] = Form(None),
+):
     """Analyze audio via file upload (for remote clients without shared filesystem)."""
     with _analyze_lock:
         tmp_path = None
@@ -522,7 +534,7 @@ def analyze_upload(audio: UploadFile = File(...)):
                 tmp_path = tmp.name
 
             print(f"[UPLOAD] Received {audio.filename}, saved to {tmp_path} ({os.path.getsize(tmp_path)} bytes)", flush=True)
-            return _analyze_audio(tmp_path)
+            return _analyze_audio(tmp_path, min_speakers=min_speakers, max_speakers=max_speakers)
         except HTTPException:
             raise
         except Exception as e:

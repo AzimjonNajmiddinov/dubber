@@ -211,7 +211,7 @@
                 Dubbing in Progress...
             @endif
         </h1>
-        <p class="source-url">{{ $video->source_url }}</p>
+        <p class="source-url">{{ $video->source_url ?: 'Uploaded file' }}</p>
 
         <div class="card">
             @if($failed)

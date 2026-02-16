@@ -3,16 +3,17 @@
 namespace App\Http\Controllers;
 
 use App\Jobs\DownloadVideoFromUrlJob;
+use App\Jobs\ExtractAudioJob;
 use App\Models\Video;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Storage;
 
 class OnlineDubController extends Controller
 {
     public function index()
     {
-        $recentDubs = Video::whereNotNull('source_url')
-            ->orderByDesc('id')
+        $recentDubs = Video::orderByDesc('id')
             ->limit(10)
             ->get();
 
@@ -21,14 +22,52 @@ class OnlineDubController extends Controller
 
     public function submit(Request $request)
     {
-        $validated = $request->validate([
-            'url' => 'required|url',
+        $request->validate([
+            'url' => 'nullable|required_without:video|url',
+            'video' => 'nullable|required_without:url|file|mimes:mp4,mkv,avi,webm,mov|max:512000',
             'target_language' => 'required|string|in:uz,ru,en',
         ]);
 
-        $url = $validated['url'];
-        $targetLanguage = $validated['target_language'];
+        $targetLanguage = $request->target_language;
 
+        // File upload path
+        if ($request->hasFile('video')) {
+            return $this->handleFileUpload($request, $targetLanguage);
+        }
+
+        // URL path
+        return $this->handleUrlSubmit($request->url, $targetLanguage);
+    }
+
+    private function handleFileUpload(Request $request, string $targetLanguage)
+    {
+        $file = $request->file('video');
+        $path = $file->store('videos/originals', 'local');
+
+        if (!Storage::disk('local')->exists($path)) {
+            return back()->withErrors(['video' => 'File upload failed. Please try again.']);
+        }
+
+        $video = Video::create([
+            'original_path' => $path,
+            'target_language' => $targetLanguage,
+            'status' => 'uploaded',
+        ]);
+
+        Log::info('Online dubber: file uploaded', [
+            'video_id' => $video->id,
+            'filename' => $file->getClientOriginalName(),
+            'size' => $file->getSize(),
+            'target_language' => $targetLanguage,
+        ]);
+
+        ExtractAudioJob::dispatch($video->id);
+
+        return redirect()->route('dub.progress', $video);
+    }
+
+    private function handleUrlSubmit(string $url, string $targetLanguage)
+    {
         // Check for existing dub of same URL (deduplication)
         $existing = Video::where('source_url', $url)
             ->whereNotIn('status', ['failed', 'download_failed'])

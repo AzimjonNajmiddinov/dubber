@@ -153,11 +153,13 @@ class TranscribeWithWhisperXJob implements ShouldQueue, ShouldBeUnique
                 }
             } else {
                 // Short audio — single request (original flow)
+                // Don't retry on 404 — that's the expected "use upload" signal
                 $res = Http::timeout(600)
                     ->connectTimeout(5)
-                    ->retry(5, 500)
+                    ->retry(5, 500, throw: false)
                     ->post("{$whisperxUrl}/analyze", [
                         'audio_path' => $audioRel,
+                        'min_speakers' => 2,
                     ]);
 
                 if ($res->status() === 404 && file_exists($audioAbs)) {
@@ -168,7 +170,9 @@ class TranscribeWithWhisperXJob implements ShouldQueue, ShouldBeUnique
                     $res = Http::timeout(600)
                         ->connectTimeout(5)
                         ->attach('audio', file_get_contents($audioAbs), basename($audioAbs))
-                        ->post("{$whisperxUrl}/analyze-upload");
+                        ->post("{$whisperxUrl}/analyze-upload", [
+                            'min_speakers' => 2,
+                        ]);
                 }
 
                 if ($res->failed()) {
@@ -448,7 +452,9 @@ class TranscribeWithWhisperXJob implements ShouldQueue, ShouldBeUnique
         $res = Http::timeout(600)
             ->connectTimeout(5)
             ->attach('audio', file_get_contents($chunkPath), basename($chunkPath))
-            ->post("{$whisperxUrl}/analyze-upload");
+            ->post("{$whisperxUrl}/analyze-upload", [
+                'min_speakers' => 2,
+            ]);
 
         if ($res->failed()) {
             throw new \RuntimeException("WhisperX chunk request failed (HTTP {$res->status()})");
