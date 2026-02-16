@@ -167,6 +167,19 @@
             font-weight: 500;
         }
         .file-input { display: none; }
+        .progress-bar-track {
+            width: 100%;
+            height: 8px;
+            background: rgba(255,255,255,0.1);
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        .progress-bar-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #22c55e, #16a34a);
+            border-radius: 4px;
+            transition: width 0.3s ease;
+        }
         .features {
             display: grid;
             grid-template-columns: repeat(3, 1fr);
@@ -254,65 +267,77 @@
         <p class="subtitle">Upload a video file or paste a URL, pick a language, and get a dubbed video.</p>
 
         <div class="form-card">
-            <form action="{{ route('dub.submit') }}" method="POST" enctype="multipart/form-data" id="dubForm">
-                @csrf
+            <div class="mode-tabs">
+                <button type="button" class="mode-tab active" data-mode="upload">Upload File</button>
+                <button type="button" class="mode-tab" data-mode="url">Paste URL</button>
+            </div>
 
-                <div class="mode-tabs">
-                    <button type="button" class="mode-tab active" data-mode="upload">Upload File</button>
-                    <button type="button" class="mode-tab" data-mode="url">Paste URL</button>
+            <!-- File Upload Panel (uses JS chunked upload) -->
+            <div class="mode-panel active" id="panel-upload">
+                <div class="input-group">
+                    <div class="file-drop" id="fileDrop">
+                        <div class="file-drop-icon">📁</div>
+                        <div class="file-drop-text">
+                            <strong>Click to choose</strong> or drag & drop<br>
+                            MP4, MKV, AVI, WebM, MOV (max 500MB)
+                        </div>
+                        <div class="file-name" id="fileName"></div>
+                    </div>
+                    <input type="file" id="videoFile" class="file-input"
+                           accept=".mp4,.mkv,.avi,.webm,.mov">
+                    <div class="error-message" id="uploadError" style="display:none"></div>
+
+                    <div class="language-selector">
+                        <button type="button" class="lang-option active" data-lang="uz">🇺🇿 Uzbek</button>
+                        <button type="button" class="lang-option" data-lang="ru">🇷🇺 Russian</button>
+                        <button type="button" class="lang-option" data-lang="en">🇺🇸 English</button>
+                    </div>
                 </div>
 
-                <div class="input-group">
-                    <!-- File Upload Panel -->
-                    <div class="mode-panel active" id="panel-upload">
-                        <div class="file-drop" id="fileDrop">
-                            <div class="file-drop-icon">📁</div>
-                            <div class="file-drop-text">
-                                <strong>Click to choose</strong> or drag & drop<br>
-                                MP4, MKV, AVI, WebM, MOV (max 500MB)
-                            </div>
-                            <div class="file-name" id="fileName"></div>
-                        </div>
-                        <input type="file" name="video" id="videoFile" class="file-input"
-                               accept=".mp4,.mkv,.avi,.webm,.mov">
-                        @error('video')
-                            <div class="error-message">{{ $message }}</div>
-                        @enderror
-                    </div>
+                <button type="button" class="btn btn-primary" id="uploadBtn" onclick="startChunkedUpload()">
+                    Start Dubbing
+                </button>
 
-                    <!-- URL Panel -->
-                    <div class="mode-panel" id="panel-url">
+                <!-- Upload progress (hidden until upload starts) -->
+                <div id="uploadProgress" style="display:none; margin-top:16px">
+                    <div class="progress-bar-track">
+                        <div class="progress-bar-fill" id="uploadBar" style="width:0%"></div>
+                    </div>
+                    <div style="color:#888; font-size:13px; margin-top:8px" id="uploadStatus">Uploading... 0%</div>
+                </div>
+            </div>
+
+            <!-- URL Panel (standard form POST) -->
+            <div class="mode-panel" id="panel-url">
+                <form action="{{ route('dub.submit') }}" method="POST" id="urlForm">
+                    @csrf
+                    <div class="input-group">
                         <input type="url" name="url" id="videoUrl"
                                placeholder="Paste YouTube or video URL..."
                                value="{{ old('url') }}"
-                               class="@error('url') input-error @enderror">
+                               class="@error('url') input-error @enderror"
+                               required>
                         @error('url')
+                            <div class="error-message">{{ $message }}</div>
+                        @enderror
+
+                        <div class="language-selector">
+                            <button type="button" class="lang-option active" data-lang="uz">🇺🇿 Uzbek</button>
+                            <button type="button" class="lang-option" data-lang="ru">🇷🇺 Russian</button>
+                            <button type="button" class="lang-option" data-lang="en">🇺🇸 English</button>
+                        </div>
+                        @error('target_language')
                             <div class="error-message">{{ $message }}</div>
                         @enderror
                     </div>
 
-                    <div class="language-selector">
-                        <button type="button" class="lang-option {{ old('target_language', 'uz') === 'uz' ? 'active' : '' }}" data-lang="uz">
-                            🇺🇿 Uzbek
-                        </button>
-                        <button type="button" class="lang-option {{ old('target_language') === 'ru' ? 'active' : '' }}" data-lang="ru">
-                            🇷🇺 Russian
-                        </button>
-                        <button type="button" class="lang-option {{ old('target_language') === 'en' ? 'active' : '' }}" data-lang="en">
-                            🇺🇸 English
-                        </button>
-                    </div>
-                    @error('target_language')
-                        <div class="error-message">{{ $message }}</div>
-                    @enderror
-                </div>
+                    <input type="hidden" name="target_language" id="urlTargetLanguage" value="uz">
 
-                <input type="hidden" name="target_language" id="targetLanguage" value="{{ old('target_language', 'uz') }}">
-
-                <button type="submit" class="btn btn-primary" id="submitBtn">
-                    Start Dubbing
-                </button>
-            </form>
+                    <button type="submit" class="btn btn-primary" id="urlSubmitBtn">
+                        Start Dubbing
+                    </button>
+                </form>
+            </div>
         </div>
 
         <div class="features">
@@ -362,51 +387,44 @@
     </div>
 
     <script>
-        // Language selector
-        const langOptions = document.querySelectorAll('.lang-option');
-        const langInput = document.getElementById('targetLanguage');
-        langOptions.forEach(btn => {
+        const CHUNK_SIZE = 2 * 1024 * 1024; // 2MB chunks (well under nginx limit)
+        const CSRF_TOKEN = '{{ csrf_token() }}';
+        let selectedLang = 'uz';
+
+        // Language selector (both panels share lang-option class)
+        document.querySelectorAll('.lang-option').forEach(btn => {
             btn.addEventListener('click', () => {
-                langOptions.forEach(b => b.classList.remove('active'));
+                // Only update buttons in the same panel
+                const panel = btn.closest('.mode-panel') || btn.closest('.form-card');
+                panel.querySelectorAll('.lang-option').forEach(b => b.classList.remove('active'));
                 btn.classList.add('active');
-                langInput.value = btn.dataset.lang;
+                selectedLang = btn.dataset.lang;
+                // Sync hidden input for URL form
+                const urlLang = document.getElementById('urlTargetLanguage');
+                if (urlLang) urlLang.value = selectedLang;
             });
         });
 
-        // Mode tabs (Upload / URL)
-        const modeTabs = document.querySelectorAll('.mode-tab');
-        const urlInput = document.getElementById('videoUrl');
-        const fileInput = document.getElementById('videoFile');
-
-        modeTabs.forEach(tab => {
+        // Mode tabs
+        document.querySelectorAll('.mode-tab').forEach(tab => {
             tab.addEventListener('click', () => {
-                modeTabs.forEach(t => t.classList.remove('active'));
+                document.querySelectorAll('.mode-tab').forEach(t => t.classList.remove('active'));
                 tab.classList.add('active');
                 document.querySelectorAll('.mode-panel').forEach(p => p.classList.remove('active'));
                 document.getElementById('panel-' + tab.dataset.mode).classList.add('active');
-
-                // Clear the inactive input so validation works
-                if (tab.dataset.mode === 'upload') {
-                    urlInput.value = '';
-                    urlInput.removeAttribute('required');
-                } else {
-                    fileInput.value = '';
-                    document.getElementById('fileName').textContent = '';
-                    urlInput.focus();
+                if (tab.dataset.mode === 'url') {
+                    document.getElementById('videoUrl').focus();
                 }
             });
         });
 
         // File drop zone
         const fileDrop = document.getElementById('fileDrop');
+        const fileInput = document.getElementById('videoFile');
         const fileNameEl = document.getElementById('fileName');
 
         fileDrop.addEventListener('click', () => fileInput.click());
-
-        fileDrop.addEventListener('dragover', (e) => {
-            e.preventDefault();
-            fileDrop.classList.add('dragover');
-        });
+        fileDrop.addEventListener('dragover', (e) => { e.preventDefault(); fileDrop.classList.add('dragover'); });
         fileDrop.addEventListener('dragleave', () => fileDrop.classList.remove('dragover'));
         fileDrop.addEventListener('drop', (e) => {
             e.preventDefault();
@@ -416,11 +434,8 @@
                 showFileName(e.dataTransfer.files[0]);
             }
         });
-
         fileInput.addEventListener('change', () => {
-            if (fileInput.files.length) {
-                showFileName(fileInput.files[0]);
-            }
+            if (fileInput.files.length) showFileName(fileInput.files[0]);
         });
 
         function showFileName(file) {
@@ -428,12 +443,115 @@
             fileNameEl.textContent = file.name + ' (' + sizeMB + ' MB)';
         }
 
-        // Form submit - show loading state
-        document.getElementById('dubForm').addEventListener('submit', function() {
-            const btn = document.getElementById('submitBtn');
+        // URL form submit - loading state
+        const urlForm = document.getElementById('urlForm');
+        if (urlForm) {
+            urlForm.addEventListener('submit', function() {
+                document.getElementById('urlSubmitBtn').disabled = true;
+                document.getElementById('urlSubmitBtn').textContent = 'Starting...';
+            });
+        }
+
+        // Chunked upload
+        function generateId() {
+            const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+            let id = '';
+            for (let i = 0; i < 16; i++) id += chars[Math.floor(Math.random() * chars.length)];
+            return id;
+        }
+
+        async function startChunkedUpload() {
+            const file = fileInput.files[0];
+            const errorEl = document.getElementById('uploadError');
+            const btn = document.getElementById('uploadBtn');
+
+            errorEl.style.display = 'none';
+
+            if (!file) {
+                errorEl.textContent = 'Please select a video file first.';
+                errorEl.style.display = 'block';
+                return;
+            }
+
+            const maxSize = 500 * 1024 * 1024;
+            if (file.size > maxSize) {
+                errorEl.textContent = 'File is too large. Maximum size is 500MB.';
+                errorEl.style.display = 'block';
+                return;
+            }
+
             btn.disabled = true;
             btn.textContent = 'Uploading...';
-        });
+            document.getElementById('uploadProgress').style.display = 'block';
+
+            const uploadId = generateId();
+            const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+            let uploaded = 0;
+
+            try {
+                for (let i = 0; i < totalChunks; i++) {
+                    const start = i * CHUNK_SIZE;
+                    const end = Math.min(start + CHUNK_SIZE, file.size);
+                    const chunk = file.slice(start, end);
+
+                    const formData = new FormData();
+                    formData.append('chunk', chunk, 'chunk');
+                    formData.append('upload_id', uploadId);
+                    formData.append('chunk_index', i);
+                    formData.append('total_chunks', totalChunks);
+                    formData.append('_token', CSRF_TOKEN);
+
+                    const res = await fetch('{{ route("dub.chunk") }}', {
+                        method: 'POST',
+                        body: formData,
+                    });
+
+                    if (!res.ok) {
+                        throw new Error('Chunk ' + i + ' upload failed (HTTP ' + res.status + ')');
+                    }
+
+                    uploaded++;
+                    const pct = Math.round((uploaded / totalChunks) * 95); // 95% = all chunks done
+                    document.getElementById('uploadBar').style.width = pct + '%';
+                    document.getElementById('uploadStatus').textContent = 'Uploading... ' + pct + '%';
+                }
+
+                // All chunks uploaded - tell server to assemble
+                document.getElementById('uploadStatus').textContent = 'Assembling file...';
+                document.getElementById('uploadBar').style.width = '97%';
+
+                const completeData = new FormData();
+                completeData.append('upload_id', uploadId);
+                completeData.append('total_chunks', totalChunks);
+                completeData.append('filename', file.name);
+                completeData.append('target_language', selectedLang);
+                completeData.append('_token', CSRF_TOKEN);
+
+                const completeRes = await fetch('{{ route("dub.complete") }}', {
+                    method: 'POST',
+                    body: completeData,
+                });
+
+                if (!completeRes.ok) {
+                    const errData = await completeRes.json().catch(() => ({}));
+                    throw new Error(errData.error || 'Assembly failed');
+                }
+
+                const result = await completeRes.json();
+                document.getElementById('uploadBar').style.width = '100%';
+                document.getElementById('uploadStatus').textContent = 'Done! Redirecting...';
+
+                if (result.redirect) {
+                    window.location.href = result.redirect;
+                }
+            } catch (err) {
+                errorEl.textContent = 'Upload failed: ' + err.message;
+                errorEl.style.display = 'block';
+                btn.disabled = false;
+                btn.textContent = 'Start Dubbing';
+                document.getElementById('uploadProgress').style.display = 'none';
+            }
+        }
     </script>
 </body>
 </html>

@@ -41,6 +41,8 @@ Route::get('/stream', [LiveDubController::class, 'index'])->name('stream.live');
 // Online video dubber
 Route::get('/dub', [OnlineDubController::class, 'index'])->name('dub.index');
 Route::post('/dub', [OnlineDubController::class, 'submit'])->name('dub.submit');
+Route::post('/dub/chunk', [OnlineDubController::class, 'uploadChunk'])->name('dub.chunk');
+Route::post('/dub/complete', [OnlineDubController::class, 'uploadComplete'])->name('dub.complete');
 Route::get('/dub/{video}', [OnlineDubController::class, 'progress'])->name('dub.progress');
 
 // Admin panel (password protected)

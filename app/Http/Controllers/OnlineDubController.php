@@ -5,9 +5,11 @@ namespace App\Http\Controllers;
 use App\Jobs\DownloadVideoFromUrlJob;
 use App\Jobs\ExtractAudioJob;
 use App\Models\Video;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 
 class OnlineDubController extends Controller
 {
@@ -22,48 +24,103 @@ class OnlineDubController extends Controller
 
     public function submit(Request $request)
     {
+        // URL-only submission (file upload uses chunked endpoint)
         $request->validate([
-            'url' => 'nullable|required_without:video|url',
-            'video' => 'nullable|required_without:url|file|mimes:mp4,mkv,avi,webm,mov|max:512000',
+            'url' => 'required|url',
             'target_language' => 'required|string|in:uz,ru,en',
         ]);
 
-        $targetLanguage = $request->target_language;
-
-        // File upload path
-        if ($request->hasFile('video')) {
-            return $this->handleFileUpload($request, $targetLanguage);
-        }
-
-        // URL path
-        return $this->handleUrlSubmit($request->url, $targetLanguage);
+        return $this->handleUrlSubmit($request->url, $request->target_language);
     }
 
-    private function handleFileUpload(Request $request, string $targetLanguage)
+    /**
+     * Receive a single chunk of a file upload (2MB pieces).
+     * Nginx blocks large POSTs, so JS splits the file into small chunks.
+     */
+    public function uploadChunk(Request $request): JsonResponse
     {
-        $file = $request->file('video');
-        $path = $file->store('videos/originals', 'local');
+        $request->validate([
+            'chunk' => 'required|file|max:3072', // 3MB max per chunk
+            'upload_id' => 'required|string|alpha_num|size:16',
+            'chunk_index' => 'required|integer|min:0',
+            'total_chunks' => 'required|integer|min:1',
+        ]);
 
-        if (!Storage::disk('local')->exists($path)) {
-            return back()->withErrors(['video' => 'File upload failed. Please try again.']);
+        $uploadId = $request->upload_id;
+        $chunkDir = "chunks/{$uploadId}";
+        Storage::disk('local')->makeDirectory($chunkDir);
+
+        $request->file('chunk')->storeAs($chunkDir, "chunk_{$request->chunk_index}", 'local');
+
+        return response()->json(['ok' => true, 'chunk' => (int) $request->chunk_index]);
+    }
+
+    /**
+     * All chunks uploaded - assemble file and start dubbing pipeline.
+     */
+    public function uploadComplete(Request $request): JsonResponse
+    {
+        $request->validate([
+            'upload_id' => 'required|string|alpha_num|size:16',
+            'total_chunks' => 'required|integer|min:1',
+            'filename' => 'required|string|max:255',
+            'target_language' => 'required|string|in:uz,ru,en',
+        ]);
+
+        $uploadId = $request->upload_id;
+        $chunkDir = "chunks/{$uploadId}";
+        $totalChunks = (int) $request->total_chunks;
+
+        // Verify all chunks exist
+        for ($i = 0; $i < $totalChunks; $i++) {
+            if (!Storage::disk('local')->exists("{$chunkDir}/chunk_{$i}")) {
+                return response()->json(['error' => "Missing chunk {$i}"], 422);
+            }
+        }
+
+        // Assemble chunks into final file
+        Storage::disk('local')->makeDirectory('videos/originals');
+        $ext = pathinfo($request->filename, PATHINFO_EXTENSION) ?: 'mp4';
+        $finalName = Str::random(16) . '.' . $ext;
+        $finalPath = "videos/originals/{$finalName}";
+        $finalAbsolute = Storage::disk('local')->path($finalPath);
+
+        $out = fopen($finalAbsolute, 'wb');
+        for ($i = 0; $i < $totalChunks; $i++) {
+            $chunkPath = Storage::disk('local')->path("{$chunkDir}/chunk_{$i}");
+            $in = fopen($chunkPath, 'rb');
+            stream_copy_to_stream($in, $out);
+            fclose($in);
+        }
+        fclose($out);
+
+        // Clean up chunks
+        Storage::disk('local')->deleteDirectory($chunkDir);
+
+        if (!file_exists($finalAbsolute) || filesize($finalAbsolute) < 1000) {
+            return response()->json(['error' => 'File assembly failed'], 500);
         }
 
         $video = Video::create([
-            'original_path' => $path,
-            'target_language' => $targetLanguage,
+            'original_path' => $finalPath,
+            'target_language' => $request->target_language,
             'status' => 'uploaded',
         ]);
 
-        Log::info('Online dubber: file uploaded', [
+        Log::info('Online dubber: chunked file uploaded', [
             'video_id' => $video->id,
-            'filename' => $file->getClientOriginalName(),
-            'size' => $file->getSize(),
-            'target_language' => $targetLanguage,
+            'filename' => $request->filename,
+            'size' => filesize($finalAbsolute),
+            'chunks' => $totalChunks,
+            'target_language' => $request->target_language,
         ]);
 
         ExtractAudioJob::dispatch($video->id);
 
-        return redirect()->route('dub.progress', $video);
+        return response()->json([
+            'ok' => true,
+            'redirect' => route('dub.progress', $video),
+        ]);
     }
 
     private function handleUrlSubmit(string $url, string $targetLanguage)
