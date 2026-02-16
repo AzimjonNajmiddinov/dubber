@@ -8,6 +8,7 @@
 
 .PHONY: help dev dev-down dev-logs build \
         cpanel-deploy cpanel-push cpanel-migrate cpanel-cache cpanel-logs \
+        rebuild rebuild-quick \
         runpod-deploy runpod-start runpod-stop runpod-logs runpod-status \
         fresh test
 
@@ -26,11 +27,15 @@ help:
 	@echo "    make fresh          - Fresh migrate + seed"
 	@echo ""
 	@echo "  cPanel Hosting (Laravel):"
-	@echo "    make cpanel-deploy  - Full deploy: build, push, setup"
+	@echo "    make cpanel-deploy  - Full deploy: build, push, setup (from local)"
 	@echo "    make cpanel-push    - Git push to origin"
 	@echo "    make cpanel-migrate - Run migrations on cPanel (via SSH)"
 	@echo "    make cpanel-cache   - Clear and rebuild caches (via SSH)"
 	@echo "    make cpanel-logs    - Tail Laravel log (via SSH)"
+	@echo ""
+	@echo "  Run on cPanel terminal:"
+	@echo "    make rebuild        - Full rebuild: pull, composer, migrate, cache"
+	@echo "    make rebuild-quick  - Quick rebuild: pull + clear caches"
 	@echo ""
 	@echo "  RunPod GPU Services:"
 	@echo "    make runpod-deploy  - Install deps + start all GPU services"
@@ -114,6 +119,40 @@ cpanel-cache:
 cpanel-logs:
 	@if [ -z "$(CPANEL_SSH)" ]; then echo "ERROR: Set CPANEL_SSH in .env"; exit 1; fi
 	ssh $(CPANEL_SSH) "tail -f $(CPANEL_PATH)/storage/logs/laravel.log"
+
+# ===========================================
+# Server-side (run directly on cPanel terminal)
+# ===========================================
+
+rebuild:
+	@echo "Pulling latest code..."
+	git pull origin main
+	@echo "Installing dependencies..."
+	php -d allow_url_fopen=1 $$(which composer) install --no-dev --optimize-autoloader --no-interaction --ignore-platform-reqs
+	@echo "Running migrations..."
+	php artisan migrate --force
+	@echo "Rebuilding caches..."
+	php artisan config:clear
+	php artisan route:clear
+	php artisan view:clear
+	php artisan config:cache
+	php artisan route:cache
+	php artisan view:cache
+	@echo "Restarting queue worker..."
+	php artisan queue:restart
+	@echo ""
+	@echo "Rebuild complete!"
+
+rebuild-quick:
+	git pull origin main
+	php artisan config:clear
+	php artisan route:clear
+	php artisan view:clear
+	php artisan config:cache
+	php artisan route:cache
+	php artisan view:cache
+	php artisan queue:restart
+	@echo "Quick rebuild complete!"
 
 # ===========================================
 # RunPod GPU Services
