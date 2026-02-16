@@ -61,7 +61,7 @@ if [ "$SKIP_DEPS" = false ]; then
     pip install $PIP_FLAGS \
         "huggingface_hub>=0.25,<1.0.0" \
         "transformers>=4.48,<4.50" \
-        "tokenizers>=0.22,<0.24" \
+        "tokenizers>=0.21,<0.24" \
         uvicorn fastapi python-multipart aiofiles pydantic
 
     # Verify torch wasn't changed by transitive dependencies
