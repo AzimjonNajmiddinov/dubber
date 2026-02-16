@@ -158,30 +158,37 @@ def get_speaker_embedding(voice_id: str):
     return gpt_cond_latent, speaker_embedding
 
 
-def normalize_uzbek_apostrophes(text: str) -> str:
+def normalize_uzbek_for_xtts(text: str) -> str:
     """
-    Normalize Uzbek apostrophe characters for consistent TTS.
+    Convert Uzbek special characters to Turkish equivalents for XTTS.
 
-    Uzbek Latin uses o' and g' for special sounds:
-    - o' (oʻ) - open O sound
-    - g' (gʻ) - voiced uvular fricative
+    XTTS uses Turkish (tr) phonemization for Uzbek. Turkish doesn't have
+    o' or g' - the apostrophe is meaningless to the Turkish phonemizer.
 
-    Different sources may use different apostrophe characters.
-    Normalize all to ASCII apostrophe (').
+    Uzbek → Turkish phonetic equivalents:
+    - o' (oʻ) open O → ö (Turkish ö, same sound)
+    - g' (gʻ) uvular fricative → ğ (Turkish ğ, close approximation)
+    - sh → ş (Turkish ş, same sound)
+    - ch → ç (Turkish ç, same sound)
     """
-    apostrophe_variants = {
-        ''': "'",   # U+2019 RIGHT SINGLE QUOTATION MARK
-        ''': "'",   # U+2018 LEFT SINGLE QUOTATION MARK
-        'ʻ': "'",   # U+02BB MODIFIER LETTER TURNED COMMA
-        'ʼ': "'",   # U+02BC MODIFIER LETTER APOSTROPHE
-        '`': "'",   # U+0060 GRAVE ACCENT (backtick)
-        '´': "'",   # U+00B4 ACUTE ACCENT
-        'ˈ': "'",   # U+02C8 MODIFIER LETTER VERTICAL LINE
-        '՚': "'",   # U+055A ARMENIAN APOSTROPHE
-    }
+    # First normalize all apostrophe variants to ASCII
+    apostrophe_variants = [''', ''', 'ʻ', 'ʼ', '`', '´', 'ˈ', '՚']
+    for variant in apostrophe_variants:
+        text = text.replace(variant, "'")
 
-    for variant, replacement in apostrophe_variants.items():
-        text = text.replace(variant, replacement)
+    # Convert Uzbek digraphs to Turkish equivalents
+    # Must handle both cases (uppercase and lowercase)
+    # o' → ö, O' → Ö
+    text = re.sub(r"[Oo]['\u0027]", lambda m: 'Ö' if m.group()[0].isupper() else 'ö', text)
+    # g' → ğ, G' → Ğ
+    text = re.sub(r"[Gg]['\u0027]", lambda m: 'Ğ' if m.group()[0].isupper() else 'ğ', text)
+    # sh → ş, Sh → Ş
+    text = re.sub(r'[Ss]h', lambda m: 'Ş' if m.group()[0].isupper() else 'ş', text)
+    # ch → ç, Ch → Ç
+    text = re.sub(r'[Cc]h', lambda m: 'Ç' if m.group()[0].isupper() else 'ç', text)
+
+    # Remove any remaining stray apostrophes that aren't part of words
+    # (but keep contractions like don't if any)
 
     return text
 
@@ -502,10 +509,11 @@ async def synthesize(request: SynthesizeRequest):
         }
         language = lang_map.get(request.language, "en")
 
-        # Normalize Uzbek apostrophes for consistent pronunciation
+        # Convert Uzbek characters to Turkish phonetic equivalents for XTTS
         text = request.text
         if request.language == "uz":
-            text = normalize_uzbek_apostrophes(text)
+            text = normalize_uzbek_for_xtts(text)
+            print(f"[XTTS] Uzbek text after normalization: {text[:100]}...", flush=True)
 
         # Split into chunks
         chunks = split_text_into_chunks(text)

@@ -83,7 +83,7 @@ if [ "$SKIP_DEPS" = false ]; then
     # TTS 0.22.0 requires pandas<2 and gruut needs numpy<2, which conflict
     # with whisperx. XTTS v2 works fine with modern numpy/pandas in practice.
     echo "  [6/7] Installing Demucs & TTS..."
-    pip install $PIP_FLAGS --no-deps demucs TTS
+    pip install $PIP_FLAGS --no-deps demucs TTS==0.22.0
 
     # Step 7: Install demucs/TTS dependencies (non-conflicting ones only)
     echo "  [7/7] Installing demucs/TTS dependencies..."

@@ -342,6 +342,44 @@ class TextNormalizer
     }
 
     /**
+     * Convert Uzbek text to Turkish phonetic equivalents for XTTS voice cloning.
+     *
+     * XTTS uses Turkish (tr) phonemization for Uzbek. Turkish doesn't have
+     * o' or g' digraphs, so we convert them to their Turkish equivalents:
+     * - o' (oʻ) → ö (same open O sound)
+     * - g' (gʻ) → ğ (close approximation of uvular fricative)
+     * - sh → ş (same sound)
+     * - ch → ç (same sound)
+     */
+    public static function uzbekToTurkishPhonetics(string $text): string
+    {
+        // First normalize apostrophes to ASCII
+        $text = self::normalizeUzbekCharacters($text);
+
+        // o' → ö, O' → Ö
+        $text = preg_replace_callback("/[Oo]'/", function ($m) {
+            return ctype_upper($m[0][0]) ? 'Ö' : 'ö';
+        }, $text);
+
+        // g' → ğ, G' → Ğ
+        $text = preg_replace_callback("/[Gg]'/", function ($m) {
+            return ctype_upper($m[0][0]) ? 'Ğ' : 'ğ';
+        }, $text);
+
+        // sh → ş, Sh → Ş
+        $text = preg_replace_callback('/[Ss]h/', function ($m) {
+            return ctype_upper($m[0][0]) ? 'Ş' : 'ş';
+        }, $text);
+
+        // ch → ç, Ch → Ç
+        $text = preg_replace_callback('/[Cc]h/', function ($m) {
+            return ctype_upper($m[0][0]) ? 'Ç' : 'ç';
+        }, $text);
+
+        return $text;
+    }
+
+    /**
      * Expand common abbreviations.
      */
     private static function expandAbbreviations(string $text, string $lang): string
