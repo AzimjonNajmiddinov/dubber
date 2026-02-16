@@ -129,7 +129,10 @@ if [ -n "$CUDNN_PATH" ]; then
     export LD_LIBRARY_PATH="${CUDNN_PATH}:${LD_LIBRARY_PATH}"
 fi
 
-# HF token for WhisperX (set in RunPod secrets or env)
+# Load HF_TOKEN from .env if not already set
+if [ -z "$HF_TOKEN" ] && [ -f /workspace/dubber/.env ]; then
+    HF_TOKEN=$(grep '^HF_TOKEN=' /workspace/dubber/.env | cut -d= -f2- | tr -d '"' | tr -d "'")
+fi
 export HF_TOKEN="${HF_TOKEN:-}"
 export DEVICE="cuda"
 
