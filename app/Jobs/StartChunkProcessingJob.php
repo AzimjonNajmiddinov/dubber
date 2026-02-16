@@ -180,9 +180,12 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
         $downloaded = false;
         $lastError = '';
 
+        // Check for cookies file (needed for YouTube bot detection bypass)
+        $cookiesFile = $this->findCookiesFile();
+
         if ($isYouTube) {
             // YouTube: try different clients
-            $clients = ['android_vr', 'android', 'ios', 'web'];
+            $clients = ['default', 'mweb', 'web', 'android'];
             foreach ($clients as $client) {
                 @unlink($absolutePath);
 
@@ -191,15 +194,27 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
                     'client' => $client,
                 ]);
 
-                $result = Process::timeout(1800)->run([
+                $cmd = [
                     'yt-dlp',
                     '-f', 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best',
                     '--merge-output-format', 'mp4',
                     '-o', $absolutePath,
                     '--no-playlist',
-                    '--extractor-args', "youtube:player_client={$client}",
-                    $url,
-                ]);
+                ];
+
+                if ($cookiesFile) {
+                    $cmd[] = '--cookies';
+                    $cmd[] = $cookiesFile;
+                }
+
+                if ($client !== 'default') {
+                    $cmd[] = '--extractor-args';
+                    $cmd[] = "youtube:player_client={$client}";
+                }
+
+                $cmd[] = $url;
+
+                $result = Process::timeout(1800)->run($cmd);
 
                 if ($result->successful() && file_exists($absolutePath) && filesize($absolutePath) > 10000) {
                     $downloaded = true;
@@ -323,5 +338,23 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
             // Very long videos (> 30 min): 15 second chunks to reduce overhead
             return 15;
         }
+    }
+
+    private function findCookiesFile(): ?string
+    {
+        $paths = [
+            base_path('cookies.txt'),
+            storage_path('app/cookies.txt'),
+            $_SERVER['HOME'] . '/.config/yt-dlp/cookies.txt',
+            $_SERVER['HOME'] . '/cookies.txt',
+        ];
+
+        foreach ($paths as $path) {
+            if (file_exists($path) && filesize($path) > 100) {
+                return $path;
+            }
+        }
+
+        return null;
     }
 }

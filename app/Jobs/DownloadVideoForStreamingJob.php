@@ -96,24 +96,39 @@ class DownloadVideoForStreamingJob implements ShouldQueue, ShouldBeUnique
 
     private function downloadWithYtDlp(string $url, string $outputPath): bool
     {
-        $clients = ['web', 'android', 'ios', 'tv_embedded'];
+        $clients = ['default', 'mweb', 'web', 'android'];
+
+        // Check for cookies file (needed for YouTube bot detection bypass)
+        $cookiesFile = $this->findCookiesFile();
 
         foreach ($clients as $client) {
             @unlink($outputPath);
 
-            $result = Process::timeout(3600)->run([
+            $cmd = [
                 'yt-dlp',
                 '-f', 'bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4][height<=1080]/best',
                 '--merge-output-format', 'mp4',
                 '-o', $outputPath,
                 '--no-playlist',
                 '--no-warnings',
-                '--extractor-args', "youtube:player_client={$client}",
-                '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
                 '--force-ipv4',
                 '--retries', '3',
-                $url,
-            ]);
+            ];
+
+            if ($cookiesFile) {
+                $cmd[] = '--cookies';
+                $cmd[] = $cookiesFile;
+            }
+
+            if ($client !== 'default') {
+                $cmd[] = '--extractor-args';
+                $cmd[] = "youtube:player_client={$client}";
+            }
+
+            $cmd[] = $url;
+
+            $result = Process::timeout(3600)->run($cmd);
 
             if ($result->successful() && file_exists($outputPath) && filesize($outputPath) > 10000) {
                 Log::info('yt-dlp download successful', [
@@ -175,5 +190,23 @@ class DownloadVideoForStreamingJob implements ShouldQueue, ShouldBeUnique
             @unlink($path);
             throw new \RuntimeException('Downloaded file has no video stream');
         }
+    }
+
+    private function findCookiesFile(): ?string
+    {
+        $paths = [
+            base_path('cookies.txt'),
+            storage_path('app/cookies.txt'),
+            $_SERVER['HOME'] . '/.config/yt-dlp/cookies.txt',
+            $_SERVER['HOME'] . '/cookies.txt',
+        ];
+
+        foreach ($paths as $path) {
+            if (file_exists($path) && filesize($path) > 100) {
+                return $path;
+            }
+        }
+
+        return null;
     }
 }

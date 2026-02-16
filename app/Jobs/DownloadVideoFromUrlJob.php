@@ -96,13 +96,19 @@ class DownloadVideoFromUrlJob implements ShouldQueue, ShouldBeUnique
     {
         Log::info('Attempting yt-dlp download', ['url' => $url]);
 
-        // Try different client configurations to bypass 403 errors
+        // Try different client configurations to bypass bot detection
         $clients = [
+            'default',       // Let yt-dlp choose (latest versions handle this best)
+            'mweb',          // Mobile web - often bypasses bot detection
             'web',           // Default web client
-            'android',       // Android client (often bypasses restrictions)
-            'ios',           // iOS client
-            'tv_embedded',   // TV embedded client
+            'android',       // Android client
         ];
+
+        // Check for cookies file (needed for YouTube bot detection bypass)
+        $cookiesFile = $this->findCookiesFile();
+        if ($cookiesFile) {
+            Log::info('Using cookies file for yt-dlp', ['cookies' => $cookiesFile]);
+        }
 
         foreach ($clients as $client) {
             Log::info("Trying yt-dlp with client: {$client}", ['url' => $url]);
@@ -110,20 +116,34 @@ class DownloadVideoFromUrlJob implements ShouldQueue, ShouldBeUnique
             // Clean up any partial download
             @unlink($outputPath);
 
-            $result = Process::timeout(3600)->run([
+            $cmd = [
                 'yt-dlp',
                 '-f', 'bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4][height<=1080]/best[height<=1080]/best',
                 '--merge-output-format', 'mp4',
                 '-o', $outputPath,
                 '--no-playlist',
                 '--no-warnings',
-                '--extractor-args', "youtube:player_client={$client}",
-                '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
                 '--force-ipv4',
                 '--retries', '3',
                 '--fragment-retries', '3',
-                $url,
-            ]);
+            ];
+
+            // Add cookies if available
+            if ($cookiesFile) {
+                $cmd[] = '--cookies';
+                $cmd[] = $cookiesFile;
+            }
+
+            // Add client-specific args (skip for 'default' to let yt-dlp decide)
+            if ($client !== 'default') {
+                $cmd[] = '--extractor-args';
+                $cmd[] = "youtube:player_client={$client}";
+            }
+
+            $cmd[] = $url;
+
+            $result = Process::timeout(3600)->run($cmd);
 
             if ($result->successful() && file_exists($outputPath) && filesize($outputPath) > 10000) {
                 Log::info('yt-dlp download successful', [
@@ -223,5 +243,27 @@ class DownloadVideoFromUrlJob implements ShouldQueue, ShouldBeUnique
 
         // Dispatch the regular pipeline
         ExtractAudioJob::dispatch($video->id);
+    }
+
+    /**
+     * Find a YouTube cookies file from common locations.
+     * Users should export cookies from their browser using "Get cookies.txt" extension.
+     */
+    private function findCookiesFile(): ?string
+    {
+        $paths = [
+            base_path('cookies.txt'),
+            storage_path('app/cookies.txt'),
+            $_SERVER['HOME'] . '/.config/yt-dlp/cookies.txt',
+            $_SERVER['HOME'] . '/cookies.txt',
+        ];
+
+        foreach ($paths as $path) {
+            if (file_exists($path) && filesize($path) > 100) {
+                return $path;
+            }
+        }
+
+        return null;
     }
 }
