@@ -270,8 +270,9 @@ class TranscribeWithWhisperXJob implements ShouldQueue, ShouldBeUnique
                         'updated_at' => $now,
                     ]);
 
+                    $speaker->save(); // Save first so getSpeakerIndex() can find this speaker's ID
                     $tuner->applyDefaults($video, $speaker);
-                    $speaker->save();
+                    $speaker->save(); // Save tuned TTS values
 
                     $speakerIdByExternal[$external] = $speaker->id;
                 }
@@ -342,8 +343,9 @@ class TranscribeWithWhisperXJob implements ShouldQueue, ShouldBeUnique
                             'updated_at' => $now,
                         ]);
 
+                        $speaker->save(); // Save first so getSpeakerIndex() can find this speaker's ID
                         $tuner->applyDefaults($video, $speaker);
-                        $speaker->save();
+                        $speaker->save(); // Save tuned TTS values
 
                         $speakerIdByExternal[$external] = $speaker->id;
                     }

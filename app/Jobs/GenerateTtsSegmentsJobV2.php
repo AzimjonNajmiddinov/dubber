@@ -301,16 +301,10 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
         try {
             $outputPath = $driver->synthesize($text, $speaker, $seg, $options);
 
-            // Post-synthesis Step 1: Apply natural speech processing for human-like sound
+            // Post-synthesis: Apply natural speech processing for human-like sound
+            // Breath insertion removed - pink noise sounds artificial and shifts timing.
+            // Real voice cloning (XTTS) includes natural breathing; Edge TTS doesn't benefit.
             $naturalProcessor = app(NaturalSpeechProcessor::class);
-
-            // Add breath sounds for long sentences or emotional delivery
-            if ($naturalProcessor->shouldInsertBreath($actingDirection, mb_strlen($text))) {
-                $breathType = $naturalProcessor->getBreathType($actingDirection);
-                $naturalProcessor->insertBreath($outputPath, $breathType, $emotion);
-            }
-
-            // Apply emotion-specific audio processing (warmth, tension, tremolo)
             $naturalProcessor->process($outputPath, $actingDirection);
 
             // Post-synthesis Step 2: Fit audio to available time (slot + gap until next segment)

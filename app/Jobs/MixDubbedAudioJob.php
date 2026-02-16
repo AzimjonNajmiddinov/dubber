@@ -86,20 +86,30 @@ class MixDubbedAudioJob implements ShouldQueue, ShouldBeUnique
             return '1'; // No ducking needed
         }
 
-        // Build between() terms with escaped commas for FFmpeg filter_complex
+        // Build smooth ramp terms: 150ms fade-in, 300ms fade-out per block
+        // Each block produces: clip(ramp_up, 0, 1) * clip(ramp_down, 0, 1)
+        // This gives smooth 0 → 1 → 0 envelope instead of instant switching
+        $fadeIn = 0.15;
+        $fadeOut = 0.30;
+
         $terms = [];
         foreach ($blocks as $b) {
+            $rampUpStart = $b['start'] - $fadeIn;
+            $rampDownEnd = $b['end'] + $fadeOut;
+            // min(max((t - rampUpStart) / fadeIn, 0), 1) * min(max((rampDownEnd - t) / fadeOut, 0), 1)
             $terms[] = sprintf(
-                'between(t\\,%.3f\\,%.3f)',
-                $b['start'],
-                $b['end']
+                'min(max((t-%.3f)/%.3f\\,0)\\,1)*min(max((%.3f-t)/%.3f\\,0)\\,1)',
+                $rampUpStart,
+                $fadeIn,
+                $rampDownEnd,
+                $fadeOut
             );
         }
 
-        // volume = 1 - min(sum, 1) * 0.6
-        // When TTS plays: 1 - 1*0.6 = 0.4 (-8dB) - background still audible
-        // When no TTS:    1 - 0*0.6 = 1.0  (full volume)
-        return '1-min(' . implode('+', $terms) . '\\,1)*0.6';
+        // volume = 1 - min(sum, 1) * 0.55
+        // During TTS: 1 - 1*0.55 = 0.45 (-7dB) - gradual feels less noticeable
+        // Between TTS: 1 - 0*0.55 = 1.0  (full volume)
+        return '1-min(' . implode('+', $terms) . '\\,1)*0.55';
     }
 
     public function handle(): void
@@ -136,6 +146,9 @@ class MixDubbedAudioJob implements ShouldQueue, ShouldBeUnique
             if ($segments->isEmpty()) {
                 throw new \RuntimeException("No TTS segments found for video {$video->id}");
             }
+
+            // Resolve overlapping segments before mixing (adjusts timing in-memory only)
+            $segments = $this->resolveOverlaps($segments, $video->id);
 
             // Output WAV for ReplaceVideoAudioJob
             $finalRel = "audio/final/{$video->id}.wav";
@@ -186,11 +199,10 @@ class MixDubbedAudioJob implements ShouldQueue, ShouldBeUnique
                 $delayMs = max(0, (int) round($slotStart * 1000));
                 $label = "tts{$i}";
 
-                // TTS processing - minimal fade to prevent clicks only
-                // Very short fades (10-15ms) - just enough to avoid audio pops
-                // NO aggressive fade-out that cuts word endings!
-                $fadeIn = 0.01;   // 10ms fade-in (click prevention only)
-                $fadeOut = 0.015; // 15ms fade-out (click prevention only)
+                // TTS processing - smooth transitions between adjacent segments
+                // Long enough to blend, short enough not to cut words
+                $fadeIn = 0.05;   // 50ms fade-in (smooth transition)
+                $fadeOut = 0.08;  // 80ms fade-out (smooth transition)
                 $fadeOutStart = max(0, $ttsDuration - $fadeOut);
 
                 $filtersBase[] =
@@ -327,5 +339,44 @@ class MixDubbedAudioJob implements ShouldQueue, ShouldBeUnique
         } finally {
             optional($lock)->release();
         }
+    }
+
+    /**
+     * Resolve overlapping TTS segments by trimming earlier segments.
+     * Adjusts timing in-memory only - does not modify DB records.
+     *
+     * If segment B starts before segment A ends, A's end_time is shortened
+     * to B.start_time - 50ms to create a small gap.
+     */
+    protected function resolveOverlaps($segments, int $videoId)
+    {
+        $overlapCount = 0;
+        $items = $segments->values();
+
+        for ($i = 0; $i < $items->count() - 1; $i++) {
+            $current = $items[$i];
+            $next = $items[$i + 1];
+
+            $currentEnd = (float) $current->end_time;
+            $nextStart = (float) $next->start_time;
+
+            if ($currentEnd > $nextStart) {
+                $newEnd = $nextStart - 0.05; // 50ms gap
+                if ($newEnd > (float) $current->start_time + 0.1) {
+                    // Only adjust in-memory attribute for mixing, not saved to DB
+                    $current->setAttribute('end_time', round($newEnd, 3));
+                    $overlapCount++;
+                }
+            }
+        }
+
+        if ($overlapCount > 0) {
+            Log::warning('Resolved overlapping TTS segments for mixing', [
+                'video_id' => $videoId,
+                'overlaps_resolved' => $overlapCount,
+            ]);
+        }
+
+        return $segments;
     }
 }

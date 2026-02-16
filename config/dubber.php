@@ -88,9 +88,9 @@ return [
         // rate in percent (string like +10%), clamp by numeric
         'rate_min' => -10,
         'rate_max' => 12,
-        // pitch in Hz (string like +3Hz) - kept mild for natural sound
-        'pitch_min' => -20,
-        'pitch_max' => 20,
+        // pitch in Hz (string like +3Hz) - widened to match SpeakerTuning range
+        'pitch_min' => -45,
+        'pitch_max' => 35,
     ],
 
     // Lip-sync settings (Wav2Lip)
