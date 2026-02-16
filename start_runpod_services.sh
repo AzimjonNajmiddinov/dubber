@@ -93,7 +93,7 @@ if [ "$SKIP_DEPS" = false ]; then
         encodec inflect anyascii \
         bangla bnnumerizer bnunicodenormalizer \
         g2pkk hangul-romanize jamo jieba num2words unidecode \
-        flask "spacy>=3" "gruut[de,es,fr]==2.2.3"
+        flask "spacy>=3"
 
     echo "Dependencies installed!"
 
@@ -107,7 +107,7 @@ if [ "$SKIP_DEPS" = false ]; then
     python -c "import transformers; print(f'  transformers: {transformers.__version__}')"
     python -c "import whisperx; print(f'  whisperx: OK')"
     python -c "import demucs; print(f'  demucs: OK')"
-    python -c "from TTS.api import TTS; print(f'  TTS: OK')"
+    python -c "from TTS.tts.models.xtts import Xtts; print(f'  TTS/XTTS: OK')"
     echo ""
 else
     echo "Skipping dependency check (--skip-deps)"
