@@ -129,9 +129,11 @@ if [ -n "$CUDNN_PATH" ]; then
     export LD_LIBRARY_PATH="${CUDNN_PATH}:${LD_LIBRARY_PATH}"
 fi
 
-# Load HF_TOKEN from .env if not already set
-if [ -z "$HF_TOKEN" ] && [ -f /workspace/dubber/.env ]; then
-    HF_TOKEN=$(grep '^HF_TOKEN=' /workspace/dubber/.env | cut -d= -f2- | tr -d '"' | tr -d "'")
+# Load env vars from .env if present
+if [ -f /workspace/dubber/.env ]; then
+    set -a
+    source <(grep -v '^\s*#' /workspace/dubber/.env | grep '=' | sed 's/\r//g')
+    set +a
 fi
 export HF_TOKEN="${HF_TOKEN:-}"
 export DEVICE="cuda"
