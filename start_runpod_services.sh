@@ -46,9 +46,10 @@ if [ "$SKIP_DEPS" = false ]; then
 
     # Step 2: Remove system packages that lack RECORD files (pip can't uninstall them)
     # then reinstall compatible versions fresh
-    echo "  [2/7] Fixing system packages (numpy/pandas/scipy)..."
+    echo "  [2/7] Fixing system packages (numpy/pandas/scipy/blinker)..."
     rm -rf /usr/local/lib/python3.11/dist-packages/{numpy,pandas,scipy}* 2>/dev/null || true
     rm -rf /usr/lib/python3/dist-packages/{numpy,pandas,scipy}* 2>/dev/null || true
+    rm -rf /usr/lib/python3/dist-packages/blinker* 2>/dev/null || true
     pip install $PIP_FLAGS numpy==2.3.0 "pandas>=2.2.3,<3" "scipy>=1.12"
 
     # Step 3: PyTorch 2.8.0 with CUDA 12.6 (pinned to match whisperx ~=2.8.0)
