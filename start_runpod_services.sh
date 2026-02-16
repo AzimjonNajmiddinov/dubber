@@ -93,7 +93,7 @@ if [ "$SKIP_DEPS" = false ]; then
         encodec inflect anyascii \
         bangla bnnumerizer bnunicodenormalizer \
         g2pkk hangul-romanize jamo jieba num2words unidecode \
-        flask "spacy>=3"
+        flask "spacy>=3" "gruut[de,es,fr]==2.2.3"
 
     echo "Dependencies installed!"
 
