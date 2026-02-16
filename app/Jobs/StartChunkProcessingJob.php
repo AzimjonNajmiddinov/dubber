@@ -272,9 +272,9 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
             }
         }
 
-        // Fallback: try Cobalt API if yt-dlp failed
+        // Fallback: try Invidious API if yt-dlp failed (YouTube only)
         if (!$downloaded) {
-            $downloaded = $this->downloadWithCobalt($url, $absolutePath);
+            $downloaded = $this->downloadWithInvidious($url, $absolutePath);
         }
 
         if (!$downloaded) {
@@ -345,63 +345,62 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
         }
     }
 
-    private function downloadWithCobalt(string $url, string $outputPath): bool
+    private function downloadWithInvidious(string $url, string $outputPath): bool
     {
-        $cleanUrl = preg_replace('/[&?](t|si|feature|pp)=[^&]*/', '', $url);
-        $cleanUrl = rtrim($cleanUrl, '?&');
+        $videoId = $this->extractYouTubeId($url);
+        if (!$videoId) {
+            return false;
+        }
 
         $instances = [
-            'https://api.cobalt.tools',
-            'https://cobalt-api.kwiatekmiki.com',
+            'https://inv.nadeko.net',
+            'https://invidious.nerdvpn.de',
+            'https://invidious.jing.rocks',
+            'https://iv.nboez.com',
         ];
 
-        foreach ($instances as $apiBase) {
-            Log::info('Attempting Cobalt API download', ['url' => $cleanUrl, 'instance' => $apiBase]);
-
+        foreach ($instances as $instance) {
             try {
-                $response = Http::timeout(30)
-                    ->withHeaders([
-                        'Accept' => 'application/json',
-                        'Content-Type' => 'application/json',
-                    ])
-                    ->post($apiBase, [
-                        'url' => $cleanUrl,
-                        'videoQuality' => '720',
-                        'filenameStyle' => 'basic',
-                    ]);
-
-                if (!$response->successful()) {
-                    continue;
-                }
+                $response = Http::timeout(15)->get("{$instance}/api/v1/videos/{$videoId}");
+                if (!$response->successful()) continue;
 
                 $data = $response->json();
-                $downloadUrl = $data['url'] ?? null;
-                $status = $data['status'] ?? '';
+                $downloadUrl = null;
 
-                if (!$downloadUrl || !in_array($status, ['redirect', 'tunnel', 'stream'])) {
-                    continue;
+                foreach (($data['formatStreams'] ?? []) as $stream) {
+                    if (!($stream['url'] ?? null) || !str_contains($stream['type'] ?? '', 'video/mp4')) continue;
+                    $downloadUrl = $stream['url'];
+                    if (str_contains($stream['qualityLabel'] ?? '', '720')) break;
                 }
 
-                $dlResponse = Http::withOptions([
-                    'sink' => $outputPath,
-                    'timeout' => 3600,
-                    'connect_timeout' => 30,
-                ])->get($downloadUrl);
+                if (!$downloadUrl) continue;
+
+                Http::withOptions(['sink' => $outputPath, 'timeout' => 3600, 'connect_timeout' => 30])
+                    ->withHeaders(['User-Agent' => 'Mozilla/5.0'])
+                    ->get($downloadUrl);
 
                 if (file_exists($outputPath) && filesize($outputPath) > 10000) {
-                    Log::info('Cobalt API download successful', [
-                        'url' => $cleanUrl,
-                        'instance' => $apiBase,
-                        'size' => filesize($outputPath),
-                    ]);
+                    Log::info('Invidious download successful', ['instance' => $instance, 'size' => filesize($outputPath)]);
                     return true;
                 }
             } catch (\Throwable $e) {
-                Log::warning('Cobalt API error', ['instance' => $apiBase, 'error' => $e->getMessage()]);
+                Log::warning('Invidious error', ['instance' => $instance, 'error' => $e->getMessage()]);
             }
         }
 
         return false;
+    }
+
+    private function extractYouTubeId(string $url): ?string
+    {
+        $patterns = [
+            '/(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([a-zA-Z0-9_-]{11})/',
+            '/youtube\.com\/shorts\/([a-zA-Z0-9_-]{11})/',
+        ];
+        foreach ($patterns as $pattern) {
+            if (preg_match($pattern, $url, $m)) return $m[1];
+        }
+        return null;
     }
 
     private function findCookiesFile(): ?string

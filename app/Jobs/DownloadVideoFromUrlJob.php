@@ -83,13 +83,19 @@ class DownloadVideoFromUrlJob implements ShouldQueue, ShouldBeUnique
             return;
         }
 
-        // Strategy 2: Cobalt API (free, no auth, works for YouTube/Twitter/TikTok/etc)
+        // Strategy 2: Cobalt API (requires API key in COBALT_API_KEY env)
         if ($this->tryCobaltApi($url, $absolutePath)) {
             $this->finalizeDownload($video, $relativePath, $absolutePath);
             return;
         }
 
-        // Strategy 3: Direct HTTP download (for direct video URLs)
+        // Strategy 3: Invidious API (free, no auth, YouTube only)
+        if ($this->tryInvidiousApi($url, $absolutePath)) {
+            $this->finalizeDownload($video, $relativePath, $absolutePath);
+            return;
+        }
+
+        // Strategy 4: Direct HTTP download (for direct video URLs)
         if ($this->tryDirectDownload($url, $absolutePath)) {
             $this->finalizeDownload($video, $relativePath, $absolutePath);
             return;
@@ -160,63 +166,133 @@ class DownloadVideoFromUrlJob implements ShouldQueue, ShouldBeUnique
 
     /**
      * Download video using Cobalt API (cobalt.tools).
-     * Free, open-source, no authentication needed.
-     * Supports YouTube, Twitter, TikTok, Instagram, Reddit, etc.
+     * Requires COBALT_API_KEY in .env (free key from cobalt.tools).
      */
     private function tryCobaltApi(string $url, string $outputPath): bool
     {
-        // Clean YouTube URL - remove timestamp and tracking params
+        $apiKey = env('COBALT_API_KEY');
+        if (!$apiKey) {
+            return false; // Skip if no API key configured
+        }
+
         $cleanUrl = preg_replace('/[&?](t|si|feature|pp)=[^&]*/', '', $url);
         $cleanUrl = rtrim($cleanUrl, '?&');
 
+        Log::info('Attempting Cobalt API download', ['url' => $cleanUrl]);
+
+        try {
+            $response = Http::timeout(30)
+                ->withHeaders([
+                    'Accept' => 'application/json',
+                    'Content-Type' => 'application/json',
+                    'Authorization' => "Api-Key {$apiKey}",
+                ])
+                ->post('https://api.cobalt.tools', [
+                    'url' => $cleanUrl,
+                    'videoQuality' => '720',
+                    'filenameStyle' => 'basic',
+                ]);
+
+            if (!$response->successful()) {
+                Log::warning('Cobalt API request failed', [
+                    'status' => $response->status(),
+                    'body' => mb_substr($response->body(), 0, 500),
+                ]);
+                return false;
+            }
+
+            $data = $response->json();
+            $downloadUrl = $data['url'] ?? null;
+            $status = $data['status'] ?? '';
+
+            if (!$downloadUrl || !in_array($status, ['redirect', 'tunnel', 'stream'])) {
+                return false;
+            }
+
+            $dlResponse = Http::withOptions([
+                'sink' => $outputPath,
+                'timeout' => 3600,
+                'connect_timeout' => 30,
+            ])->get($downloadUrl);
+
+            if (file_exists($outputPath) && filesize($outputPath) > 10000) {
+                Log::info('Cobalt API download successful', ['size' => filesize($outputPath)]);
+                return true;
+            }
+        } catch (\Throwable $e) {
+            Log::warning('Cobalt API error', ['error' => $e->getMessage()]);
+        }
+
+        return false;
+    }
+
+    /**
+     * Download YouTube video via Invidious API (free, no auth).
+     * Uses public Invidious instances to get direct video stream URLs.
+     */
+    private function tryInvidiousApi(string $url, string $outputPath): bool
+    {
+        // Extract YouTube video ID
+        $videoId = $this->extractYouTubeId($url);
+        if (!$videoId) {
+            return false; // Not a YouTube URL
+        }
+
         $instances = [
-            'https://api.cobalt.tools',
-            'https://cobalt-api.kwiatekmiki.com',
+            'https://inv.nadeko.net',
+            'https://invidious.nerdvpn.de',
+            'https://invidious.jing.rocks',
+            'https://iv.nboez.com',
+            'https://invidious.privacyredirect.com',
         ];
 
-        foreach ($instances as $apiBase) {
-            Log::info('Attempting Cobalt API download', ['url' => $cleanUrl, 'instance' => $apiBase]);
+        foreach ($instances as $instance) {
+            Log::info('Attempting Invidious download', ['videoId' => $videoId, 'instance' => $instance]);
 
             try {
-                $response = Http::timeout(30)
-                    ->withHeaders([
-                        'Accept' => 'application/json',
-                        'Content-Type' => 'application/json',
-                    ])
-                    ->post($apiBase, [
-                        'url' => $cleanUrl,
-                        'videoQuality' => '720',
-                        'filenameStyle' => 'basic',
-                    ]);
+                $response = Http::timeout(15)
+                    ->withHeaders(['User-Agent' => 'Mozilla/5.0'])
+                    ->get("{$instance}/api/v1/videos/{$videoId}");
 
                 if (!$response->successful()) {
-                    Log::warning('Cobalt API request failed', [
-                        'instance' => $apiBase,
-                        'status' => $response->status(),
-                        'body' => mb_substr($response->body(), 0, 500),
-                    ]);
                     continue;
                 }
 
                 $data = $response->json();
-                $status = $data['status'] ?? '';
-                $downloadUrl = $data['url'] ?? null;
-
-                if (!$downloadUrl || !in_array($status, ['redirect', 'tunnel', 'stream'])) {
-                    Log::warning('Cobalt API no download URL', [
-                        'instance' => $apiBase,
-                        'status' => $status,
-                        'error' => $data['error'] ?? null,
-                    ]);
+                if (!is_array($data)) {
                     continue;
                 }
 
-                Log::info('Cobalt API got download URL', [
-                    'instance' => $apiBase,
-                    'status' => $status,
-                ]);
+                // Find best video stream (prefer 720p mp4)
+                $downloadUrl = null;
+                $streams = $data['formatStreams'] ?? [];
 
-                // Download the actual video file
+                // Sort by quality - prefer 720p
+                foreach ($streams as $stream) {
+                    $quality = $stream['qualityLabel'] ?? '';
+                    $streamUrl = $stream['url'] ?? null;
+                    $type = $stream['type'] ?? '';
+
+                    if (!$streamUrl || !str_contains($type, 'video/mp4')) {
+                        continue;
+                    }
+
+                    $downloadUrl = $streamUrl;
+
+                    // Prefer 720p, but accept anything
+                    if (str_contains($quality, '720')) {
+                        break;
+                    }
+                }
+
+                if (!$downloadUrl) {
+                    Log::warning('Invidious: no suitable stream found', ['instance' => $instance]);
+                    continue;
+                }
+
+                Log::info('Invidious: downloading stream', ['instance' => $instance]);
+
+                // Download the video stream
                 $dlResponse = Http::withOptions([
                     'sink' => $outputPath,
                     'timeout' => 3600,
@@ -226,29 +302,37 @@ class DownloadVideoFromUrlJob implements ShouldQueue, ShouldBeUnique
                 ])->get($downloadUrl);
 
                 if (file_exists($outputPath) && filesize($outputPath) > 10000) {
-                    Log::info('Cobalt API download successful', [
-                        'url' => $cleanUrl,
-                        'instance' => $apiBase,
+                    Log::info('Invidious download successful', [
+                        'instance' => $instance,
                         'size' => filesize($outputPath),
                     ]);
                     return true;
                 }
-
-                Log::warning('Cobalt API download file too small or missing', [
-                    'instance' => $apiBase,
-                    'exists' => file_exists($outputPath),
-                    'size' => file_exists($outputPath) ? filesize($outputPath) : 0,
-                ]);
-
             } catch (\Throwable $e) {
-                Log::warning('Cobalt API error', [
-                    'instance' => $apiBase,
-                    'error' => $e->getMessage(),
-                ]);
+                Log::warning('Invidious error', ['instance' => $instance, 'error' => $e->getMessage()]);
             }
         }
 
         return false;
+    }
+
+    /**
+     * Extract YouTube video ID from various URL formats.
+     */
+    private function extractYouTubeId(string $url): ?string
+    {
+        $patterns = [
+            '/(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([a-zA-Z0-9_-]{11})/',
+            '/youtube\.com\/shorts\/([a-zA-Z0-9_-]{11})/',
+        ];
+
+        foreach ($patterns as $pattern) {
+            if (preg_match($pattern, $url, $matches)) {
+                return $matches[1];
+            }
+        }
+
+        return null;
     }
 
     private function tryDirectDownload(string $url, string $outputPath): bool
