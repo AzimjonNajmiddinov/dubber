@@ -3,23 +3,29 @@
 # Runs Demucs, WhisperX, XTTS, OpenVoice, Fish Speech, and Lipsync on GPU
 #
 # Usage:
-#   ./start_runpod_services.sh           # Full start with dependency check
-#   ./start_runpod_services.sh --skip-deps  # Skip dependency installation
-#   ./start_runpod_services.sh --deps-only  # Only install dependencies, don't start services
+#   ./start_runpod_services.sh                # All services
+#   ./start_runpod_services.sh --test-fish    # Only Demucs + WhisperX + Fish Speech (saves GPU memory)
+#   ./start_runpod_services.sh --skip-deps    # Skip dependency installation
+#   ./start_runpod_services.sh --deps-only    # Only install dependencies, don't start services
 
 set -e
 
 SKIP_DEPS=false
 DEPS_ONLY=false
+TEST_FISH=false
 
 for arg in "$@"; do
     case $arg in
         --skip-deps) SKIP_DEPS=true ;;
         --deps-only) DEPS_ONLY=true ;;
+        --test-fish) TEST_FISH=true ;;
     esac
 done
 
 echo "=== Starting RunPod GPU Services ==="
+if [ "$TEST_FISH" = true ]; then
+    echo "Mode: --test-fish (Demucs + WhisperX + Fish Speech only)"
+fi
 
 # Kill any existing services
 pkill -f "uvicorn.*8000" 2>/dev/null || true
@@ -81,21 +87,26 @@ if [ "$SKIP_DEPS" = false ]; then
     echo "  [5/7] Installing WhisperX..."
     pip install $PIP_FLAGS -c "$CONSTRAINTS" whisperx speechbrain
 
-    # Step 6: Demucs + TTS with --no-deps to avoid conflicts
-    # TTS 0.22.0 requires pandas<2 and gruut needs numpy<2, which conflict
-    # with whisperx. XTTS v2 works fine with modern numpy/pandas in practice.
-    echo "  [6/7] Installing Demucs & TTS..."
-    pip install $PIP_FLAGS --no-deps demucs TTS==0.22.0
+    if [ "$TEST_FISH" = false ]; then
+        # Step 6: Demucs + TTS with --no-deps to avoid conflicts
+        # TTS 0.22.0 requires pandas<2 and gruut needs numpy<2, which conflict
+        # with whisperx. XTTS v2 works fine with modern numpy/pandas in practice.
+        echo "  [6/7] Installing Demucs & TTS..."
+        pip install $PIP_FLAGS --no-deps demucs TTS==0.22.0
 
-    # Step 7: Install demucs/TTS dependencies (non-conflicting ones only)
-    echo "  [7/7] Installing demucs/TTS dependencies..."
-    pip install $PIP_FLAGS -c "$CONSTRAINTS" \
-        dora-search lameenc julius diffq einops openunmix treetable \
-        trainer coqpit librosa soundfile pysbd pypinyin umap-learn \
-        encodec inflect anyascii \
-        bangla bnnumerizer bnunicodenormalizer \
-        g2pkk hangul-romanize jamo jieba num2words unidecode \
-        flask "spacy>=3"
+        # Step 7: Install demucs/TTS dependencies (non-conflicting ones only)
+        echo "  [7/7] Installing demucs/TTS dependencies..."
+        pip install $PIP_FLAGS -c "$CONSTRAINTS" \
+            dora-search lameenc julius diffq einops openunmix treetable \
+            trainer coqpit librosa soundfile pysbd pypinyin umap-learn \
+            encodec inflect anyascii \
+            bangla bnnumerizer bnunicodenormalizer \
+            g2pkk hangul-romanize jamo jieba num2words unidecode \
+            flask "spacy>=3"
+    else
+        echo "  [6/7] Skipping Demucs & TTS deps (--test-fish mode)"
+        echo "  [7/7] Skipping demucs/TTS sub-deps (--test-fish mode)"
+    fi
 
     echo "Dependencies installed!"
 
@@ -108,8 +119,10 @@ if [ "$SKIP_DEPS" = false ]; then
     python -c "import scipy; print(f'  scipy: {scipy.__version__}')"
     python -c "import transformers; print(f'  transformers: {transformers.__version__}')"
     python -c "import whisperx; print(f'  whisperx: OK')"
-    python -c "import demucs; print(f'  demucs: OK')"
-    python -c "from TTS.tts.models.xtts import Xtts; print(f'  TTS/XTTS: OK')"
+    if [ "$TEST_FISH" = false ]; then
+        python -c "import demucs; print(f'  demucs: OK')"
+        python -c "from TTS.tts.models.xtts import Xtts; print(f'  TTS/XTTS: OK')"
+    fi
     echo ""
 else
     echo "Skipping dependency check (--skip-deps)"
@@ -160,20 +173,22 @@ echo "Starting WhisperX on port 8002..."
 cd /workspace/dubber/whisperx-service
 nohup python -m uvicorn app:app --host 0.0.0.0 --port 8002 > /tmp/whisperx.log 2>&1 &
 
-# Start XTTS on port 8004
-echo "Starting XTTS on port 8004..."
-cd /workspace/dubber/xtts-service
-nohup python -m uvicorn app:app --host 0.0.0.0 --port 8004 > /tmp/xtts.log 2>&1 &
+if [ "$TEST_FISH" = false ]; then
+    # Start XTTS on port 8004
+    echo "Starting XTTS on port 8004..."
+    cd /workspace/dubber/xtts-service
+    nohup python -m uvicorn app:app --host 0.0.0.0 --port 8004 > /tmp/xtts.log 2>&1 &
 
-# Start OpenVoice on port 8005 (isolated venv to avoid librosa conflicts)
-echo "Starting OpenVoice on port 8005..."
-cd /workspace/dubber/openvoice-service
-if [ ! -d "venv" ]; then
-    echo "  Creating OpenVoice venv..."
-    python -m venv venv
-    venv/bin/pip install --no-warn-script-location -q -r requirements.txt
+    # Start OpenVoice on port 8005 (isolated venv to avoid librosa conflicts)
+    echo "Starting OpenVoice on port 8005..."
+    cd /workspace/dubber/openvoice-service
+    if [ ! -d "venv" ]; then
+        echo "  Creating OpenVoice venv..."
+        python -m venv venv
+        venv/bin/pip install --no-warn-script-location -q -r requirements.txt
+    fi
+    nohup venv/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8005 > /tmp/openvoice.log 2>&1 &
 fi
-nohup venv/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8005 > /tmp/openvoice.log 2>&1 &
 
 # Start Fish Speech on port 8080 (isolated venv — separate torch/deps from XTTS)
 echo "Starting Fish Speech on port 8080..."
@@ -201,10 +216,12 @@ nohup venv/bin/python -m tools.api_server \
     --compile \
     > /tmp/fish-speech.log 2>&1 &
 
-# Start Lipsync on port 8006
-echo "Starting Lipsync on port 8006..."
-cd /workspace/dubber/lipsync-service
-nohup python -m uvicorn app:app --host 0.0.0.0 --port 8006 > /tmp/lipsync.log 2>&1 &
+if [ "$TEST_FISH" = false ]; then
+    # Start Lipsync on port 8006
+    echo "Starting Lipsync on port 8006..."
+    cd /workspace/dubber/lipsync-service
+    nohup python -m uvicorn app:app --host 0.0.0.0 --port 8006 > /tmp/lipsync.log 2>&1 &
+fi
 
 echo ""
 echo "Waiting for services to load models (90s)..."
@@ -213,12 +230,16 @@ sleep 90
 
 echo ""
 echo "=== Service Status ==="
-echo -n "Demucs (8000):   " && curl -s http://localhost:8000/health | python -c "import sys,json; d=json.load(sys.stdin); print(f'OK - GPU: {d.get(\"gpu_name\", \"N/A\")}')" 2>/dev/null || echo "Still loading..."
-echo -n "WhisperX (8002): " && curl -s http://localhost:8002/health | python -c "import sys,json; d=json.load(sys.stdin); print('OK' if d.get('ok') else 'Error')" 2>/dev/null || echo "Still loading..."
-echo -n "XTTS (8004):     " && curl -s http://localhost:8004/health | python -c "import sys,json; d=json.load(sys.stdin); print('OK' if d.get('status')=='healthy' else 'Error')" 2>/dev/null || echo "Still loading..."
-echo -n "OpenVoice (8005): " && curl -s http://localhost:8005/health | python -c "import sys,json; d=json.load(sys.stdin); print('OK' if d.get('status')=='healthy' else 'Error')" 2>/dev/null || echo "Still loading..."
+echo -n "Demucs (8000):    " && curl -s http://localhost:8000/health | python -c "import sys,json; d=json.load(sys.stdin); print(f'OK - GPU: {d.get(\"gpu_name\", \"N/A\")}')" 2>/dev/null || echo "Still loading..."
+echo -n "WhisperX (8002):  " && curl -s http://localhost:8002/health | python -c "import sys,json; d=json.load(sys.stdin); print('OK' if d.get('ok') else 'Error')" 2>/dev/null || echo "Still loading..."
+if [ "$TEST_FISH" = false ]; then
+    echo -n "XTTS (8004):      " && curl -s http://localhost:8004/health | python -c "import sys,json; d=json.load(sys.stdin); print('OK' if d.get('status')=='healthy' else 'Error')" 2>/dev/null || echo "Still loading..."
+    echo -n "OpenVoice (8005): " && curl -s http://localhost:8005/health | python -c "import sys,json; d=json.load(sys.stdin); print('OK' if d.get('status')=='healthy' else 'Error')" 2>/dev/null || echo "Still loading..."
+fi
 echo -n "Fish Speech (8080): " && curl -s http://localhost:8080/v1/health | python -c "import sys,json; d=json.load(sys.stdin); print('OK' if d.get('status')=='ok' else 'Error')" 2>/dev/null || echo "Still loading..."
-echo -n "Lipsync (8006):  " && curl -s http://localhost:8006/health | python -c "import sys,json; d=json.load(sys.stdin); print('OK' if d.get('ok') else 'Error')" 2>/dev/null || echo "Still loading..."
+if [ "$TEST_FISH" = false ]; then
+    echo -n "Lipsync (8006):   " && curl -s http://localhost:8006/health | python -c "import sys,json; d=json.load(sys.stdin); print('OK' if d.get('ok') else 'Error')" 2>/dev/null || echo "Still loading..."
+fi
 
 echo ""
 nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader
@@ -228,9 +249,21 @@ echo "=== READY ==="
 echo "Logs:"
 echo "  tail -f /tmp/demucs.log"
 echo "  tail -f /tmp/whisperx.log"
-echo "  tail -f /tmp/xtts.log"
-echo "  tail -f /tmp/openvoice.log"
+if [ "$TEST_FISH" = false ]; then
+    echo "  tail -f /tmp/xtts.log"
+    echo "  tail -f /tmp/openvoice.log"
+fi
 echo "  tail -f /tmp/fish-speech.log"
-echo "  tail -f /tmp/lipsync.log"
+if [ "$TEST_FISH" = false ]; then
+    echo "  tail -f /tmp/lipsync.log"
+fi
 echo ""
 echo "All logs: tail -f /tmp/*.log"
+
+if [ "$TEST_FISH" = true ]; then
+    echo ""
+    echo "=== Run Uzbek test ==="
+    echo "  cd /workspace/dubber/fish-speech-service"
+    echo "  pip install requests ormsgpack"
+    echo "  python test_uzbek.py --server http://localhost:8080"
+fi
