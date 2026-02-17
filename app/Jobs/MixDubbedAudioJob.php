@@ -67,7 +67,9 @@ class MixDubbedAudioJob implements ShouldQueue, ShouldBeUnique
     protected function buildDuckingExpression($segments): string
     {
         // Merge overlapping/adjacent segments with padding into blocks
-        $padding = 0.05; // 50ms padding before/after each segment
+        // 200ms padding merges ducking blocks within 400ms of each other,
+        // preventing background from "breathing" between rapid dialogue
+        $padding = 0.20;
         $blocks = [];
 
         foreach ($segments as $seg) {
@@ -136,7 +138,7 @@ class MixDubbedAudioJob implements ShouldQueue, ShouldBeUnique
                 return;
             }
 
-            // 2) Fetch TTS segments
+            // 2) Fetch TTS segments (with speaker for crossfade logic)
             $segments = VideoSegment::query()
                 ->where('video_id', $video->id)
                 ->whereNotNull('tts_audio_path')
@@ -169,6 +171,8 @@ class MixDubbedAudioJob implements ShouldQueue, ShouldBeUnique
             $filtersBase = [];
             $ttsLabels = [];
             $i = 1;
+            $prevSpeakerId = null;
+            $prevEndTime = 0;
 
             foreach ($segments as $seg) {
                 $ttsRel = $seg->tts_audio_path;
@@ -180,29 +184,32 @@ class MixDubbedAudioJob implements ShouldQueue, ShouldBeUnique
 
                 $inputs[] = '-i ' . escapeshellarg($ttsAbs);
 
-                // Get TTS duration for centering
-                $ttsDuration = 0;
+                // Get TTS duration for fade timing
                 $probeCmd = sprintf(
                     'ffprobe -v error -show_entries format=duration -of csv=p=0 %s 2>/dev/null',
                     escapeshellarg($ttsAbs)
                 );
                 $ttsDuration = (float) trim(shell_exec($probeCmd) ?? '0');
 
-                // Calculate slot duration
                 $slotStart = (float) $seg->start_time;
-                $slotEnd = (float) $seg->end_time;
-                $slotDuration = $slotEnd - $slotStart;
-
-                // START TTS AT SEGMENT START - no centering!
-                // Centering adds unnatural pauses. Better to start speaking immediately
-                // and let natural speech rhythm fill the slot.
                 $delayMs = max(0, (int) round($slotStart * 1000));
                 $label = "tts{$i}";
 
-                // TTS processing - smooth transitions between adjacent segments
-                // Long enough to blend, short enough not to cut words
-                $fadeIn = 0.05;   // 50ms fade-in (smooth transition)
-                $fadeOut = 0.08;  // 80ms fade-out (smooth transition)
+                // Same-speaker crossfade: longer fades for smooth blend between
+                // consecutive lines from the same speaker (gap < 500ms)
+                $currentSpeakerId = $seg->speaker_id;
+                $gap = $slotStart - $prevEndTime;
+
+                if ($currentSpeakerId && $currentSpeakerId === $prevSpeakerId && $gap < 0.5) {
+                    // Same speaker, rapid succession: smooth blend
+                    $fadeIn = 0.15;
+                    $fadeOut = 0.15;
+                } else {
+                    // Different speaker or large gap: quick transition
+                    $fadeIn = 0.05;
+                    $fadeOut = 0.08;
+                }
+
                 $fadeOutStart = max(0, $ttsDuration - $fadeOut);
 
                 $filtersBase[] =
@@ -215,6 +222,8 @@ class MixDubbedAudioJob implements ShouldQueue, ShouldBeUnique
                     . "[{$label}]";
 
                 $ttsLabels[] = "[{$label}]";
+                $prevSpeakerId = $currentSpeakerId;
+                $prevEndTime = (float) $seg->end_time;
                 $i++;
             }
 
@@ -361,7 +370,7 @@ class MixDubbedAudioJob implements ShouldQueue, ShouldBeUnique
             $nextStart = (float) $next->start_time;
 
             if ($currentEnd > $nextStart) {
-                $newEnd = $nextStart - 0.05; // 50ms gap
+                $newEnd = $nextStart - 0.03; // 30ms gap - tighter, more natural
                 if ($newEnd > (float) $current->start_time + 0.1) {
                     // Only adjust in-memory attribute for mixing, not saved to DB
                     $current->setAttribute('end_time', round($newEnd, 3));

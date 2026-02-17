@@ -21,7 +21,9 @@ class VideoSegment extends Model
         'intent',
         'acting_note',
         'tts_gain_db',
-        'tts_lufs'
+        'tts_lufs',
+        'formality',
+        'translation_attempt'
     ];
 
     public function speaker(): BelongsTo

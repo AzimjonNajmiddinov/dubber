@@ -2,6 +2,7 @@
 
 namespace App\Jobs;
 
+use App\Models\Speaker;
 use App\Models\Video;
 use App\Models\VideoSegment;
 use Illuminate\Bus\Queueable;
@@ -75,9 +76,13 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
 
             // Fetch all segments ordered by time for surrounding context
             $allSegments = VideoSegment::query()
+                ->with('speaker')
                 ->where('video_id', $video->id)
                 ->orderBy('start_time')
-                ->get(['id', 'text', 'translated_text', 'start_time', 'end_time']);
+                ->get(['id', 'speaker_id', 'text', 'translated_text', 'start_time', 'end_time']);
+
+            // Load all speakers for context building
+            $speakers = Speaker::where('video_id', $video->id)->get()->keyBy('id');
 
             $segments = $allSegments->filter(fn ($s) => $s->translated_text === null);
 
@@ -110,10 +115,11 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
                     continue;
                 }
 
-                // Find surrounding context
+                // Find surrounding context with speaker info
                 $segIndex = $segmentsList->search(fn ($s) => $s->id === $seg->id);
-                $prevText = $segIndex > 0 ? trim((string) $segmentsList[$segIndex - 1]->text) : '';
-                $nextText = $segIndex < $segmentsList->count() - 1 ? trim((string) $segmentsList[$segIndex + 1]->text) : '';
+
+                // Build scene context with speaker labels, gender, age
+                $sceneContext = $this->buildSceneContext($segmentsList, $segIndex, $speakers);
 
                 // Build emotional arc context from surrounding segments
                 $emotionArc = $this->buildEmotionArc($segmentsList, $segIndex);
@@ -138,11 +144,12 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
                 $direction = 'normal';
                 $detectedIntent = 'inform';
                 $actingNote = null;
+                $formality = 'sen';
                 $lastBody = null;
 
                 for ($attempt = 1; $attempt <= 2; $attempt++) {
                     // Use availableTime (includes gap) for character budget guidance
-                    $system = $this->buildSystemPrompt($targetLanguage, $attempt, $charCount, $prevText, $nextText, $availableTime, $emotionArc);
+                    $system = $this->buildSystemPrompt($targetLanguage, $attempt, $charCount, $sceneContext, $availableTime, $emotionArc);
 
                     // Build messages with few-shot examples for better accuracy
                     $messages = [
@@ -152,41 +159,46 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
                     // Add few-shot examples with enhanced emotion, delivery, intent detection
                     // IMPORTANT: Use Unicode ʻ (U+02BB) for Uzbek oʻ and gʻ
                     if (str_contains($targetLanguage, 'Uzbek') || str_contains($targetLanguage, 'uz')) {
+                        // Informal "sen" examples (friends, peers, elder→child)
                         $messages[] = ['role' => 'user', 'content' => 'Ask.'];
-                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Soʻra.","e":"neutral","d":"normal","i":"command","n":"simple command"}'];
+                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Soʻra.","e":"neutral","d":"normal","i":"command","n":"simple command","f":"sen"}'];
 
                         $messages[] = ['role' => 'user', 'content' => 'I can\'t believe this!'];
-                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Bunga ishonolmayman!","e":"surprise","d":"loud","i":"inform","n":"shocked, disbelief"}'];
+                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Bunga ishonolmayman!","e":"surprise","d":"loud","i":"inform","n":"shocked, disbelief","f":"sen"}'];
 
                         $messages[] = ['role' => 'user', 'content' => 'Get out of here right now!'];
-                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Hoziroq yoʻqol bu yerdan!","e":"angry","d":"shout","i":"command","n":"furious, commanding"}'];
+                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Hoziroq yoʻqol bu yerdan!","e":"angry","d":"shout","i":"command","n":"furious, commanding","f":"sen"}'];
 
                         $messages[] = ['role' => 'user', 'content' => 'I miss you so much...'];
-                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Seni juda sogʻindim...","e":"sad","d":"soft","i":"confide","n":"tender, vulnerable"}'];
-
-                        $messages[] = ['role' => 'user', 'content' => 'This is amazing! I love it!'];
-                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Bu ajoyib! Menga yoqdi!","e":"excited","d":"loud","i":"celebrate","n":"joyful, enthusiastic"}'];
+                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Seni juda sogʻindim...","e":"sad","d":"soft","i":"confide","n":"tender, vulnerable","f":"sen"}'];
 
                         $messages[] = ['role' => 'user', 'content' => 'Don\'t tell anyone, but...'];
-                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Hech kimga aytma, lekin...","e":"neutral","d":"whisper","i":"confide","n":"secretive, intimate"}'];
+                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Hech kimga aytma, lekin...","e":"neutral","d":"whisper","i":"confide","n":"secretive, intimate","f":"sen"}'];
 
                         $messages[] = ['role' => 'user', 'content' => 'Oh, you think you\'re so smart, don\'t you?'];
-                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Oh, oʻzingni aqlli deb oʻylaysan, shundaymi?","e":"contempt","d":"matter_of_fact","i":"mock","n":"sarcastic, condescending"}'];
-
-                        $messages[] = ['role' => 'user', 'content' => 'Please, I\'m begging you, don\'t do this!'];
-                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Iltimos, yolvoraman, bunday qilma!","e":"fear","d":"pleading","i":"plead","n":"desperate, trembling"}'];
+                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Oh, oʻzingni aqlli deb oʻylaysan, shundaymi?","e":"contempt","d":"matter_of_fact","i":"mock","n":"sarcastic, condescending","f":"sen"}'];
 
                         $messages[] = ['role' => 'user', 'content' => 'You have no idea what I\'m capable of.'];
-                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Men nimaga qodirligimni bilmaysan.","e":"angry","d":"tense","i":"threaten","n":"cold, menacing"}'];
+                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Men nimaga qodirligimni bilmaysan.","e":"angry","d":"tense","i":"threaten","n":"cold, menacing","f":"sen"}'];
 
                         $messages[] = ['role' => 'user', 'content' => 'Everything will be okay, I promise.'];
-                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Hammasi yaxshi boʻladi, vaʻda beraman.","e":"tender","d":"soft","i":"comfort","n":"warm, reassuring"}'];
-
-                        $messages[] = ['role' => 'user', 'content' => 'We did it! We actually did it!'];
-                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Uddaladik! Haqiqatan ham uddaladik!","e":"excited","d":"loud","i":"celebrate","n":"ecstatic, triumphant"}'];
+                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Hammasi yaxshi boʻladi, vaʻda beraman.","e":"tender","d":"soft","i":"comfort","n":"warm, reassuring","f":"sen"}'];
 
                         $messages[] = ['role' => 'user', 'content' => 'There is no paper with my goals written.'];
-                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Maqsadlarim yozilgan qogʻoz yoʻq.","e":"neutral","d":"normal","i":"inform","n":"matter of fact"}'];
+                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Maqsadlarim yozilgan qogʻoz yoʻq.","e":"neutral","d":"normal","i":"inform","n":"matter of fact","f":"sen"}'];
+
+                        // Formal "siz" examples (child→elder, stranger, authority)
+                        $messages[] = ['role' => 'user', 'content' => 'Grandpa, please tell me a story.'];
+                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Buva, iltimos menga ertak aytib bering.","e":"tender","d":"soft","i":"plead","n":"child asking gently","f":"siz"}'];
+
+                        $messages[] = ['role' => 'user', 'content' => 'Doctor, will he be okay?'];
+                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Doktor, u tuzaladimi?","e":"anxious","d":"trembling","i":"question","n":"worried, seeking comfort","f":"siz"}'];
+
+                        $messages[] = ['role' => 'user', 'content' => 'Excuse me, could you help me?'];
+                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Kechirasiz, menga yordam bera olasizmi?","e":"neutral","d":"soft","i":"plead","n":"polite request to stranger","f":"siz"}'];
+
+                        $messages[] = ['role' => 'user', 'content' => 'Please, I\'m begging you, don\'t do this!'];
+                        $messages[] = ['role' => 'assistant', 'content' => '{"t":"Iltimos, yolvoraman, bunday qilmang!","e":"fear","d":"pleading","i":"plead","n":"desperate, trembling","f":"siz"}'];
                     }
 
                     $messages[] = ['role' => 'user', 'content' => $src];
@@ -267,12 +279,19 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
                                 $detectedIntent = 'inform';
                             }
 
+                            // Parse formality field
+                            $formality = strtolower(trim($parsed['f'] ?? ''));
+                            if (!in_array($formality, ['sen', 'siz'])) {
+                                $formality = 'sen'; // default informal
+                            }
+
                             Log::info('Acting direction detected', [
                                 'segment_id' => $seg->id,
                                 'emotion' => $detectedEmotion,
                                 'delivery' => $detectedDirection,
                                 'intent' => $detectedIntent,
                                 'acting_note' => $actingNote,
+                                'formality' => $formality,
                             ]);
                         }
                     }
@@ -326,7 +345,7 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
                         'model' => 'gpt-4o',
                         'temperature' => 0.0,
                         'messages' => [
-                            ['role' => 'system', 'content' => $this->buildSystemPrompt($targetLanguage, 3, $charCount, $prevText, $nextText, $slotDuration)],
+                            ['role' => 'system', 'content' => $this->buildSystemPrompt($targetLanguage, 3, $charCount, $sceneContext, $slotDuration)],
                             ['role' => 'user', 'content' => $src],
                         ],
                     ]);
@@ -354,6 +373,7 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
                     'direction' => $direction,
                     'intent' => $detectedIntent ?? 'inform',
                     'acting_note' => $actingNote ?: null,
+                    'formality' => $formality ?? 'sen',
                 ]);
             }
 
@@ -384,7 +404,7 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
         return $raw;
     }
 
-    private function buildSystemPrompt(string $targetLanguage, int $attempt, int $charCount = 0, string $prevText = '', string $nextText = '', float $slotDuration = 0, string $emotionArc = ''): string
+    private function buildSystemPrompt(string $targetLanguage, int $attempt, int $charCount = 0, string $sceneContext = '', float $slotDuration = 0, string $emotionArc = ''): string
     {
         $extra = '';
         if ($attempt >= 2) {
@@ -400,35 +420,21 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
                 "- If a name is English, keep name but everything else Uzbek.\n";
         }
 
-        // Surrounding context block
+        // Scene context block (includes speaker labels, gender, age)
         $contextBlock = '';
-        if ($prevText !== '' || $nextText !== '') {
-            $contextBlock = "\nSURROUNDING DIALOGUE (for natural flow, do NOT translate these):\n";
-            if ($prevText !== '') {
-                $contextBlock .= "- Previous line: \"{$prevText}\"\n";
-            }
-            if ($nextText !== '') {
-                $contextBlock .= "- Next line: \"{$nextText}\"\n";
-            }
+        if ($sceneContext !== '') {
+            $contextBlock = "\nSCENE CONTEXT (use to determine formality and natural flow, do NOT translate these):\n" .
+                $sceneContext . "\n";
         }
 
-        // Time-aware character budget - VERY STRICT for dubbing sync
-        // Edge TTS Uzbek speaks at ~10 chars/sec at normal speed
-        // Use aggressive budgets to PREVENT sentence cutting:
-        // - Very short slots (<1.5s): 6 chars/sec (room for TTS variation)
-        // - Short slots (1.5-3s): 7 chars/sec
-        // - Normal slots (3s+): 8 chars/sec
-        // REALISTIC character budget - preserve meaning over strict timing!
-        // Normal speaking rate: 10-12 chars/sec. Speaker can speed up slightly if needed.
-        // NEVER cut sentences - better to speak faster than lose meaning.
+        // Time-aware character budget - STRICT for dubbing sync
+        // Uzbek is ~20-30% longer than English, so use tighter rates
         $budgetRule = '';
         $isUzbek = str_contains($targetLanguage, 'Uzbek') || str_contains($targetLanguage, 'uz');
 
         if ($slotDuration > 0) {
-            // Realistic rates - these are GUIDES, not hard limits
-            // TTS can handle 12-14 chars/sec by speaking faster
-            $normalRate = $isUzbek ? 10 : 11;  // Normal comfortable pace
-            $fastRate = $isUzbek ? 13 : 14;    // Fast but still clear
+            $normalRate = $isUzbek ? 9 : 10;
+            $fastRate = $isUzbek ? 11 : 13;
 
             $idealChars = (int) round($slotDuration * $normalRate);
             $maxChars = (int) round($slotDuration * $fastRate);
@@ -436,14 +442,13 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
             $slotRounded = round($slotDuration, 1);
 
             if ($slotDuration < 1.5) {
-                // Short slots - be concise but KEEP MEANING
-                $budgetRule = "Time: {$slotRounded}s. Aim for ~{$idealChars} chars (max ~{$maxChars}).\n" .
-                    "Be concise but PRESERVE FULL MEANING. Don't cut words.\n\n";
+                $budgetRule = "Time: {$slotRounded}s. HARD MAX: {$maxChars} chars. Going over will cause re-translation.\n" .
+                    "Use the SHORTEST possible translation that preserves meaning.\n\n";
             } elseif ($slotDuration < 3.0) {
-                $budgetRule = "Time: {$slotRounded}s. Target ~{$idealChars} chars.\n" .
-                    "Translate naturally, preserving complete meaning.\n\n";
+                $budgetRule = "Time: {$slotRounded}s. Target ~{$idealChars} chars. HARD MAX: {$maxChars} chars.\n" .
+                    "Going over {$maxChars} chars will cause re-translation.\n\n";
             } else {
-                $budgetRule = "Time available: {$slotRounded}s (~{$idealChars} chars).\n\n";
+                $budgetRule = "Time: {$slotRounded}s. Target ~{$idealChars} chars (max {$maxChars}).\n\n";
             }
         }
 
@@ -463,15 +468,16 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
                 "COMMON WORDS WITH gʻ:\n" .
                 "- togʻ (mountain), bogʻ (garden), qogʻoz (paper), sogʻliq (health)\n" .
                 "- toʻgʻri (correct), gʻalati (strange), bogʻliq (connected)\n\n" .
-                "FEʻL SHAKLLARI - FAQAT NORASMIY \"SEN\" ISHLATILSIN:\n" .
-                "- \"Ask\" = \"Soʻra\" (XATO: \"Soʻrang\")\n" .
-                "- \"Listen\" = \"Tingla\" (XATO: \"Tinglang\")\n" .
-                "- \"Come\" = \"Kel\" (XATO: \"Keling\")\n" .
-                "- \"Look\" = \"Qara\" (XATO: \"Qarang\")\n" .
-                "- \"Go\" = \"Bor\" yoki \"Ket\" (XATO: \"Boring\")\n\n" .
+                "RASMIYLIK / FORMALITY (\"f\" field in JSON):\n" .
+                "Analyze the SCENE CONTEXT to determine relationship between speakers:\n" .
+                "- Friends, peers, same age → \"sen\" (informal): Soʻra, Tingla, Kel, Qara, Bor\n" .
+                "- Child → Elder (parent, grandpa, teacher, doctor) → \"siz\" (formal): Soʻrang, Tinglang, Keling, Qarang, Boring\n" .
+                "- Strangers, first meeting → \"siz\" (formal)\n" .
+                "- To authority figures (boss, police, judge) → \"siz\" (formal)\n" .
+                "- Elder → Child, Boss → Employee → \"sen\" (informal)\n\n" .
                 "QOIDALAR:\n" .
                 "1. MAʻNONI SAQLANG - inglizcha gap nimani anglatsa, oʻzbekcha ham shu maʻnoni bersin\n" .
-                "2. NORASMIY SOʻZLASHING - doʻstingiz bilan gaplashgandek\n" .
+                "2. RASMIYLIKNI SAQLANG - kontekstga qarab \"sen\" yoki \"siz\" ishlating\n" .
                 "3. QISQA BOʻLSIN - dublyaj uchun\n";
         }
 
@@ -490,8 +496,9 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
             "2. Detect the PRIMARY emotion from context, punctuation, and meaning\n" .
             "3. Detect the DELIVERY style (how to physically speak the line)\n" .
             "4. Detect the INTENT (what speaker is trying to achieve)\n" .
-            "5. Return JSON format with ALL fields:\n" .
-            "   {\"t\":\"translation\",\"e\":\"emotion\",\"d\":\"delivery\",\"i\":\"intent\",\"n\":\"acting_note\"}\n\n" .
+            "5. Determine FORMALITY (sen/siz) from speaker relationships in scene context\n" .
+            "6. Return JSON format with ALL fields:\n" .
+            "   {\"t\":\"translation\",\"e\":\"emotion\",\"d\":\"delivery\",\"i\":\"intent\",\"n\":\"acting_note\",\"f\":\"sen_or_siz\"}\n\n" .
             "EMOTIONS (primary feeling - choose one):\n" .
             "neutral, happy, sad, angry, fear, surprise, excited, tender, anxious, contempt\n\n" .
             "DELIVERY STYLES (physical voice quality - choose one):\n" .
@@ -514,9 +521,10 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
             "- 'sarcastic, mocking undertone'\n" .
             "- 'trembling with fear'\n" .
             "- 'tender, comforting a child'\n\n" .
+            "FORMALITY (f): \"sen\" or \"siz\" based on speaker relationship in scene context.\n\n" .
             "TRANSLATION RULES:\n" .
             "- Translate MEANING, not word-by-word\n" .
-            "- Use informal speech (talking to a friend)\n" .
+            "- Match formality to speaker relationship (see scene context)\n" .
             "- Keep it concise for dubbing\n" .
             $budgetRule .
             $examples .
@@ -554,132 +562,50 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
     }
 
     /**
-     * Fix common "siz" forms that GPT keeps using despite instructions.
-     * Converts formal forms to informal "sen" forms for natural dubbing.
+     * Build scene context string showing surrounding segments with speaker info.
+     * Shows 5 previous + 2 next segments with speaker labels, gender, age.
      */
-    private function fixSizForms(string $text): string
+    private function buildSceneContext($segmentsList, int $currentIndex, $speakers): string
     {
-        // Imperative -ng → informal form (word boundary aware)
-        $imperatives = [
-            '/\bso\'rang\b/ui' => "so'ra",
-            '/\bkeling\b/ui' => 'kel',
-            '/\bqarang\b/ui' => 'qara',
-            '/\bayting\b/ui' => 'ayt',
-            '/\bboring\b/ui' => 'bor',
-            '/\bturing\b/ui' => "tur",
-            '/\bchiqing\b/ui' => 'chiq',
-            '/\boling\b/ui' => 'ol',
-            '/\bbering\b/ui' => 'ber',
-            '/\btinglang\b/ui' => 'tingla',
-            '/\bo\'qing\b/ui' => "o'qi",
-            '/\byozing\b/ui' => 'yoz',
-            '/\bkuting\b/ui' => 'kut',
-            '/\byuring\b/ui' => 'yur',
-            '/\bo\'tiring\b/ui' => "o'tir",
-            '/\bkiriting\b/ui' => 'kirit',
-        ];
+        $lines = [];
+        $count = $segmentsList->count();
 
-        foreach ($imperatives as $pattern => $replacement) {
-            $text = preg_replace($pattern, $replacement, $text);
-        }
+        $start = max(0, $currentIndex - 5);
+        $end = min($count - 1, $currentIndex + 2);
 
-        // Verb -siz endings → -san (careful not to match nouns)
-        // Only fix clear verb patterns
-        $verbSiz = [
-            '/(\w)asiz\b/ui' => '$1asan',
-            '/(\w)aysiz\b/ui' => '$1aysan',
-            '/(\w)isiz\b/ui' => '$1isan',
-            '/(\w)osiz\b/ui' => '$1osan',
-        ];
+        for ($i = $start; $i <= $end; $i++) {
+            $seg = $segmentsList[$i];
+            $text = trim((string) $seg->text);
+            if ($text === '') continue;
 
-        foreach ($verbSiz as $pattern => $replacement) {
-            $text = preg_replace($pattern, $replacement, $text);
-        }
-
-        // Pronouns (word boundary)
-        $text = preg_replace('/\bsizga\b/ui', 'senga', $text);
-        $text = preg_replace('/\bsizni\b/ui', 'seni', $text);
-        $text = preg_replace('/\bsizning\b/ui', 'sening', $text);
-
-        // "siz" as standalone pronoun when it means "you" → "sen"
-        // Be careful: "siz" could be part of compound words
-        $text = preg_replace('/\bSiz\b/u', 'Sen', $text);
-        $text = preg_replace('/\bsiz\b/u', 'sen', $text);
-
-        // Fix "so'rov berish" → "so'rash" (more natural)
-        $text = preg_replace('/so\'rov berish/ui', "so'rash", $text);
-        $text = preg_replace('/so\'rov qilish/ui', "so'rash", $text);
-
-        return $text;
-    }
-
-    /**
-     * Calculate maximum allowed characters for a given slot duration.
-     * Uses same logic as prompt but for validation.
-     */
-    private function calculateMaxChars(float $slotDuration, string $targetLanguage): int
-    {
-        $isUzbek = str_contains($targetLanguage, 'Uzbek') || str_contains($targetLanguage, 'uz');
-
-        if ($slotDuration < 1.0) {
-            $charsPerSec = 5;
-        } elseif ($slotDuration < 1.5) {
-            $charsPerSec = 6;
-        } elseif ($slotDuration < 3.0) {
-            $charsPerSec = 7;
-        } else {
-            $charsPerSec = $isUzbek ? 8 : 9;
-        }
-
-        return max(3, (int) floor($slotDuration * $charsPerSec));
-    }
-
-    /**
-     * Truncate text to fit within character budget, breaking at word boundaries.
-     * Preserves meaning by keeping complete words and adding ellipsis if needed.
-     */
-    private function truncateToFit(string $text, int $maxChars): string
-    {
-        if (mb_strlen($text) <= $maxChars) {
-            return $text;
-        }
-
-        // Try to break at sentence boundaries first
-        $sentences = preg_split('/([.!?])\s+/u', $text, -1, PREG_SPLIT_DELIM_CAPTURE);
-        $result = '';
-        for ($i = 0; $i < count($sentences) - 1; $i += 2) {
-            $sentence = $sentences[$i] . ($sentences[$i + 1] ?? '');
-            if (mb_strlen($result . $sentence) <= $maxChars) {
-                $result .= $sentence . ' ';
-            } else {
-                break;
+            // Get speaker info
+            $speakerLabel = 'UNKNOWN';
+            $speakerInfo = '';
+            if ($seg->speaker_id && isset($speakers[$seg->speaker_id])) {
+                $speaker = $speakers[$seg->speaker_id];
+                $speakerLabel = $speaker->label ?: ('SPEAKER_' . $speaker->id);
+                $parts = [];
+                if ($speaker->gender) $parts[] = $speaker->gender;
+                if ($speaker->age_group) $parts[] = $speaker->age_group;
+                if (!empty($parts)) {
+                    $speakerInfo = ' (' . implode(', ', $parts) . ')';
+                }
+            } elseif ($seg->speaker) {
+                $speaker = $seg->speaker;
+                $speakerLabel = $speaker->label ?: ('SPEAKER_' . $speaker->id);
+                $parts = [];
+                if ($speaker->gender) $parts[] = $speaker->gender;
+                if ($speaker->age_group) $parts[] = $speaker->age_group;
+                if (!empty($parts)) {
+                    $speakerInfo = ' (' . implode(', ', $parts) . ')';
+                }
             }
+
+            $marker = ($i === $currentIndex) ? ' [CURRENT LINE]' : '';
+            $lines[] = "{$speakerLabel}{$speakerInfo}: \"{$text}\"{$marker}";
         }
 
-        $result = trim($result);
-        if (mb_strlen($result) > 0 && mb_strlen($result) <= $maxChars) {
-            return $result;
-        }
-
-        // Fall back to word boundary truncation
-        $words = preg_split('/\s+/u', $text);
-        $result = '';
-        foreach ($words as $word) {
-            $test = $result === '' ? $word : $result . ' ' . $word;
-            if (mb_strlen($test) <= $maxChars) {
-                $result = $test;
-            } else {
-                break;
-            }
-        }
-
-        // If no words fit, take the first word truncated to maxChars
-        // This ensures we always return SOMETHING meaningful
-        if (mb_strlen(trim($result)) === 0 && count($words) > 0) {
-            $result = mb_substr($words[0], 0, $maxChars);
-        }
-
-        return trim($result);
+        return implode("\n", $lines);
     }
 
     /**
