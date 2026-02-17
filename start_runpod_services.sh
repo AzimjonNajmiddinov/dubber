@@ -25,6 +25,7 @@ echo "=== Starting RunPod GPU Services ==="
 pkill -f "uvicorn.*8000" 2>/dev/null || true
 pkill -f "uvicorn.*8002" 2>/dev/null || true
 pkill -f "uvicorn.*8004" 2>/dev/null || true
+pkill -f "uvicorn.*8005" 2>/dev/null || true
 pkill -f "uvicorn.*8006" 2>/dev/null || true
 sleep 2
 
@@ -163,6 +164,16 @@ echo "Starting XTTS on port 8004..."
 cd /workspace/dubber/xtts-service
 nohup python -m uvicorn app:app --host 0.0.0.0 --port 8004 > /tmp/xtts.log 2>&1 &
 
+# Start OpenVoice on port 8005 (isolated venv to avoid librosa conflicts)
+echo "Starting OpenVoice on port 8005..."
+cd /workspace/dubber/openvoice-service
+if [ ! -d "venv" ]; then
+    echo "  Creating OpenVoice venv..."
+    python -m venv venv
+    venv/bin/pip install --no-warn-script-location -q -r requirements.txt
+fi
+nohup venv/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8005 > /tmp/openvoice.log 2>&1 &
+
 # Start Lipsync on port 8006
 echo "Starting Lipsync on port 8006..."
 cd /workspace/dubber/lipsync-service
@@ -177,6 +188,7 @@ echo "=== Service Status ==="
 echo -n "Demucs (8000):   " && curl -s http://localhost:8000/health | python -c "import sys,json; d=json.load(sys.stdin); print(f'OK - GPU: {d.get(\"gpu_name\", \"N/A\")}')" 2>/dev/null || echo "Still loading..."
 echo -n "WhisperX (8002): " && curl -s http://localhost:8002/health | python -c "import sys,json; d=json.load(sys.stdin); print('OK' if d.get('ok') else 'Error')" 2>/dev/null || echo "Still loading..."
 echo -n "XTTS (8004):     " && curl -s http://localhost:8004/health | python -c "import sys,json; d=json.load(sys.stdin); print('OK' if d.get('status')=='healthy' else 'Error')" 2>/dev/null || echo "Still loading..."
+echo -n "OpenVoice (8005): " && curl -s http://localhost:8005/health | python -c "import sys,json; d=json.load(sys.stdin); print('OK' if d.get('status')=='healthy' else 'Error')" 2>/dev/null || echo "Still loading..."
 echo -n "Lipsync (8006):  " && curl -s http://localhost:8006/health | python -c "import sys,json; d=json.load(sys.stdin); print('OK' if d.get('ok') else 'Error')" 2>/dev/null || echo "Still loading..."
 
 echo ""
@@ -188,6 +200,7 @@ echo "Logs:"
 echo "  tail -f /tmp/demucs.log"
 echo "  tail -f /tmp/whisperx.log"
 echo "  tail -f /tmp/xtts.log"
+echo "  tail -f /tmp/openvoice.log"
 echo "  tail -f /tmp/lipsync.log"
 echo ""
 echo "All logs: tail -f /tmp/*.log"

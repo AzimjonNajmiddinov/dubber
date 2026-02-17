@@ -520,11 +520,7 @@ async def synthesize(request: SynthesizeRequest):
         }
         language = lang_map.get(request.language, "en")
 
-        # Convert Uzbek characters to Turkish phonetic equivalents for XTTS
         text = request.text
-        if request.language == "uz":
-            text = normalize_uzbek_for_xtts(text)
-            print(f"[XTTS] Uzbek text after normalization: {text[:100]}...", flush=True)
 
         # Split into chunks
         chunks = split_text_into_chunks(text)

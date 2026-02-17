@@ -138,12 +138,6 @@ class XttsDriver implements TtsDriverInterface
         // Normalize text for TTS (converts numbers to words, normalizes apostrophes, etc.)
         $text = TextNormalizer::normalize($text, $language);
 
-        // Convert Uzbek digraphs to Turkish phonetic equivalents for XTTS
-        // (o' → ö, g' → ğ, sh → ş, ch → ç) so Turkish phonemizer pronounces them correctly
-        if (in_array($language, ['uz', 'uzbek'])) {
-            $text = TextNormalizer::uzbekToTurkishPhonetics($text);
-        }
-
         $videoId = $segment->video_id;
         $segmentId = $segment->id;
 

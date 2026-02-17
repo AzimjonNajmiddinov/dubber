@@ -46,6 +46,10 @@ return [
         'url' => env('XTTS_SERVICE_URL', 'http://xtts:8000'),
     ],
 
+    'openvoice' => [
+        'url' => env('OPENVOICE_SERVICE_URL', 'http://localhost:8005'),
+    ],
+
     'whisperx' => [
         'url' => env('WHISPERX_SERVICE_URL', 'http://whisperx:8000'),
     ],

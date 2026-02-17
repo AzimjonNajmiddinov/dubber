@@ -26,6 +26,7 @@ class Speaker extends Model
         'tts_driver',           // edge, elevenlabs, openai, xtts
         'elevenlabs_voice_id',  // ElevenLabs voice ID (cloned or preset)
         'xtts_voice_id',        // XTTS cloned voice ID
+        'openvoice_speaker_key', // OpenVoice speaker embedding key
         'voice_sample_path',    // Path to extracted voice sample
         'voice_cloned',         // Whether voice has been cloned
     ];
@@ -62,7 +63,7 @@ class Speaker extends Model
     public function hasClonedVoice(): bool
     {
         return $this->voice_cloned &&
-            ($this->xtts_voice_id || $this->elevenlabs_voice_id);
+            ($this->xtts_voice_id || $this->elevenlabs_voice_id || $this->openvoice_speaker_key);
     }
 
     /**
@@ -73,6 +74,7 @@ class Speaker extends Model
         return match ($driver) {
             'elevenlabs' => $this->elevenlabs_voice_id,
             'xtts' => $this->xtts_voice_id,
+            'hybrid_uzbek' => $this->openvoice_speaker_key,
             'edge', 'openai' => $this->tts_voice,
             default => null,
         };

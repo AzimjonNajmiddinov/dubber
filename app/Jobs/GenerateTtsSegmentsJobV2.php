@@ -19,6 +19,7 @@ use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Facades\Storage;
@@ -316,6 +317,30 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
             // This allows words to be fully pronounced without cutting off
             $fitResult = $this->fitAudioToSlot($outputPath, $availableTime);
 
+            // Retranslation loop: if audio overflows and we haven't retranslated yet, try condensed translation
+            if ($fitResult['needs_retranslation'] && ($seg->translation_attempt ?? 0) < 2) {
+                $condensed = $this->requestCondensedTranslation($seg, $slotDuration);
+
+                if ($condensed !== null && $condensed !== $text) {
+                    Log::info('Retranslating with condensed text', [
+                        'segment_id' => $seg->id,
+                        'original_chars' => mb_strlen($text),
+                        'condensed_chars' => mb_strlen($condensed),
+                        'attempt' => ($seg->translation_attempt ?? 0) + 1,
+                    ]);
+
+                    $seg->update([
+                        'translated_text' => $condensed,
+                        'translation_attempt' => ($seg->translation_attempt ?? 0) + 1,
+                    ]);
+
+                    // Re-synthesize with condensed text
+                    $outputPath = $driver->synthesize($condensed, $speaker, $seg, $options);
+                    $naturalProcessor->process($outputPath, $actingDirection);
+                    $fitResult = $this->fitAudioToSlot($outputPath, $availableTime);
+                }
+            }
+
             // Update segment with output path
             $relPath = str_replace(Storage::disk('local')->path(''), '', $outputPath);
 
@@ -394,6 +419,91 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
     }
 
     /**
+     * Request a condensed translation from GPT-4o when the current translation overflows.
+     *
+     * @param VideoSegment $seg The segment needing condensation
+     * @param float $slotDuration Available time slot in seconds
+     * @return string|null Condensed translation or null if can't condense
+     */
+    protected function requestCondensedTranslation(VideoSegment $seg, float $slotDuration): ?string
+    {
+        $apiKey = (string) config('services.openai.key');
+        if (trim($apiKey) === '') {
+            return null;
+        }
+
+        $originalEnglish = trim((string) $seg->text);
+        $currentTranslation = trim((string) $seg->translated_text);
+        $maxChars = (int) round($slotDuration * 9); // Strict Uzbek rate
+        $formality = $seg->formality ?? 'sen';
+
+        if ($maxChars < 3) {
+            return null;
+        }
+
+        try {
+            $res = Http::withToken($apiKey)
+                ->acceptJson()
+                ->asJson()
+                ->timeout(30)
+                ->post('https://api.openai.com/v1/chat/completions', [
+                    'model' => 'gpt-4o',
+                    'temperature' => 0.1,
+                    'messages' => [
+                        ['role' => 'system', 'content' =>
+                            "You are an Uzbek translation condensing specialist for movie dubbing.\n\n" .
+                            "The current Uzbek translation is TOO LONG for the time slot.\n" .
+                            "Condense it to fit within {$maxChars} characters MAXIMUM.\n\n" .
+                            "RULES:\n" .
+                            "- Preserve the core MEANING and TONE\n" .
+                            "- Keep formality level: {$formality} (sen=informal, siz=formal)\n" .
+                            "- Use natural spoken Uzbek (not bookish)\n" .
+                            "- Use ʻ (U+02BB) for oʻ and gʻ\n" .
+                            "- Return ONLY the condensed Uzbek text, nothing else\n" .
+                            "- HARD LIMIT: {$maxChars} characters"
+                        ],
+                        ['role' => 'user', 'content' =>
+                            "English original: \"{$originalEnglish}\"\n" .
+                            "Current Uzbek (too long, " . mb_strlen($currentTranslation) . " chars): \"{$currentTranslation}\"\n" .
+                            "Max allowed: {$maxChars} chars\n\n" .
+                            "Condensed Uzbek:"
+                        ],
+                    ],
+                ]);
+
+            if ($res->failed()) {
+                return null;
+            }
+
+            $condensed = trim((string) $res->json('choices.0.message.content'));
+
+            // Strip quotes if GPT wraps in them
+            $condensed = trim($condensed, '"\'');
+
+            if ($condensed === '' || mb_strlen($condensed) > mb_strlen($currentTranslation)) {
+                return null;
+            }
+
+            Log::info('Condensed translation received', [
+                'segment_id' => $seg->id,
+                'original_chars' => mb_strlen($currentTranslation),
+                'condensed_chars' => mb_strlen($condensed),
+                'max_chars' => $maxChars,
+                'condensed' => mb_substr($condensed, 0, 80),
+            ]);
+
+            return $condensed;
+
+        } catch (\Throwable $e) {
+            Log::warning('Condensed translation request failed', [
+                'segment_id' => $seg->id,
+                'error' => $e->getMessage(),
+            ]);
+            return null;
+        }
+    }
+
+    /**
      * Fit TTS audio to the available time slot using HYBRID strategy.
      *
      * CRITICAL: NEVER cut or trim audio - sentences must ALWAYS be fully spoken!
@@ -447,8 +557,8 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
         $speedupNeeded = $audioDuration / $slotDuration;
 
         // NATURAL TIMING APPROACH:
-        // Minor overflow (up to 15%) is OKAY - sounds natural, slight extension into gap
-        // Only speed up if SIGNIFICANT overflow (>15%) and keep it gentle
+        // Minor overflow (up to 10%) is OKAY - sounds natural, slight extension into gap
+        // Speed up earlier and more gently to prevent severe overflow needing retranslation
         //
         // Real dubbing allows slight timing flexibility - not robotic exact fit
         // Max speedup 1.25x - anything more sounds unnatural/rushed
@@ -456,9 +566,8 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
         $maxSpeedup = 1.25;  // Gentler max - less noticeable
         $actualSpeedup = min($speedupNeeded, $maxSpeedup);
 
-        // Only apply speedup if significant overflow (>15%)
-        // Minor overflow sounds natural and extends into the gap
-        if ($speedupNeeded > 1.15) {
+        // Apply speedup if overflow exceeds 10% (earlier, gentler intervention)
+        if ($speedupNeeded > 1.10) {
             Log::info('TTS applying tempo adjustment', [
                 'path' => basename($audioPath),
                 'audio_duration' => round($audioDuration, 2),
@@ -625,6 +734,7 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
         return match ($driver->name()) {
             'elevenlabs' => 'elevenlabs_voice_id',
             'xtts' => 'xtts_voice_id',
+            'hybrid_uzbek' => 'openvoice_speaker_key',
             default => 'tts_voice',
         };
     }
