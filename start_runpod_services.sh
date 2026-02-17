@@ -1,6 +1,6 @@
 #!/bin/bash
 # Start GPU services on RunPod
-# Runs Demucs, WhisperX, XTTS, and Lipsync on GPU
+# Runs Demucs, WhisperX, XTTS, OpenVoice, Fish Speech, and Lipsync on GPU
 #
 # Usage:
 #   ./start_runpod_services.sh           # Full start with dependency check
@@ -27,6 +27,7 @@ pkill -f "uvicorn.*8002" 2>/dev/null || true
 pkill -f "uvicorn.*8004" 2>/dev/null || true
 pkill -f "uvicorn.*8005" 2>/dev/null || true
 pkill -f "uvicorn.*8006" 2>/dev/null || true
+pkill -f "tools.api_server" 2>/dev/null || true
 sleep 2
 
 # Pull latest code
@@ -174,14 +175,41 @@ if [ ! -d "venv" ]; then
 fi
 nohup venv/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8005 > /tmp/openvoice.log 2>&1 &
 
+# Start Fish Speech on port 8080 (isolated venv — separate torch/deps from XTTS)
+echo "Starting Fish Speech on port 8080..."
+FISH_DIR="/workspace/fish-speech"
+FISH_CKPT="${FISH_DIR}/checkpoints/openaudio-s1-mini"
+if [ ! -d "$FISH_DIR" ]; then
+    echo "  Cloning Fish Speech..."
+    git clone https://github.com/fishaudio/fish-speech.git "$FISH_DIR"
+fi
+cd "$FISH_DIR"
+if [ ! -d "venv" ]; then
+    echo "  Creating Fish Speech venv and installing deps (this takes a few minutes)..."
+    python -m venv venv
+    venv/bin/pip install --no-warn-script-location -q -e ".[cu126]"
+fi
+if [ ! -d "$FISH_CKPT" ]; then
+    echo "  Downloading OpenAudio S1-mini model..."
+    venv/bin/huggingface-cli download fishaudio/openaudio-s1-mini --local-dir "$FISH_CKPT"
+fi
+nohup venv/bin/python -m tools.api_server \
+    --listen "0.0.0.0:8080" \
+    --llama-checkpoint-path "$FISH_CKPT" \
+    --decoder-checkpoint-path "${FISH_CKPT}/codec.pth" \
+    --decoder-config-name modded_dac_vq \
+    --compile \
+    > /tmp/fish-speech.log 2>&1 &
+
 # Start Lipsync on port 8006
 echo "Starting Lipsync on port 8006..."
 cd /workspace/dubber/lipsync-service
 nohup python -m uvicorn app:app --host 0.0.0.0 --port 8006 > /tmp/lipsync.log 2>&1 &
 
 echo ""
-echo "Waiting for services to load models (60s)..."
-sleep 60
+echo "Waiting for services to load models (90s)..."
+echo "(Fish Speech torch.compile may take an extra 60s on first request)"
+sleep 90
 
 echo ""
 echo "=== Service Status ==="
@@ -189,6 +217,7 @@ echo -n "Demucs (8000):   " && curl -s http://localhost:8000/health | python -c 
 echo -n "WhisperX (8002): " && curl -s http://localhost:8002/health | python -c "import sys,json; d=json.load(sys.stdin); print('OK' if d.get('ok') else 'Error')" 2>/dev/null || echo "Still loading..."
 echo -n "XTTS (8004):     " && curl -s http://localhost:8004/health | python -c "import sys,json; d=json.load(sys.stdin); print('OK' if d.get('status')=='healthy' else 'Error')" 2>/dev/null || echo "Still loading..."
 echo -n "OpenVoice (8005): " && curl -s http://localhost:8005/health | python -c "import sys,json; d=json.load(sys.stdin); print('OK' if d.get('status')=='healthy' else 'Error')" 2>/dev/null || echo "Still loading..."
+echo -n "Fish Speech (8080): " && curl -s http://localhost:8080/v1/health | python -c "import sys,json; d=json.load(sys.stdin); print('OK' if d.get('status')=='ok' else 'Error')" 2>/dev/null || echo "Still loading..."
 echo -n "Lipsync (8006):  " && curl -s http://localhost:8006/health | python -c "import sys,json; d=json.load(sys.stdin); print('OK' if d.get('ok') else 'Error')" 2>/dev/null || echo "Still loading..."
 
 echo ""
@@ -201,6 +230,7 @@ echo "  tail -f /tmp/demucs.log"
 echo "  tail -f /tmp/whisperx.log"
 echo "  tail -f /tmp/xtts.log"
 echo "  tail -f /tmp/openvoice.log"
+echo "  tail -f /tmp/fish-speech.log"
 echo "  tail -f /tmp/lipsync.log"
 echo ""
 echo "All logs: tail -f /tmp/*.log"
