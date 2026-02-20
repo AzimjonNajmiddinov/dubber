@@ -29,7 +29,7 @@ sleep 2
 
 # Pull latest code
 cd /workspace/dubber
-git pull --ff-only 2>/dev/null || git fetch && git reset --hard origin/main
+git pull --ff-only || { git fetch origin && git reset --hard origin/main; }
 
 # ===========================================
 # INSTALL/FIX DEPENDENCIES
@@ -150,15 +150,13 @@ if [ ! -d "venv" ] || ! venv/bin/python -c "import uvicorn" 2>/dev/null; then
     echo "  Creating OpenVoice venv..."
     rm -rf venv
     python -m venv venv
+    venv/bin/pip install --no-warn-script-location -q --upgrade pip
+    # Install av as binary wheel first (source build fails with Cython errors)
+    venv/bin/pip install --no-warn-script-location -q --only-binary av av
+    # Install PyTorch with CUDA before OpenVoice (it needs torch)
+    venv/bin/pip install --no-warn-script-location -q torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu126
+    # Install remaining deps (av already satisfied, won't rebuild)
     venv/bin/pip install --no-warn-script-location -q -r requirements.txt
-    if ! venv/bin/python -c "import uvicorn" 2>/dev/null; then
-        echo "  ERROR: OpenVoice venv setup failed. Check requirements.txt"
-        echo "  Trying manual install..."
-        venv/bin/pip install --no-warn-script-location -q uvicorn fastapi python-multipart pydantic
-        venv/bin/pip install --no-warn-script-location -q torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu126
-        venv/bin/pip install --no-warn-script-location -q av
-        venv/bin/pip install --no-warn-script-location -q git+https://github.com/myshell-ai/OpenVoice.git
-    fi
 fi
 nohup venv/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8005 > /tmp/openvoice.log 2>&1 &
 
