@@ -4,4 +4,4 @@ python-multipart
 pydantic
 torch~=2.8.0
 torchaudio~=2.8.0
-openvoice
+git+https://github.com/myshell-ai/OpenVoice.git
