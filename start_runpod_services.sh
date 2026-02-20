@@ -76,7 +76,7 @@ if [ "$SKIP_DEPS" = false ]; then
 
     # Step 5: WhisperX + speechbrain + demucs
     echo "  [5/5] Installing WhisperX, speechbrain, demucs..."
-    pip install $PIP_FLAGS -c "$CONSTRAINTS" whisperx speechbrain
+    pip install $PIP_FLAGS -c "$CONSTRAINTS" whisperx speechbrain soundfile
     pip install $PIP_FLAGS --no-deps demucs
     pip install $PIP_FLAGS -c "$CONSTRAINTS" \
         dora-search lameenc julius diffq einops openunmix treetable
@@ -146,10 +146,19 @@ nohup python -m uvicorn app:app --host 0.0.0.0 --port 8002 > /tmp/whisperx.log 2
 # Start OpenVoice on port 8005 (isolated venv to avoid librosa conflicts)
 echo "Starting OpenVoice on port 8005..."
 cd /workspace/dubber/openvoice-service
-if [ ! -d "venv" ]; then
+if [ ! -d "venv" ] || ! venv/bin/python -c "import uvicorn" 2>/dev/null; then
     echo "  Creating OpenVoice venv..."
+    rm -rf venv
     python -m venv venv
     venv/bin/pip install --no-warn-script-location -q -r requirements.txt
+    if ! venv/bin/python -c "import uvicorn" 2>/dev/null; then
+        echo "  ERROR: OpenVoice venv setup failed. Check requirements.txt"
+        echo "  Trying manual install..."
+        venv/bin/pip install --no-warn-script-location -q uvicorn fastapi python-multipart pydantic
+        venv/bin/pip install --no-warn-script-location -q torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu126
+        venv/bin/pip install --no-warn-script-location -q av
+        venv/bin/pip install --no-warn-script-location -q git+https://github.com/myshell-ai/OpenVoice.git
+    fi
 fi
 nohup venv/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8005 > /tmp/openvoice.log 2>&1 &
 
