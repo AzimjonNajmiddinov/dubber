@@ -8,25 +8,20 @@ return [
     |--------------------------------------------------------------------------
     |
     | Configure which TTS engine to use for dubbing. Available drivers:
-    | - edge: Free Microsoft Edge TTS (robotic, but free)
-    | - elevenlabs: High quality, emotional, supports voice cloning (paid)
-    | - openai: Natural sounding (paid)
-    | - xtts: Local voice cloning with Coqui XTTS (free, self-hosted)
+    | - hybrid_uzbek: Edge TTS + EmotionDSP + OpenVoice voice conversion (active)
+    | - edge: Free Microsoft Edge TTS fallback (no voice cloning)
     |
     */
 
     'tts' => [
         // Default TTS driver to use
-        'default' => env('TTS_DRIVER', 'xtts'),
+        'default' => env('TTS_DRIVER', 'hybrid_uzbek'),
 
         // Fallback driver if primary fails
         'fallback' => env('TTS_FALLBACK', 'edge'),
 
-        // Auto-clone voices for speakers (requires xtts or elevenlabs)
+        // Auto-clone voices for speakers
         'auto_clone' => env('TTS_AUTO_CLONE', true),
-
-        // Preferred driver for voice cloning
-        'cloning_driver' => env('TTS_CLONING_DRIVER', 'xtts'),
 
         // Use SSML markup for Edge-TTS (per-sentence prosody, breaks, intonation)
         'edge_ssml' => env('TTS_EDGE_SSML', false),  // SSML broken in edge-tts 7.x - speaks XML tags as text

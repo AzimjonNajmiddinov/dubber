@@ -38,7 +38,7 @@ class TextNormalizer
      * For Edge TTS (uz-UZ-SardorNeural/MadinaNeural): Keep original o' and g'
      * as these native Uzbek voices understand them correctly.
      *
-     * For XTTS: Would need phonetic conversion (ö, gh) but Edge TTS is primary.
+     * Phonetic conversion (ö, gh) available via uzbekToTurkishPhonetics() if needed.
      */
     private static function normalizeUzbekCharacters(string $text): string
     {
@@ -342,9 +342,9 @@ class TextNormalizer
     }
 
     /**
-     * Convert Uzbek text to Turkish phonetic equivalents for XTTS voice cloning.
+     * Convert Uzbek text to Turkish phonetic equivalents.
      *
-     * XTTS uses Turkish (tr) phonemization for Uzbek. Turkish doesn't have
+     * Turkish phonemization can be used for Uzbek since Turkish doesn't have
      * o' or g' digraphs, so we convert them to their Turkish equivalents:
      * - o' (oʻ) → ö (same open O sound)
      * - g' (gʻ) → ğ (close approximation of uvular fricative)

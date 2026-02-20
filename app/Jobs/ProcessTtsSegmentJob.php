@@ -68,7 +68,7 @@ class ProcessTtsSegmentJob implements ShouldQueue
         ];
 
         // Get driver
-        $driverName = config('dubber.tts.driver', 'xtts');
+        $driverName = config('dubber.tts.default', 'hybrid_uzbek');
         $driver = $ttsManager->driver($driverName);
 
         $outDir = Storage::disk('local')->path("audio/tts/{$video->id}");

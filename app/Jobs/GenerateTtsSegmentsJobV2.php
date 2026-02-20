@@ -9,7 +9,7 @@ use App\Models\Video;
 use App\Models\VideoSegment;
 use App\Services\ActingDirector;
 use App\Services\NaturalSpeechProcessor;
-use App\Services\Tts\Drivers\XttsDriver;
+use App\Services\Tts\Drivers\HybridUzbekDriver;
 use App\Services\Tts\TtsManager;
 use App\Traits\DetectsEnglish;
 use Illuminate\Bus\Queueable;
@@ -28,7 +28,7 @@ use Illuminate\Support\Facades\Storage;
  * Generate TTS audio segments using the configured TTS driver.
  *
  * Supports:
- * - Multiple TTS engines (Edge, ElevenLabs, OpenAI, XTTS)
+ * - Edge TTS + OpenVoice voice conversion (hybrid_uzbek)
  * - Automatic voice cloning per speaker
  * - Emotion-aware synthesis
  * - Time-fitting with speed adjustment
@@ -83,13 +83,9 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
             $video = Video::query()->findOrFail($this->videoId);
 
             // Get configured TTS driver
-            $driverName = config('dubber.tts.default', 'xtts');
+            $driverName = config('dubber.tts.default', 'hybrid_uzbek');
             $autoClone = config('dubber.tts.auto_clone', true);
 
-            // XTTS voice cloning works for Uzbek via Turkish (tr) phonemization.
-            // Both are Turkic languages with similar phonology.
-            // XTTS gives each speaker a UNIQUE cloned voice + emotion control.
-            // Edge-TTS is kept as fallback only.
             $driver = $ttsManager->driver($driverName);
 
             Log::info('TTS generation starting', [
@@ -165,13 +161,12 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
             'speaker_count' => $speakers->count(),
         ]);
 
-        // Get the XTTS driver for voice extraction
-        $xttsDriver = app(XttsDriver::class);
+        $hybridDriver = app(HybridUzbekDriver::class);
 
         foreach ($speakers as $speaker) {
             try {
                 // Extract voice sample from original audio
-                $samplePath = $xttsDriver->extractVoiceSample($video->id, $speaker->id);
+                $samplePath = $hybridDriver->extractVoiceSample($video->id, $speaker->id);
 
                 if (!file_exists($samplePath) || filesize($samplePath) < 5000) {
                     Log::warning('Voice sample extraction failed', [
@@ -309,7 +304,7 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
 
             // Post-synthesis: Apply natural speech processing for human-like sound
             // Breath insertion removed - pink noise sounds artificial and shifts timing.
-            // Real voice cloning (XTTS) includes natural breathing; Edge TTS doesn't benefit.
+            // Voice cloning includes natural breathing; Edge TTS doesn't benefit.
             $naturalProcessor = app(NaturalSpeechProcessor::class);
             $naturalProcessor->process($outputPath, $actingDirection);
 
@@ -732,8 +727,6 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
     protected function getVoiceIdColumn(TtsDriverInterface $driver): string
     {
         return match ($driver->name()) {
-            'elevenlabs' => 'elevenlabs_voice_id',
-            'xtts' => 'xtts_voice_id',
             'hybrid_uzbek' => 'openvoice_speaker_key',
             default => 'tts_voice',
         };
@@ -866,7 +859,7 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
             return 'neutral';
         }
 
-        // Map additional emotions to XTTS-supported set
+        // Map additional emotions to supported set
         return match($dominantEmotion) {
             'tender' => 'sad',      // Soft, gentle delivery
             'serious' => 'neutral', // Steady, measured delivery

@@ -603,7 +603,7 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
         $speakerCache = [];
         $textsToTranslate = [];
         $segmentIndices = [];
-        $xttsAvailable = $this->isXttsAvailable();
+        $autoClone = config('dubber.tts.auto_clone', true);
 
         // Collect all texts that need translation
         foreach ($segments as $i => $seg) {
@@ -613,8 +613,8 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
                 $speaker = $this->getOrCreateSpeaker($video, $speakerKey, $meta);
                 $speakerCache[$speakerKey] = $speaker;
 
-                // Attempt voice cloning for new speakers (if XTTS available and not already cloned)
-                if ($xttsAvailable && !$speaker->voice_cloned && $vocalsPath) {
+                // Attempt voice cloning for new speakers
+                if ($autoClone && !$speaker->voice_cloned && $vocalsPath) {
                     $this->extractAndCloneVoice($video, $speaker, $seg, $vocalsPath);
                     $speaker->refresh(); // Reload to get updated voice_cloned status
                     $speakerCache[$speakerKey] = $speaker;
@@ -1037,14 +1037,14 @@ Output ONLY the numbered lines, no explanations.',
     }
 
     /**
-     * Extract voice sample and clone voice for a speaker using XTTS.
+     * Extract voice sample and clone voice for a speaker using OpenVoice.
      * This captures the original speaker's voice characteristics.
      * Uses segment-level vocals from chunk processing (more reliable than full stems).
      */
     private function extractAndCloneVoice(Video $video, Speaker $speaker, array $segment, ?string $vocalsPath = null): bool
     {
         // Skip if already cloned
-        if ($speaker->voice_cloned && $speaker->xtts_voice_id) {
+        if ($speaker->voice_cloned && $speaker->openvoice_speaker_key) {
             return true;
         }
 
@@ -1064,7 +1064,6 @@ Output ONLY the numbered lines, no explanations.',
             } else {
                 // Try to find segment vocals in stems directory
                 $stemsDir = Storage::disk('local')->path("audio/stems/{$video->id}");
-                $startMs = (int)(($this->startTime + $segment['start']) * 1000);
 
                 // Look for vocals chunk file
                 $candidates = glob("{$stemsDir}/vocals_chunk_{$video->id}_*.wav");
@@ -1088,7 +1087,7 @@ Output ONLY the numbered lines, no explanations.',
             @mkdir($samplesDir, 0755, true);
             $cleanSamplePath = "{$samplesDir}/speaker_{$speaker->id}_sample.wav";
 
-            // Extract clean voice sample (6-10 seconds optimal for XTTS)
+            // Extract clean voice sample (6-10 seconds optimal)
             $duration = min($segmentDuration, 10.0);
             $result = Process::timeout(30)->run([
                 'ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
@@ -1103,37 +1102,27 @@ Output ONLY the numbered lines, no explanations.',
                 return false;
             }
 
-            // Clone voice using XTTS service
-            $cloneResponse = Http::timeout(60)
-                ->attach('audio', file_get_contents($cleanSamplePath), 'sample.wav')
-                ->post('http://xtts:8000/clone', [
-                    'name' => "Video_{$video->id}_Speaker_{$speaker->external_key}",
-                    'description' => "Auto-cloned voice for dubbing",
-                    'language' => $video->target_language ?? 'uz',
-                ]);
+            // Clone voice using HybridUzbek driver (OpenVoice)
+            $ttsManager = app(TtsManager::class);
+            $driver = $ttsManager->driver('hybrid_uzbek');
 
-            if (!$cloneResponse->successful() || !($cloneResponse->json()['ok'] ?? false)) {
-                Log::warning('XTTS voice cloning failed', [
-                    'speaker' => $speaker->external_key,
-                    'error' => $cloneResponse->json()['detail'] ?? 'Unknown',
-                ]);
-                return false;
-            }
+            $speakerKey = $driver->cloneVoice($cleanSamplePath, "Video_{$video->id}_Speaker_{$speaker->external_key}", [
+                'language' => $video->target_language ?? 'uz',
+            ]);
 
-            $voiceId = $cloneResponse->json()['voice_id'];
             $sampleRelPath = "audio/voice_samples/{$video->id}/speaker_{$speaker->id}_sample.wav";
 
             // Update speaker with cloned voice info
             $speaker->update([
-                'xtts_voice_id' => $voiceId,
+                'openvoice_speaker_key' => $speakerKey,
                 'voice_sample_path' => $sampleRelPath,
                 'voice_cloned' => true,
-                'tts_driver' => 'xtts',
+                'tts_driver' => 'hybrid_uzbek',
             ]);
 
             Log::info('Voice cloned successfully', [
                 'speaker' => $speaker->external_key,
-                'voice_id' => $voiceId,
+                'speaker_key' => $speakerKey,
             ]);
 
             return true;
@@ -1148,26 +1137,8 @@ Output ONLY the numbered lines, no explanations.',
     }
 
     /**
-     * Check if XTTS service is available.
-     */
-    private function isXttsAvailable(): bool
-    {
-        static $available = null;
-        if ($available !== null) return $available;
-
-        try {
-            $response = Http::timeout(5)->get('http://xtts:8000/health');
-            $available = $response->successful();
-        } catch (\Exception $e) {
-            $available = false;
-        }
-
-        return $available;
-    }
-
-    /**
      * Generate TTS for all segments using the driver system.
-     * Routes to XTTS for cloned voices, Edge-TTS for others.
+     * Uses hybrid_uzbek for cloned voices, falls back to edge.
      * Includes emotion, speed calculation, and natural speech processing.
      */
     private function generateAllTTSParallel(Video $video, array $segments, string $outputDir): array
@@ -1205,8 +1176,8 @@ Output ONLY the numbered lines, no explanations.',
             ];
 
             // Add cloned voice ID if available
-            if ($speaker->voice_cloned && $speaker->xtts_voice_id) {
-                $options['voice_id'] = $speaker->xtts_voice_id;
+            if ($speaker->voice_cloned && $speaker->openvoice_speaker_key) {
+                $options['voice_id'] = $speaker->openvoice_speaker_key;
             }
 
             // Create temporary VideoSegment for driver interface compatibility
@@ -1219,10 +1190,10 @@ Output ONLY the numbered lines, no explanations.',
             ]);
             $tempSegment->id = $i;
 
-            // Determine driver: XTTS for cloned voices, configured default for others
-            $driverName = ($speaker->voice_cloned && $speaker->xtts_voice_id)
-                ? 'xtts'
-                : ($speaker->getEffectiveTtsDriver() ?? config('dubber.tts.default', 'edge'));
+            // Determine driver: hybrid_uzbek for cloned voices, configured default for others
+            $driverName = ($speaker->voice_cloned && $speaker->openvoice_speaker_key)
+                ? 'hybrid_uzbek'
+                : ($speaker->getEffectiveTtsDriver() ?? config('dubber.tts.default', 'hybrid_uzbek'));
 
             $ttsPath = null;
             $usedDriver = $driverName;

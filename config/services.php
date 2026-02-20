@@ -38,14 +38,6 @@ return [
         'key' => env('OPENAI_API_KEY'),
     ],
 
-    'elevenlabs' => [
-        'key' => env('ELEVENLABS_API_KEY'),
-    ],
-
-    'xtts' => [
-        'url' => env('XTTS_SERVICE_URL', 'http://xtts:8000'),
-    ],
-
     'openvoice' => [
         'url' => env('OPENVOICE_SERVICE_URL', 'http://localhost:8005'),
     ],

@@ -11,7 +11,7 @@ class RunpodStartServices extends Command
         {--install : Install Python dependencies and clone repo (first-time setup)}
         {--no-env-update : Skip auto-updating .env file with service URLs}';
 
-    protected $description = 'SSH into a RunPod pod and start GPU services (XTTS + WhisperX)';
+    protected $description = 'SSH into a RunPod pod and start GPU services (Demucs + WhisperX + OpenVoice)';
 
     private string $sshHost;
     private string $sshKey;
@@ -43,23 +43,25 @@ class RunpodStartServices extends Command
         $this->line('  Connected to ' . $this->sshHost);
 
         // Check if services are already running
-        $xttsHealthy = $this->checkHealth(8004);
+        $demucsHealthy = $this->checkHealth(8000);
         $whisperxHealthy = $this->checkHealth(8002);
+        $openvoiceHealthy = $this->checkHealth(8005);
 
-        if ($xttsHealthy && $whisperxHealthy) {
-            $this->info('Both services are already running and healthy.');
+        if ($demucsHealthy && $whisperxHealthy && $openvoiceHealthy) {
+            $this->info('All services are already running and healthy.');
         } else {
             if ($this->option('install')) {
                 $this->installDependencies();
             }
 
-            $this->startServices($xttsHealthy, $whisperxHealthy);
+            $this->startServices($demucsHealthy, $whisperxHealthy, $openvoiceHealthy);
 
             if (! $this->waitForHealth()) {
                 $this->error('Services failed to become healthy within timeout.');
                 $this->line('Check logs on the pod:');
-                $this->line('  tail -f /tmp/xtts.log');
+                $this->line('  tail -f /tmp/demucs.log');
                 $this->line('  tail -f /tmp/whisperx.log');
+                $this->line('  tail -f /tmp/openvoice.log');
                 return self::FAILURE;
             }
         }
@@ -98,11 +100,10 @@ class RunpodStartServices extends Command
         $this->info('Installing Python dependencies...');
 
         $commands = implode(' && ', [
-            'pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121',
+            'pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu126',
             'pip install --ignore-installed blinker',
-            'pip install TTS faster-whisper whisperx fastapi uvicorn python-multipart',
-            'pip install nvidia-cudnn-cu11==8.9.6.50',
-            'pip install --upgrade pyannote.audio huggingface_hub',
+            'pip install whisperx speechbrain fastapi uvicorn python-multipart',
+            'pip install --no-deps demucs',
         ]);
 
         $result = $this->ssh($commands, 600);
@@ -124,21 +125,21 @@ class RunpodStartServices extends Command
         }
     }
 
-    private function startServices(bool $xttsRunning, bool $whisperxRunning): void
+    private function startServices(bool $demucsRunning, bool $whisperxRunning, bool $openvoiceRunning): void
     {
         $hfToken = env('HF_TOKEN', '');
 
         // Resolve cuDNN library path for LD_LIBRARY_PATH
         $ldExport = 'export LD_LIBRARY_PATH=$(python -c "import nvidia.cudnn; print(nvidia.cudnn.__path__[0] + \'/lib\')" 2>/dev/null):${LD_LIBRARY_PATH}';
 
-        if (! $xttsRunning) {
-            $this->info('Starting XTTS on port 8004...');
+        if (! $demucsRunning) {
+            $this->info('Starting Demucs on port 8000...');
             $cmd = "export HF_TOKEN='{$hfToken}' && {$ldExport} && "
-                . 'cd /workspace/dubber/xtts-service && '
-                . 'nohup python -m uvicorn app:app --host 0.0.0.0 --port 8004 > /tmp/xtts.log 2>&1 &';
+                . 'cd /workspace/dubber/demucs-service && '
+                . 'nohup python -m uvicorn app_runpod:app --host 0.0.0.0 --port 8000 > /tmp/demucs.log 2>&1 &';
             $this->ssh($cmd);
         } else {
-            $this->line('  XTTS already running on port 8004');
+            $this->line('  Demucs already running on port 8000');
         }
 
         if (! $whisperxRunning) {
@@ -150,6 +151,17 @@ class RunpodStartServices extends Command
         } else {
             $this->line('  WhisperX already running on port 8002');
         }
+
+        if (! $openvoiceRunning) {
+            $this->info('Starting OpenVoice on port 8005...');
+            $cmd = "export HF_TOKEN='{$hfToken}' && {$ldExport} && "
+                . 'cd /workspace/dubber/openvoice-service && '
+                . 'if [ ! -d venv ]; then python -m venv venv && venv/bin/pip install -q -r requirements.txt; fi && '
+                . 'nohup venv/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8005 > /tmp/openvoice.log 2>&1 &';
+            $this->ssh($cmd);
+        } else {
+            $this->line('  OpenVoice already running on port 8005');
+        }
     }
 
     private function waitForHealth(): bool
@@ -158,14 +170,15 @@ class RunpodStartServices extends Command
         $timeout = 120;
         $interval = 5;
         $elapsed = 0;
-        $xttsReady = false;
+        $demucsReady = false;
         $whisperxReady = false;
+        $openvoiceReady = false;
 
         while ($elapsed < $timeout) {
-            if (! $xttsReady) {
-                $xttsReady = $this->checkHealth(8004);
-                if ($xttsReady) {
-                    $this->line('  XTTS is healthy');
+            if (! $demucsReady) {
+                $demucsReady = $this->checkHealth(8000);
+                if ($demucsReady) {
+                    $this->line('  Demucs is healthy');
                 }
             }
 
@@ -176,7 +189,14 @@ class RunpodStartServices extends Command
                 }
             }
 
-            if ($xttsReady && $whisperxReady) {
+            if (! $openvoiceReady) {
+                $openvoiceReady = $this->checkHealth(8005);
+                if ($openvoiceReady) {
+                    $this->line('  OpenVoice is healthy');
+                }
+            }
+
+            if ($demucsReady && $whisperxReady && $openvoiceReady) {
                 $this->info('All services healthy.');
                 return true;
             }
@@ -221,20 +241,23 @@ class RunpodStartServices extends Command
             return;
         }
 
-        $xttsUrl = "https://{$podId}-8004.proxy.runpod.net";
+        $demucsUrl = "https://{$podId}-8000.proxy.runpod.net";
         $whisperxUrl = "https://{$podId}-8002.proxy.runpod.net";
+        $openvoiceUrl = "https://{$podId}-8005.proxy.runpod.net";
 
         $envPath = base_path('.env');
         $content = file_get_contents($envPath);
 
-        $content = $this->setEnvValue($content, 'XTTS_SERVICE_URL', $xttsUrl);
+        $content = $this->setEnvValue($content, 'DEMUCS_SERVICE_URL', $demucsUrl);
         $content = $this->setEnvValue($content, 'WHISPERX_SERVICE_URL', $whisperxUrl);
+        $content = $this->setEnvValue($content, 'OPENVOICE_SERVICE_URL', $openvoiceUrl);
 
         file_put_contents($envPath, $content);
 
         $this->info('Updated .env:');
-        $this->line("  XTTS_SERVICE_URL={$xttsUrl}");
+        $this->line("  DEMUCS_SERVICE_URL={$demucsUrl}");
         $this->line("  WHISPERX_SERVICE_URL={$whisperxUrl}");
+        $this->line("  OPENVOICE_SERVICE_URL={$openvoiceUrl}");
     }
 
     private function setEnvValue(string $content, string $key, string $value): string
@@ -258,8 +281,9 @@ class RunpodStartServices extends Command
         $this->newLine();
 
         if ($podId) {
-            $this->line("  XTTS:     https://{$podId}-8004.proxy.runpod.net");
-            $this->line("  WhisperX: https://{$podId}-8002.proxy.runpod.net");
+            $this->line("  Demucs:    https://{$podId}-8000.proxy.runpod.net");
+            $this->line("  WhisperX:  https://{$podId}-8002.proxy.runpod.net");
+            $this->line("  OpenVoice: https://{$podId}-8005.proxy.runpod.net");
         }
 
         // GPU info
@@ -271,7 +295,8 @@ class RunpodStartServices extends Command
 
         $this->newLine();
         $this->line('Logs: ssh into pod and run:');
-        $this->line('  tail -f /tmp/xtts.log');
+        $this->line('  tail -f /tmp/demucs.log');
         $this->line('  tail -f /tmp/whisperx.log');
+        $this->line('  tail -f /tmp/openvoice.log');
     }
 }

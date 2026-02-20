@@ -5,18 +5,21 @@ namespace App\Services\Tts\Drivers;
 use App\Contracts\TtsDriverInterface;
 use App\Models\Speaker;
 use App\Models\VideoSegment;
+use App\Services\EmotionDSPProcessor;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Storage;
 use RuntimeException;
 
 /**
- * Hybrid Uzbek TTS Driver — Edge TTS + OpenVoice Voice Conversion.
+ * Hybrid Uzbek TTS Driver — Edge TTS + Emotion DSP + OpenVoice Voice Conversion.
  *
- * Two-stage pipeline:
+ * Three-stage pipeline:
  * 1. Edge TTS generates speech with native Uzbek voices (correct pronunciation)
- * 2. OpenVoice v2 converts the voice tone to match the original speaker
+ * 2. EmotionDSPProcessor adds expressiveness (pitch shift, tempo, EQ, dynamics)
+ * 3. OpenVoice v2 converts voice timbre to match original speaker (preserves emotion)
  *
- * Fallback: If OpenVoice fails, returns Edge TTS output (correct pronunciation, generic voice).
+ * Fallback: If OpenVoice fails, returns Edge TTS + emotion output (correct pronunciation, generic voice).
  */
 class HybridUzbekDriver implements TtsDriverInterface
 {
@@ -62,6 +65,19 @@ class HybridUzbekDriver implements TtsDriverInterface
     ): string {
         // Stage 1: Generate speech with Edge TTS (correct Uzbek pronunciation)
         $edgeOutputPath = $this->edgeTts->synthesize($text, $speaker, $segment, $options);
+
+        // Stage 1.5: Apply emotion DSP (pitch shift, tempo, EQ, dynamics)
+        // This runs BEFORE OpenVoice because OpenVoice preserves prosody/emotion
+        // while only changing voice identity (timbre). So emotion survives conversion.
+        $actingDirection = $options['acting_direction'] ?? [];
+        if (!empty($actingDirection)) {
+            $emotion = $actingDirection['emotion'] ?? 'neutral';
+            $delivery = $actingDirection['delivery'] ?? 'normal';
+            if ($emotion !== 'neutral' || $delivery !== 'normal') {
+                $emotionDsp = app(EmotionDSPProcessor::class);
+                $emotionDsp->apply($edgeOutputPath, $actingDirection);
+            }
+        }
 
         // Stage 2: Convert voice tone via OpenVoice (if speaker has embedding)
         $speakerKey = $options['voice_id'] ?? $speaker->openvoice_speaker_key;
@@ -125,6 +141,75 @@ class HybridUzbekDriver implements TtsDriverInterface
         ]);
 
         return $speakerKey;
+    }
+
+    /**
+     * Extract speaker voice sample from original audio.
+     */
+    public function extractVoiceSample(int $videoId, int $speakerId): string
+    {
+        $speaker = Speaker::findOrFail($speakerId);
+
+        // Get segments for this speaker
+        $segments = VideoSegment::where('video_id', $videoId)
+            ->where('speaker_id', $speakerId)
+            ->orderBy('end_time', 'desc')
+            ->orderByRaw('(end_time - start_time) DESC')
+            ->limit(5)
+            ->get();
+
+        if ($segments->isEmpty()) {
+            throw new RuntimeException("No segments found for speaker {$speakerId}");
+        }
+
+        // Use the vocals track if available, otherwise original audio
+        $audioPath = Storage::disk('local')->path("audio/stems/{$videoId}/vocals.wav");
+        if (!file_exists($audioPath)) {
+            $audioPath = Storage::disk('local')->path("audio/original/{$videoId}.wav");
+        }
+
+        if (!file_exists($audioPath)) {
+            throw new RuntimeException("No audio source found for voice extraction");
+        }
+
+        // Extract segments and concatenate
+        $samplePath = Storage::disk('local')->path("audio/voice_samples/{$videoId}/speaker_{$speakerId}.wav");
+        @mkdir(dirname($samplePath), 0777, true);
+
+        $filterParts = [];
+        foreach ($segments as $i => $seg) {
+            $start = max(0, $seg->start_time);
+            $end = $seg->end_time;
+            $filterParts[] = sprintf(
+                "[0:a]atrim=start=%s:end=%s,asetpts=PTS-STARTPTS[s%d]",
+                $start,
+                $end,
+                $i
+            );
+        }
+
+        $concatInputs = implode('', array_map(fn($i) => "[s{$i}]", range(0, count($segments) - 1)));
+        $filter = implode(';', $filterParts) . ";{$concatInputs}concat=n=" . count($segments) . ":v=0:a=1[out]";
+
+        $cmd = sprintf(
+            'ffmpeg -y -hide_banner -loglevel error -i %s -filter_complex %s -map "[out]" -c:a pcm_s16le -ar 22050 -ac 1 %s 2>&1',
+            escapeshellarg($audioPath),
+            escapeshellarg($filter),
+            escapeshellarg($samplePath)
+        );
+
+        exec($cmd, $output, $code);
+
+        if ($code !== 0 || !file_exists($samplePath) || filesize($samplePath) < 5000) {
+            Log::error('Voice sample extraction failed', [
+                'speaker_id' => $speakerId,
+                'exit_code' => $code,
+                'output' => implode("\n", array_slice($output, -20)),
+            ]);
+            throw new RuntimeException("Failed to extract voice sample for speaker {$speakerId}");
+        }
+
+        return $samplePath;
     }
 
     /**

@@ -284,23 +284,7 @@ class RealtimeDubController extends Controller
         // The driver's synthesize method expects Speaker and VideoSegment models
         // So we'll call the underlying service directly for real-time use
 
-        if ($driver->name() === 'xtts') {
-            $response = Http::timeout(60)
-                ->post(config('services.xtts.url') . '/synthesize', [
-                    'text' => $text,
-                    'voice_id' => $session['voice_id'] ?? 'default',
-                    'language' => $session['target_language'],
-                    'emotion' => 'neutral',
-                    'speed' => 1.0,
-                    'output_path' => 'temp/tts/' . basename($outputPath),
-                ]);
-
-            if ($response->successful()) {
-                return $outputPath;
-            }
-        }
-
-        // Fallback to Edge TTS
+        // Edge TTS fallback for real-time use
         $tmpTxt = "/tmp/tts_realtime_" . Str::random(8) . ".txt";
         file_put_contents($tmpTxt, $text);
 
