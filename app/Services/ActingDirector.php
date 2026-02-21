@@ -149,50 +149,76 @@ class ActingDirector
 
         // === EMOTION KEYWORDS (weighted by intensity) ===
 
-        // ANGER
+        // ANGER (English + Uzbek)
         if (preg_match('/\b(furious|rage|hate|loathe|despise|kill|murder)\b/i', $text)) $scores['angry'] += 5;
         if (preg_match('/\b(angry|mad|pissed|annoyed|frustrated|irritated)\b/i', $text)) $scores['angry'] += 3;
         if (preg_match('/\b(damn|hell|shut up|get out|stop it|enough|sick of)\b/i', $text)) $scores['angry'] += 2;
+        // Uzbek: g'azab=rage, nafrat=hatred, jin=furious, jahli chiqdi=got angry
+        if (preg_match('/\b(g.azab|nafrat|jin|jahli|badjahl|qahr)\b/i', $text)) $scores['angry'] += 4;
+        if (preg_match('/\b(jim|la.nat|yo.qol|bas qil|to.xta)\b/i', $text)) $scores['angry'] += 2;
 
-        // HAPPINESS
+        // HAPPINESS (English + Uzbek)
         if (preg_match('/\b(ecstatic|overjoyed|thrilled|delighted|elated)\b/i', $text)) $scores['happy'] += 5;
         if (preg_match('/\b(happy|joy|wonderful|amazing|fantastic|love it|perfect)\b/i', $text)) $scores['happy'] += 3;
         if (preg_match('/\b(glad|pleased|nice|good|smile|laugh|yay)\b/i', $text)) $scores['happy'] += 2;
+        // Uzbek: ajoyib=wonderful, baxtli=happy, xursand=glad, zo'r=great
+        if (preg_match('/\b(ajoyib|baxtli|xursand|zo.r|quvon|suyun)\b/i', $text)) $scores['happy'] += 4;
+        if (preg_match('/\b(yaxshi|chiroyli|a.lo|tabrik|bayram)\b/i', $text)) $scores['happy'] += 2;
 
-        // SADNESS
+        // SADNESS (English + Uzbek)
         if (preg_match('/\b(devastated|heartbroken|grief|mourn|tragic|crushed)\b/i', $text)) $scores['sad'] += 5;
         if (preg_match('/\b(sad|sorry|miss|cry|tears|died|dead|lost|gone)\b/i', $text)) $scores['sad'] += 3;
         if (preg_match('/\b(unfortunately|regret|alone|lonely|pain|hurt)\b/i', $text)) $scores['sad'] += 2;
+        // Uzbek: g'amgin=sad, yig'la=cry, afsuski=unfortunately, o'ldi=died, dard=pain
+        if (preg_match('/\b(g.amgin|yig.la|afsuski|dard|aza|motam)\b/i', $text)) $scores['sad'] += 4;
+        if (preg_match('/\b(o.ldi|o.lim|yolg.iz|xafa|pushaymon|sog.in)\b/i', $text)) $scores['sad'] += 3;
 
-        // FEAR
+        // FEAR (English + Uzbek)
         if (preg_match('/\b(terrified|horrified|petrified|panic|nightmare)\b/i', $text)) $scores['fear'] += 5;
         if (preg_match('/\b(afraid|scared|fear|terror|danger|threat|die)\b/i', $text)) $scores['fear'] += 3;
         if (preg_match('/\b(worried|nervous|anxious|careful|watch out|run|help)\b/i', $text)) $scores['fear'] += 2;
+        // Uzbek: qo'rqmoq=to fear, xavf=danger, vahima=panic, yordam=help
+        if (preg_match('/\b(qo.rq|xavf|vahima|dahshat|qo.rqinch)\b/i', $text)) $scores['fear'] += 4;
+        if (preg_match('/\b(yordam|qoch|ehtiyot|xatar|ogoh)\b/i', $text)) $scores['fear'] += 2;
 
-        // SURPRISE
+        // SURPRISE (English + Uzbek)
         if (preg_match('/\b(shocked|astonished|stunned|incredible|unbelievable)\b/i', $text)) $scores['surprise'] += 4;
         if (preg_match('/\b(surprised|unexpected|what|really|can\'t believe)\b/i', $text)) $scores['surprise'] += 2;
         if (preg_match('/\b(wow|oh|whoa|no way|seriously|huh)\b/i', $text)) $scores['surprise'] += 2;
+        // Uzbek: hayron=surprised, voy=wow, nima=what, rostdan=really
+        if (preg_match('/\b(hayron|ajablan|kutilmagan|hayrat)\b/i', $text)) $scores['surprise'] += 4;
+        if (preg_match('/\b(voy|nima|rostdan|bo.lishi mumkinmas)\b/i', $text)) $scores['surprise'] += 2;
 
-        // EXCITEMENT
+        // EXCITEMENT (English + Uzbek)
         if (preg_match('/\b(yes|yeah|awesome|incredible|let\'s go|can\'t wait|finally)\b/i', $text)) $scores['excited'] += 3;
         if (preg_match('/\b(exciting|excited|thrilling|adventure|amazing)\b/i', $text)) $scores['excited'] += 2;
+        // Uzbek: hayajon=excitement, ketdik=let's go, nihoyat=finally
+        if (preg_match('/\b(hayajon|ketdik|nihoyat|zo.r|ajoyib|yasha)\b/i', $text)) $scores['excited'] += 3;
 
-        // TENDER (love, care)
+        // TENDER (love, care — English + Uzbek)
         if (preg_match('/\b(love you|darling|sweetheart|honey|dear|baby|precious)\b/i', $text)) $scores['tender'] += 4;
         if (preg_match('/\b(gentle|soft|care|protect|safe|hold you)\b/i', $text)) $scores['tender'] += 2;
+        // Uzbek: azizim=my dear, jonim=my soul, sevaman=I love, muhabbat=love
+        if (preg_match('/\b(azizim|jonim|sevaman|muhabbat|mehribon)\b/i', $text)) $scores['tender'] += 4;
+        if (preg_match('/\b(yumshoq|g.amxo.rlik|himoya|xotirjam)\b/i', $text)) $scores['tender'] += 2;
 
-        // DISGUST
+        // DISGUST (English + Uzbek)
         if (preg_match('/\b(disgusting|revolting|vile|sick|gross|pathetic)\b/i', $text)) $scores['disgusted'] += 4;
         if (preg_match('/\b(eww|ugh|yuck|nasty|horrible)\b/i', $text)) $scores['disgusted'] += 2;
+        // Uzbek: jirkanch=disgusting, iflos=filthy
+        if (preg_match('/\b(jirkanch|iflos|yomon|yaramas)\b/i', $text)) $scores['disgusted'] += 3;
 
-        // CONTEMPT
+        // CONTEMPT (English + Uzbek)
         if (preg_match('/\b(pathetic|worthless|fool|idiot|stupid|moron)\b/i', $text)) $scores['contempt'] += 3;
         if (preg_match('/\b(beneath|don\'t deserve|waste|laughable)\b/i', $text)) $scores['contempt'] += 2;
+        // Uzbek: ahmoq=fool, tentak=idiot, arzimas=worthless
+        if (preg_match('/\b(ahmoq|tentak|arzimas|nodon|bema.ni)\b/i', $text)) $scores['contempt'] += 3;
 
-        // ANXIETY
+        // ANXIETY (English + Uzbek)
         if (preg_match('/\b(worried|anxious|nervous|stressed|can\'t breathe)\b/i', $text)) $scores['anxious'] += 3;
         if (preg_match('/\b(what if|might|maybe|hope not|please don\'t)\b/i', $text)) $scores['anxious'] += 2;
+        // Uzbek: tashvish=worry, bezovta=anxious, xavotir=concern
+        if (preg_match('/\b(tashvish|bezovta|xavotir|asabiy)\b/i', $text)) $scores['anxious'] += 3;
 
         // Find dominant emotion
         $maxScore = max($scores);

@@ -190,36 +190,35 @@ class EdgeTtsDriver implements TtsDriverInterface
         // Get direction-based prosody
         $directionProsody = $this->directionProsody[$direction] ?? $this->directionProsody['normal'];
 
-        // NATURAL SPEAKING RATE - CONSISTENT across all segments!
-        // A real human speaker maintains consistent pace throughout.
-        // They don't speed up 15% for one sentence then slow down 10% for the next.
+        // NATURAL SPEAKING RATE - Per-speaker base pace + small emotion variation
         //
-        // Our approach:
-        // 1. Use FIXED base rate (0% = natural TTS speed ~10-11 chars/sec)
-        // 2. Only TINY adjustments for emotion (±3% max) - natural variation
-        // 3. Let post-processing handle timing with gentle atempo if needed
-        // 4. Short segments with one word = normal pace, not artificially slow
-        // 5. Long segments = normal pace, post-processing speeds up if needed
+        // Each speaker has a characteristic speaking pace (speaking_rate_factor):
+        // - Fast talkers: 1.05-1.15 (slightly quicker baseline)
+        // - Normal: 1.0
+        // - Slow/deliberate: 0.85-0.95
         //
-        // This sounds NATURAL because the speaker's pace is CONSISTENT!
+        // On top of base pace, TINY emotion adjustments (±3% max).
+        // This makes speakers sound distinct even saying the same words.
 
-        // Get emotion and direction rate modifiers - VERY SMALL for natural variation
-        // Real speakers don't change pace much for emotions - they change volume/tone
-        $emotionRate = (int) round($this->parsePercentage($emotionProsody['rate']) * 0.3);  // 30% of emotion effect
-        $directionRate = (int) round($this->parsePercentage($directionProsody['rate']) * 0.3);  // 30% of direction effect
+        // Per-speaker base rate from voice DNA
+        $speakerRateFactor = $speaker->speaking_rate_factor ?? 1.0;
+        $speakerBaseRate = (int) round(($speakerRateFactor - 1.0) * 100); // e.g. 1.08 → +8%
 
-        // Final rate: VERY NARROW range for consistent, natural speech
-        // Max ±5% variation - barely noticeable, sounds human
-        // Post-processing atempo handles any timing adjustments needed
-        $finalRate = min(5, max(-5, $emotionRate + $directionRate));
+        // Emotion/direction rate modifiers — small for natural variation
+        $emotionRate = (int) round($this->parsePercentage($emotionProsody['rate']) * 0.3);
+        $directionRate = (int) round($this->parsePercentage($directionProsody['rate']) * 0.3);
+
+        // Combine: speaker baseline + emotion variation
+        // Clamped to ±15% (speaker base can use wider range than emotion alone)
+        $finalRate = min(15, max(-15, $speakerBaseRate + $emotionRate + $directionRate));
         $rate = $finalRate >= 0 ? "+{$finalRate}%" : "{$finalRate}%";
 
-        Log::debug('TTS natural rate', [
+        Log::debug('TTS speaker rate', [
             'segment_id' => $segment->id,
+            'speaker_id' => $speaker->id,
+            'speaker_rate_factor' => $speakerRateFactor,
             'emotion' => $emotion,
-            'direction' => $direction,
             'rate' => $rate,
-            'note' => 'Consistent pace - timing handled in post-processing',
         ]);
 
         // PITCH = SPEAKER IDENTITY ONLY
@@ -368,11 +367,20 @@ class EdgeTtsDriver implements TtsDriverInterface
 
     /**
      * Get voice profile for a speaker based on detected characteristics.
-     * Uses pitch_median_hz and age_group from WhisperX when available,
-     * falls back to ID-based assignment.
+     * Uses stored voice_profile, pitch_median_hz, age_group from WhisperX,
+     * or falls back to ID-based assignment.
      */
     protected function getVoiceProfile(Speaker $speaker): array
     {
+        // Priority 0: Explicitly assigned voice profile (from voice DNA)
+        if ($speaker->voice_profile) {
+            foreach ($this->voiceProfiles as $profile) {
+                if ($profile['name'] === $speaker->voice_profile) {
+                    return $profile;
+                }
+            }
+        }
+
         // Priority 1: Map from detected pitch (most accurate)
         if ($speaker->pitch_median_hz) {
             return $this->profileFromDetectedPitch($speaker);
@@ -383,7 +391,7 @@ class EdgeTtsDriver implements TtsDriverInterface
             return $this->profileFromAgeGroup($speaker->age_group);
         }
 
-        // Fallback: ID-based assignment
+        // Fallback: ID-based assignment (ensures different speakers get different profiles)
         $profileIndex = $speaker->id % count($this->voiceProfiles);
         return $this->voiceProfiles[$profileIndex];
     }

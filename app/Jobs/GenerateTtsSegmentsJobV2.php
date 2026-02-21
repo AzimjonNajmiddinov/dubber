@@ -163,6 +163,9 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
 
         $hybridDriver = app(HybridUzbekDriver::class);
 
+        // Assign unique voice DNA to speakers before cloning
+        $this->assignVoiceDna($video, $speakers);
+
         foreach ($speakers as $speaker) {
             try {
                 // Extract voice sample from original audio
@@ -175,16 +178,22 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
                     continue;
                 }
 
+                // Measure voice sample duration for tau calculation
+                $sampleDuration = $this->probeAudioDuration($samplePath);
+
                 // Clone the voice
                 $voiceId = $driver->cloneVoice($samplePath, "speaker_{$speaker->id}", [
                     'language' => $video->target_language ?? 'uz',
                     'description' => "Cloned voice for {$speaker->label}",
                 ]);
 
-                // Update speaker record
+                // Update speaker record with cloning info + voice DNA tau
+                $tau = 0.15 + min(0.35, $sampleDuration / 60); // Same formula as HybridUzbekDriver
                 $speaker->update([
                     'voice_cloned' => true,
                     'voice_sample_path' => $samplePath,
+                    'voice_sample_duration' => $sampleDuration,
+                    'openvoice_tau' => round($tau, 2),
                     $this->getVoiceIdColumn($driver) => $voiceId,
                     'tts_driver' => $driver->name(),
                 ]);
@@ -193,6 +202,8 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
                     'speaker_id' => $speaker->id,
                     'voice_id' => $voiceId,
                     'driver' => $driver->name(),
+                    'sample_duration' => round($sampleDuration, 1),
+                    'tau' => round($tau, 2),
                 ]);
 
             } catch (\Throwable $e) {
@@ -202,6 +213,89 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
                 ]);
                 // Continue with default voice for this speaker
             }
+        }
+    }
+
+    /**
+     * Assign unique voice DNA to each speaker so they sound distinct.
+     *
+     * Voice DNA includes:
+     * - voice_profile: pitch character (deep, bright, warm, etc.)
+     * - speaking_rate_factor: how fast they naturally speak
+     * - expressiveness: how much emotion shows in their voice
+     *
+     * Assignment ensures no two same-gender speakers share the same profile.
+     */
+    protected function assignVoiceDna(Video $video, $speakers): void
+    {
+        $profiles = ['default', 'deep', 'bright', 'bass', 'thin', 'warm'];
+
+        // Rate factors that sound distinctly different
+        // Spread across range: slow speakers vs fast speakers
+        $rateFactors = [1.0, 0.92, 1.08, 0.95, 1.05, 0.88, 1.12];
+
+        // Expressiveness levels: reserved → theatrical
+        $expressLevels = [0.5, 0.3, 0.8, 0.4, 0.7, 0.6, 0.9];
+
+        // Track used profiles per gender to avoid duplicates
+        $usedByGender = ['male' => [], 'female' => []];
+
+        foreach ($speakers as $i => $speaker) {
+            // Skip if voice DNA already assigned
+            if ($speaker->voice_profile && $speaker->speaking_rate_factor) {
+                $gender = strtolower($speaker->gender ?? 'male');
+                $usedByGender[$gender][] = $speaker->voice_profile;
+                continue;
+            }
+
+            $gender = strtolower($speaker->gender ?? 'male');
+
+            // Pick an unused profile for this gender
+            $available = array_diff($profiles, $usedByGender[$gender] ?? []);
+            if (empty($available)) {
+                $available = $profiles; // All used, allow repeats
+            }
+            $profile = array_values($available)[$i % count($available)];
+            $usedByGender[$gender][] = $profile;
+
+            // Assign rate and expressiveness — spread across speakers
+            $rateIdx = $i % count($rateFactors);
+            $expressIdx = $i % count($expressLevels);
+
+            // Use detected pitch to inform profile if available
+            if ($speaker->pitch_median_hz && !$speaker->voice_profile) {
+                $pitch = $speaker->pitch_median_hz;
+                if ($gender === 'male') {
+                    $profile = match (true) {
+                        $pitch < 100 => 'bass',
+                        $pitch < 120 => 'deep',
+                        $pitch < 150 => 'warm',
+                        default => 'bright',
+                    };
+                } else {
+                    $profile = match (true) {
+                        $pitch < 190 => 'warm',
+                        $pitch < 220 => 'default',
+                        $pitch < 260 => 'bright',
+                        default => 'thin',
+                    };
+                }
+            }
+
+            $speaker->update([
+                'voice_profile' => $profile,
+                'speaking_rate_factor' => $rateFactors[$rateIdx],
+                'expressiveness' => $expressLevels[$expressIdx],
+            ]);
+
+            Log::info('Voice DNA assigned', [
+                'speaker_id' => $speaker->id,
+                'label' => $speaker->label,
+                'gender' => $gender,
+                'profile' => $profile,
+                'rate_factor' => $rateFactors[$rateIdx],
+                'expressiveness' => $expressLevels[$expressIdx],
+            ]);
         }
     }
 
@@ -859,11 +953,9 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
             return 'neutral';
         }
 
-        // Map additional emotions to supported set
+        // Map only unsupported emotions — keep all that EmotionDSP handles
         return match($dominantEmotion) {
-            'tender' => 'sad',      // Soft, gentle delivery
             'serious' => 'neutral', // Steady, measured delivery
-            'excited' => 'happy',   // Energetic delivery
             default => $dominantEmotion,
         };
     }

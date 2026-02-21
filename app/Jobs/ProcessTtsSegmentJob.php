@@ -5,6 +5,8 @@ namespace App\Jobs;
 use App\Models\Speaker;
 use App\Models\Video;
 use App\Models\VideoSegment;
+use App\Services\ActingDirector;
+use App\Services\NaturalSpeechProcessor;
 use App\Services\Tts\TtsManager;
 use App\Traits\DetectsEnglish;
 use Illuminate\Bus\Batchable;
@@ -59,13 +61,33 @@ class ProcessTtsSegmentJob implements ShouldQueue
 
         $speaker = $seg->speaker_id ? Speaker::find($seg->speaker_id) : null;
         $slotDuration = ((float) $seg->end_time) - ((float) $seg->start_time);
-        $emotion = $this->detectEmotion($seg->text ?? '', $text);
+
+        // Use ActingDirector for comprehensive emotion/delivery analysis
+        $actingDirector = app(ActingDirector::class);
+        $actingDirection = $actingDirector->analyze(
+            $seg->text ?? '',
+            $text,
+            []
+        );
+
+        $emotion = $actingDirection['emotion'];
+        $delivery = $actingDirection['delivery'];
 
         $options = [
             'emotion' => $emotion,
+            'direction' => $delivery,
+            'acting_direction' => $actingDirection,
             'speed' => 1.0,
-            'gain_db' => 0.0,
+            'gain_db' => (float) ($speaker?->tts_gain_db ?? 0),
+            'language' => $video->target_language ?? 'uz',
         ];
+
+        // Use cloned voice if available
+        if ($speaker && $speaker->hasClonedVoice()) {
+            $options['voice_id'] = $speaker->getVoiceIdForDriver(
+                config('dubber.tts.default', 'hybrid_uzbek')
+            );
+        }
 
         // Get driver
         $driverName = config('dubber.tts.default', 'hybrid_uzbek');
@@ -74,8 +96,20 @@ class ProcessTtsSegmentJob implements ShouldQueue
         $outDir = Storage::disk('local')->path("audio/tts/{$video->id}");
         @mkdir($outDir, 0777, true);
 
+        Log::info('TTS segment processing', [
+            'segment_id' => $seg->id,
+            'emotion' => $emotion,
+            'delivery' => $delivery,
+            'intensity' => $actingDirection['emotion_intensity'],
+        ]);
+
         try {
             $outputPath = $driver->synthesize($text, $speaker, $seg, $options);
+
+            // Post-synthesis: natural speech processing
+            $naturalProcessor = app(NaturalSpeechProcessor::class);
+            $naturalProcessor->process($outputPath, $actingDirection);
+
             $this->fitAudioToSlot($outputPath, $slotDuration);
 
             $relPath = str_replace(Storage::disk('local')->path(''), '', $outputPath);
@@ -95,19 +129,6 @@ class ProcessTtsSegmentJob implements ShouldQueue
                 throw $e;
             }
         }
-    }
-
-    protected function detectEmotion(string $original, string $translated): string
-    {
-        $text = $original . ' ' . $translated;
-        $lower = mb_strtolower($text);
-
-        if (preg_match('/[!]{2,}|\bwow\b|\bamazing\b|ajoyib/i', $text)) return 'happy';
-        if (preg_match('/[?]{2,}|\bwhat\b.*[?]|nima/i', $text)) return 'surprise';
-        if (preg_match('/\b(angry|mad|furious|damn)\b|jin/i', $lower)) return 'angry';
-        if (preg_match('/\b(sad|sorry|unfortunately)\b|afsuski/i', $lower)) return 'sad';
-
-        return 'neutral';
     }
 
     protected function fitAudioToSlot(string $audioPath, float $slotDuration): void

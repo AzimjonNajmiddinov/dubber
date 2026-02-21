@@ -25,6 +25,7 @@ class HybridUzbekDriver implements TtsDriverInterface
 {
     protected EdgeTtsDriver $edgeTts;
     protected string $openVoiceUrl;
+    protected float $currentTau = 0.3;
 
     public function __construct()
     {
@@ -63,6 +64,12 @@ class HybridUzbekDriver implements TtsDriverInterface
         VideoSegment $segment,
         array $options = []
     ): string {
+        // Set per-speaker OpenVoice tau (voice cloning strength)
+        // Higher tau = more speaker resemblance, lower = more generic but cleaner
+        // Based on voice sample quality: longer samples → higher confidence → higher tau
+        $this->currentTau = $speaker->openvoice_tau
+            ?? $this->calculateTau($speaker);
+
         // Stage 1: Generate speech with Edge TTS (correct Uzbek pronunciation)
         $edgeOutputPath = $this->edgeTts->synthesize($text, $speaker, $segment, $options);
 
@@ -74,6 +81,12 @@ class HybridUzbekDriver implements TtsDriverInterface
             $emotion = $actingDirection['emotion'] ?? 'neutral';
             $delivery = $actingDirection['delivery'] ?? 'normal';
             if ($emotion !== 'neutral' || $delivery !== 'normal') {
+                // Scale emotion intensity by speaker's expressiveness
+                // Some speakers are more expressive (0.8-1.0), others are restrained (0.2-0.5)
+                $speakerExpressiveness = $speaker->expressiveness ?? 0.6;
+                $baseIntensity = $actingDirection['emotion_intensity'] ?? 0.5;
+                $actingDirection['emotion_intensity'] = $baseIntensity * $speakerExpressiveness;
+
                 $emotionDsp = app(EmotionDSPProcessor::class);
                 $emotionDsp->apply($edgeOutputPath, $actingDirection);
             }
@@ -96,6 +109,8 @@ class HybridUzbekDriver implements TtsDriverInterface
             Log::info('HybridUzbek: Voice conversion complete', [
                 'segment_id' => $segment->id,
                 'speaker_key' => $speakerKey,
+                'tau' => $this->currentTau,
+                'expressiveness' => $speaker->expressiveness ?? 'default',
             ]);
 
             return $convertedPath;
@@ -213,6 +228,34 @@ class HybridUzbekDriver implements TtsDriverInterface
     }
 
     /**
+     * Calculate OpenVoice tau based on speaker voice sample quality.
+     *
+     * tau controls how much the output sounds like the original speaker:
+     *   0.0 = Edge TTS voice (no conversion)
+     *   0.2 = Light tint of speaker's voice
+     *   0.3 = Default — mild, natural blend
+     *   0.5 = Strong resemblance
+     *   0.7 = Very close to original speaker
+     *   1.0 = Full conversion (can sound artificial)
+     *
+     * We scale tau by voice sample duration — longer samples = better embeddings = higher tau.
+     */
+    protected function calculateTau(Speaker $speaker): float
+    {
+        $sampleDuration = $speaker->voice_sample_duration ?? 0;
+
+        if ($sampleDuration <= 0 || !$speaker->voice_cloned) {
+            return 0.3; // Default
+        }
+
+        // Scale: 2s → 0.2, 5s → 0.3, 10s → 0.4, 20s+ → 0.5
+        // We cap at 0.5 to keep output natural (full conversion can sound robotic)
+        $tau = 0.15 + min(0.35, $sampleDuration / 60);
+
+        return round($tau, 2);
+    }
+
+    /**
      * Send Edge TTS WAV to OpenVoice for voice conversion.
      */
     protected function convertVoice(string $edgeWavPath, string $speakerKey, int $segmentId): string
@@ -224,7 +267,7 @@ class HybridUzbekDriver implements TtsDriverInterface
             ->withOptions(['sink' => $convertedPath])
             ->post("{$this->openVoiceUrl}/convert", [
                 'speaker_key' => $speakerKey,
-                'tau' => 0.3,
+                'tau' => $this->currentTau,
             ]);
 
         if ($response->failed()) {

@@ -27,6 +27,12 @@ class Speaker extends Model
         'openvoice_speaker_key', // OpenVoice speaker embedding key
         'voice_sample_path',    // Path to extracted voice sample
         'voice_cloned',         // Whether voice has been cloned
+        // Per-speaker voice DNA — makes each speaker sound unique
+        'voice_profile',        // deep, bright, bass, thin, warm, default
+        'speaking_rate_factor', // 0.85-1.15 — base speed multiplier
+        'expressiveness',       // 0.2-1.0 — how much emotion DSP to apply
+        'openvoice_tau',        // 0.0-1.0 — voice cloning strength
+        'voice_sample_duration', // seconds of usable voice sample
     ];
 
     protected $casts = [
@@ -35,6 +41,10 @@ class Speaker extends Model
         'emotion_confidence' => 'float',
         'pitch_median_hz' => 'float',
         'tts_gain_db' => 'float',
+        'speaking_rate_factor' => 'float',
+        'expressiveness' => 'float',
+        'openvoice_tau' => 'float',
+        'voice_sample_duration' => 'float',
     ];
 
     public function video(): BelongsTo

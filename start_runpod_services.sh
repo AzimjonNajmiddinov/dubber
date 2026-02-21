@@ -7,7 +7,8 @@
 #   ./start_runpod_services.sh --skip-deps    # Skip dependency installation
 #   ./start_runpod_services.sh --deps-only    # Only install dependencies, don't start services
 
-set -e
+# Do NOT use set -e — individual failures are handled inline
+set -o pipefail
 
 SKIP_DEPS=false
 DEPS_ONLY=false
@@ -29,12 +30,19 @@ sleep 2
 
 # Pull latest code
 cd /workspace/dubber
-git pull --ff-only || { git fetch origin && git reset --hard origin/main; }
+echo "Pulling latest code..."
+if ! git pull --ff-only 2>&1; then
+    echo "  Fast-forward pull failed, resetting to origin/main..."
+    git fetch origin
+    git reset --hard origin/main
+fi
+echo "  HEAD: $(git log --oneline -1)"
 
 # ===========================================
 # INSTALL/FIX DEPENDENCIES
 # ===========================================
 if [ "$SKIP_DEPS" = false ]; then
+    echo ""
     echo "Installing/fixing dependencies..."
 
     PIP_FLAGS="--no-warn-script-location -q"
@@ -61,12 +69,12 @@ if [ "$SKIP_DEPS" = false ]; then
         "huggingface_hub>=0.25,<1.0.0" \
         "transformers>=4.48,<4.50" \
         "tokenizers>=0.21,<0.24" \
-        uvicorn fastapi python-multipart aiofiles pydantic
+        uvicorn fastapi python-multipart aiofiles pydantic soundfile
 
     # Verify torch wasn't changed by transitive dependencies
-    TORCH_VER=$(python -c "import torch; print(torch.__version__)" 2>/dev/null)
+    TORCH_VER=$(python -c "import torch; print(torch.__version__)" 2>/dev/null || echo "MISSING")
     if [[ ! "$TORCH_VER" == 2.8.0* ]]; then
-        echo "  WARNING: torch changed to $TORCH_VER, reinstalling 2.8.0..."
+        echo "  WARNING: torch is $TORCH_VER, reinstalling 2.8.0..."
         pip install $PIP_FLAGS torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu126
     fi
 
@@ -76,30 +84,91 @@ if [ "$SKIP_DEPS" = false ]; then
 
     # Step 5: WhisperX + speechbrain + demucs
     echo "  [5/5] Installing WhisperX, speechbrain, demucs..."
-    pip install $PIP_FLAGS -c "$CONSTRAINTS" whisperx speechbrain soundfile
+    pip install $PIP_FLAGS -c "$CONSTRAINTS" whisperx speechbrain
     pip install $PIP_FLAGS --no-deps demucs
     pip install $PIP_FLAGS -c "$CONSTRAINTS" \
         dora-search lameenc julius diffq einops openunmix treetable
 
-    echo "Dependencies installed!"
-
-    # Verify key packages
     echo ""
-    echo "Package versions:"
-    python -c "import torch; print(f'  torch: {torch.__version__}')"
-    python -c "import numpy; print(f'  numpy: {numpy.__version__}')"
-    python -c "import pandas; print(f'  pandas: {pandas.__version__}')"
-    python -c "import scipy; print(f'  scipy: {scipy.__version__}')"
-    python -c "import transformers; print(f'  transformers: {transformers.__version__}')"
-    python -c "import whisperx; print(f'  whisperx: OK')"
-    python -c "import demucs; print(f'  demucs: OK')"
+    echo "Dependencies installed! Verifying..."
+
+    # Verify key packages (non-fatal)
+    VERIFY_OK=true
+    for pkg in torch numpy pandas scipy transformers whisperx demucs soundfile; do
+        if python -c "import $pkg" 2>/dev/null; then
+            VER=$(python -c "import $pkg; print(getattr($pkg, '__version__', 'OK'))" 2>/dev/null)
+            echo "  $pkg: $VER"
+        else
+            echo "  $pkg: MISSING!"
+            VERIFY_OK=false
+        fi
+    done
+    if [ "$VERIFY_OK" = false ]; then
+        echo "WARNING: Some packages are missing. Services may fail to start."
+    fi
     echo ""
 else
     echo "Skipping dependency check (--skip-deps)"
 fi
 
+# ===========================================
+# OPENVOICE VENV SETUP (always check, even with --skip-deps)
+# ===========================================
+echo "Checking OpenVoice venv..."
+cd /workspace/dubber/openvoice-service
+
+VENV_OK=false
+if [ -d "venv" ] && venv/bin/python -c "import uvicorn; import openvoice" 2>/dev/null; then
+    echo "  OpenVoice venv OK"
+    VENV_OK=true
+fi
+
+if [ "$VENV_OK" = false ]; then
+    echo "  Creating OpenVoice venv (this takes 2-3 minutes)..."
+    rm -rf venv
+
+    python -m venv venv
+
+    # Upgrade pip first (system pip may be too old for binary wheel resolution)
+    echo "    Upgrading pip..."
+    venv/bin/pip install --no-warn-script-location -q --upgrade pip
+
+    # Install av as binary wheel FIRST (source build fails with Cython errors on RunPod)
+    echo "    Installing av (binary wheel)..."
+    if ! venv/bin/pip install --no-warn-script-location -q --only-binary :all: av 2>/dev/null; then
+        echo "    Binary wheel failed, trying source..."
+        # Install build deps for av if binary not available
+        apt-get install -y -qq pkg-config libavformat-dev libavcodec-dev libavutil-dev libswresample-dev \
+            libavdevice-dev libavfilter-dev libswscale-dev 2>/dev/null || true
+        venv/bin/pip install --no-warn-script-location -q av
+    fi
+
+    # Install PyTorch with CUDA (OpenVoice needs torch)
+    echo "    Installing PyTorch..."
+    venv/bin/pip install --no-warn-script-location -q torch==2.8.0 torchaudio==2.8.0 \
+        --index-url https://download.pytorch.org/whl/cu126
+
+    # Install web framework deps explicitly (in case requirements.txt has issues)
+    echo "    Installing web framework..."
+    venv/bin/pip install --no-warn-script-location -q uvicorn fastapi python-multipart pydantic
+
+    # Install OpenVoice from GitHub
+    echo "    Installing OpenVoice..."
+    venv/bin/pip install --no-warn-script-location -q git+https://github.com/myshell-ai/OpenVoice.git
+
+    # Final verification
+    if venv/bin/python -c "import uvicorn; import openvoice; print('OpenVoice venv OK')" 2>/dev/null; then
+        echo "  OpenVoice venv created successfully"
+    else
+        echo "  ERROR: OpenVoice venv creation failed!"
+        echo "  Check: venv/bin/python -c 'import uvicorn; import openvoice'"
+        # Don't exit — other services can still start
+    fi
+fi
+
 # Exit early if only installing dependencies
 if [ "$DEPS_ONLY" = true ]; then
+    echo ""
     echo "Dependencies installed. Exiting (--deps-only mode)."
     exit 0
 fi
@@ -125,6 +194,7 @@ export DEVICE="cuda"
 
 # Verify HF_TOKEN is set
 if [ -z "$HF_TOKEN" ]; then
+    echo ""
     echo "WARNING: HF_TOKEN not set. WhisperX will fail!"
     echo "Set it with: export HF_TOKEN='your_token'"
 fi
@@ -132,46 +202,62 @@ fi
 # ===========================================
 # START SERVICES
 # ===========================================
+echo ""
+echo "Starting services..."
 
 # Start Demucs on port 8000
-echo "Starting Demucs on port 8000..."
+echo "  Starting Demucs on port 8000..."
 cd /workspace/dubber/demucs-service
 nohup python -m uvicorn app_runpod:app --host 0.0.0.0 --port 8000 > /tmp/demucs.log 2>&1 &
 
 # Start WhisperX on port 8002
-echo "Starting WhisperX on port 8002..."
+echo "  Starting WhisperX on port 8002..."
 cd /workspace/dubber/whisperx-service
 nohup python -m uvicorn app:app --host 0.0.0.0 --port 8002 > /tmp/whisperx.log 2>&1 &
 
-# Start OpenVoice on port 8005 (isolated venv to avoid librosa conflicts)
-echo "Starting OpenVoice on port 8005..."
+# Start OpenVoice on port 8005 (isolated venv)
+echo "  Starting OpenVoice on port 8005..."
 cd /workspace/dubber/openvoice-service
-if [ ! -d "venv" ] || ! venv/bin/python -c "import uvicorn" 2>/dev/null; then
-    echo "  Creating OpenVoice venv..."
-    rm -rf venv
-    python -m venv venv
-    venv/bin/pip install --no-warn-script-location -q --upgrade pip
-    # Install av as binary wheel first (source build fails with Cython errors)
-    venv/bin/pip install --no-warn-script-location -q --only-binary av av
-    # Install PyTorch with CUDA before OpenVoice (it needs torch)
-    venv/bin/pip install --no-warn-script-location -q torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu126
-    # Install remaining deps (av already satisfied, won't rebuild)
-    venv/bin/pip install --no-warn-script-location -q -r requirements.txt
-fi
 nohup venv/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8005 > /tmp/openvoice.log 2>&1 &
 
 echo ""
-echo "Waiting for services to load models (90s)..."
-sleep 90
+echo "Waiting for services to load models..."
+
+# Poll for health instead of blind sleep
+check_health() {
+    local name=$1 port=$2 check=$3
+    for i in $(seq 1 30); do
+        if curl -s --max-time 2 "http://localhost:${port}/health" | python -c "$check" 2>/dev/null; then
+            return 0
+        fi
+        sleep 3
+    done
+    return 1
+}
+
+echo -n "  Demucs (8000):    "
+if check_health "Demucs" 8000 "import sys,json; d=json.load(sys.stdin); assert d"; then
+    curl -s http://localhost:8000/health | python -c "import sys,json; d=json.load(sys.stdin); print(f'OK - GPU: {d.get(\"gpu_name\", \"N/A\")}')" 2>/dev/null
+else
+    echo "FAILED (check: tail /tmp/demucs.log)"
+fi
+
+echo -n "  WhisperX (8002):  "
+if check_health "WhisperX" 8002 "import sys,json; d=json.load(sys.stdin); assert d.get('ok')"; then
+    echo "OK"
+else
+    echo "FAILED (check: tail /tmp/whisperx.log)"
+fi
+
+echo -n "  OpenVoice (8005): "
+if check_health "OpenVoice" 8005 "import sys,json; d=json.load(sys.stdin); assert d.get('status')=='healthy'"; then
+    echo "OK"
+else
+    echo "FAILED (check: tail /tmp/openvoice.log)"
+fi
 
 echo ""
-echo "=== Service Status ==="
-echo -n "Demucs (8000):    " && curl -s http://localhost:8000/health | python -c "import sys,json; d=json.load(sys.stdin); print(f'OK - GPU: {d.get(\"gpu_name\", \"N/A\")}')" 2>/dev/null || echo "Still loading..."
-echo -n "WhisperX (8002):  " && curl -s http://localhost:8002/health | python -c "import sys,json; d=json.load(sys.stdin); print('OK' if d.get('ok') else 'Error')" 2>/dev/null || echo "Still loading..."
-echo -n "OpenVoice (8005): " && curl -s http://localhost:8005/health | python -c "import sys,json; d=json.load(sys.stdin); print('OK' if d.get('status')=='healthy' else 'Error')" 2>/dev/null || echo "Still loading..."
-
-echo ""
-nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader
+nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader 2>/dev/null || echo "nvidia-smi not available"
 
 echo ""
 echo "=== READY ==="
