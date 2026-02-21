@@ -124,45 +124,34 @@ if [ -d "venv" ] && venv/bin/python -c "import uvicorn; import openvoice" 2>/dev
 fi
 
 if [ "$VENV_OK" = false ]; then
-    echo "  Creating OpenVoice venv (this takes 2-3 minutes)..."
+    echo "  Creating OpenVoice venv (this takes 1-2 minutes)..."
     rm -rf venv
 
-    python -m venv venv
+    # Use --system-site-packages to inherit torch, av, numpy etc. from system Python.
+    # This avoids duplicating ~8GB of PyTorch and saves disk space on RunPod.
+    python -m venv --system-site-packages venv
 
-    # Upgrade pip first (system pip may be too old for binary wheel resolution)
+    # Upgrade pip
     echo "    Upgrading pip..."
     venv/bin/pip install --no-warn-script-location -q --upgrade pip
 
-    # Install av as binary wheel FIRST (source build fails with Cython errors on RunPod)
-    echo "    Installing av (binary wheel)..."
-    if ! venv/bin/pip install --no-warn-script-location -q --only-binary :all: av 2>/dev/null; then
-        echo "    Binary wheel failed, trying source..."
-        # Install build deps for av if binary not available
-        apt-get install -y -qq pkg-config libavformat-dev libavcodec-dev libavutil-dev libswresample-dev \
-            libavdevice-dev libavfilter-dev libswscale-dev 2>/dev/null || true
-        venv/bin/pip install --no-warn-script-location -q av
-    fi
-
-    # Install PyTorch with CUDA (OpenVoice needs torch)
-    echo "    Installing PyTorch..."
-    venv/bin/pip install --no-warn-script-location -q torch==2.8.0 torchaudio==2.8.0 \
-        --index-url https://download.pytorch.org/whl/cu126
-
-    # Install web framework deps explicitly (in case requirements.txt has issues)
-    echo "    Installing web framework..."
+    # Install ONLY OpenVoice-specific deps (torch/av/numpy come from system)
+    echo "    Installing uvicorn + fastapi..."
     venv/bin/pip install --no-warn-script-location -q uvicorn fastapi python-multipart pydantic
 
-    # Install OpenVoice from GitHub
+    # Install OpenVoice from GitHub (its deps like librosa install in venv, isolated from system)
     echo "    Installing OpenVoice..."
     venv/bin/pip install --no-warn-script-location -q git+https://github.com/myshell-ai/OpenVoice.git
 
     # Final verification
-    if venv/bin/python -c "import uvicorn; import openvoice; print('OpenVoice venv OK')" 2>/dev/null; then
+    if venv/bin/python -c "import uvicorn; import torch; import openvoice; print('OpenVoice venv OK')" 2>/dev/null; then
         echo "  OpenVoice venv created successfully"
     else
         echo "  ERROR: OpenVoice venv creation failed!"
-        echo "  Check: venv/bin/python -c 'import uvicorn; import openvoice'"
-        # Don't exit — other services can still start
+        echo "  Trying to diagnose..."
+        venv/bin/python -c "import torch; print(f'  torch: {torch.__version__}')" 2>&1 || echo "  torch: MISSING"
+        venv/bin/python -c "import uvicorn; print('  uvicorn: OK')" 2>&1 || echo "  uvicorn: MISSING"
+        venv/bin/python -c "import openvoice; print('  openvoice: OK')" 2>&1 || echo "  openvoice: MISSING"
     fi
 fi
 
