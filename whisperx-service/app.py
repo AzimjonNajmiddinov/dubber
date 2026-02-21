@@ -496,10 +496,15 @@ def _analyze_audio(audio_path: str, min_speakers: Optional[int] = None, max_spea
             "emotion_confidence": None,
         }
 
+    # Track whether diarization actually ran
+    diarization_ran = ENABLE_DIARIZATION and bool(diar_rows)
+
     return {
         "language": getattr(info, "language", None),
         "segments": final_segments,
         "speakers": speakers,
+        "diarization_enabled": ENABLE_DIARIZATION,
+        "speakers_detected": len(speakers),
     }
 
 

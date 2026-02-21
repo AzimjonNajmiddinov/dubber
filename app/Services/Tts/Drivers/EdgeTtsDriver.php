@@ -342,6 +342,13 @@ class EdgeTtsDriver implements TtsDriverInterface
             $gender = preg_match('/female|woman|girl|lady/i', $label) ? 'female' : 'male';
         }
 
+        // Child speakers: prefer female voice — pitched-up female voices sound
+        // more like children than pitched-up male voices in Edge TTS
+        $ageGroup = strtolower($speaker->age_group ?? 'unknown');
+        if (in_array($ageGroup, ['child', 'kid'], true)) {
+            $gender = 'female';
+        }
+
         $langVoices = $this->voiceMap[$language] ?? $this->voiceMap['uz'];
         $genderVoices = $langVoices[$gender] ?? $langVoices['male'];
 

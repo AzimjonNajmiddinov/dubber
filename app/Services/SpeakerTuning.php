@@ -103,8 +103,8 @@ class SpeakerTuning
 
         // Age adjustments (mild values to keep it natural, avoid ultrasound-like high pitches)
         if (in_array($age, ['child', 'kid'], true)) {
-            $rate  = '+4%';
-            $pitch = '+12Hz';  // Reduced from +35Hz - much more natural
+            $rate  = '+6%';
+            $pitch = '+20Hz';  // Higher pitch for more noticeable child voice
             $gain += 0.2;
         } elseif (in_array($age, ['young_adult', 'young'], true)) {
             $rate  = '+1%';

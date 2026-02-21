@@ -159,7 +159,6 @@ class TranscribeWithWhisperXJob implements ShouldQueue, ShouldBeUnique
                     ->retry(5, 500, throw: false)
                     ->post("{$whisperxUrl}/analyze", [
                         'audio_path' => $audioRel,
-                        'min_speakers' => 2,
                     ]);
 
                 if ($res->status() === 404 && file_exists($audioAbs)) {
@@ -170,9 +169,7 @@ class TranscribeWithWhisperXJob implements ShouldQueue, ShouldBeUnique
                     $res = Http::timeout(600)
                         ->connectTimeout(5)
                         ->attach('audio', file_get_contents($audioAbs), basename($audioAbs))
-                        ->post("{$whisperxUrl}/analyze-upload", [
-                            'min_speakers' => 2,
-                        ]);
+                        ->post("{$whisperxUrl}/analyze-upload");
                 }
 
                 if ($res->failed()) {
@@ -214,6 +211,31 @@ class TranscribeWithWhisperXJob implements ShouldQueue, ShouldBeUnique
 
                 $segments = $data['segments'];
                 $speakerMeta = (isset($data['speakers']) && is_array($data['speakers'])) ? $data['speakers'] : [];
+
+                // Log diarization diagnostics
+                $diarizationEnabled = $data['diarization_enabled'] ?? null;
+                $speakersDetected = $data['speakers_detected'] ?? count($speakerMeta);
+
+                Log::info('WhisperX diarization result', [
+                    'video_id' => $video->id,
+                    'diarization_enabled' => $diarizationEnabled,
+                    'speakers_detected' => $speakersDetected,
+                    'speaker_keys' => array_keys($speakerMeta),
+                ]);
+
+                if ($diarizationEnabled === false) {
+                    Log::warning('WhisperX diarization was disabled (missing HF_TOKEN?)', [
+                        'video_id' => $video->id,
+                    ]);
+                }
+
+                if ($speakersDetected <= 1 && $dur !== null && $dur > 120) {
+                    Log::warning('Only 1 speaker detected for long audio — possible diarization issue', [
+                        'video_id' => $video->id,
+                        'duration' => $dur,
+                        'speakers_detected' => $speakersDetected,
+                    ]);
+                }
             }
             $now = now();
 
@@ -452,9 +474,7 @@ class TranscribeWithWhisperXJob implements ShouldQueue, ShouldBeUnique
         $res = Http::timeout(600)
             ->connectTimeout(5)
             ->attach('audio', file_get_contents($chunkPath), basename($chunkPath))
-            ->post("{$whisperxUrl}/analyze-upload", [
-                'min_speakers' => 2,
-            ]);
+            ->post("{$whisperxUrl}/analyze-upload");
 
         if ($res->failed()) {
             throw new \RuntimeException("WhisperX chunk request failed (HTTP {$res->status()})");
