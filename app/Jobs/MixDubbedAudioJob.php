@@ -60,16 +60,21 @@ class MixDubbedAudioJob implements ShouldQueue, ShouldBeUnique
 
     /**
      * Build FFmpeg volume expression that ducks the bed during TTS segments.
-     * Professional dubbing style: background stays audible but lower.
-     * Returns expression like: 1-min(between(t\,0.5\,2.3)+between(t\,3.0\,5.0)\,1)*0.6
-     * During TTS: volume = 0.4 (-8dB), Between TTS: volume = 1.0
+     *
+     * Professional dubbing approach:
+     * - Background starts lowering BEFORE speech begins (pre-duck)
+     * - Background recovers SLOWLY after speech ends (post-duck)
+     * - Adjacent dialogue blocks are merged so background stays consistently
+     *   low during conversation, only rising during real pauses
+     * - Smooth S-curve-like ramps (linear in FFmpeg, but long enough to sound natural)
      */
     protected function buildDuckingExpression($segments): string
     {
-        // Merge overlapping/adjacent segments with padding into blocks
-        // 200ms padding merges ducking blocks within 400ms of each other,
-        // preventing background from "breathing" between rapid dialogue
-        $padding = 0.20;
+        // Merge segments into dialogue blocks with generous padding.
+        // 600ms padding → blocks within 1.2s merge into one continuous duck.
+        // This prevents the "pumping" effect where background rapidly rises
+        // and falls between consecutive dialogue lines.
+        $padding = 0.60;
         $blocks = [];
 
         foreach ($segments as $seg) {
@@ -77,7 +82,6 @@ class MixDubbedAudioJob implements ShouldQueue, ShouldBeUnique
             $end = (float) $seg->end_time + $padding;
 
             if (!empty($blocks) && $start <= end($blocks)['end']) {
-                // Merge with previous block
                 $blocks[count($blocks) - 1]['end'] = max($blocks[count($blocks) - 1]['end'], $end);
             } else {
                 $blocks[] = ['start' => $start, 'end' => $end];
@@ -85,20 +89,21 @@ class MixDubbedAudioJob implements ShouldQueue, ShouldBeUnique
         }
 
         if (empty($blocks)) {
-            return '1'; // No ducking needed
+            return '1';
         }
 
-        // Build smooth ramp terms: 150ms fade-in, 300ms fade-out per block
-        // Each block produces: clip(ramp_up, 0, 1) * clip(ramp_down, 0, 1)
-        // This gives smooth 0 → 1 → 0 envelope instead of instant switching
-        $fadeIn = 0.15;
-        $fadeOut = 0.30;
+        // Ramp durations — long and asymmetric for natural feel:
+        // - Fade-in (duck down): 400ms — background lowers gradually before speech
+        // - Fade-out (recover):  800ms — background comes back very slowly after speech
+        // The slow recovery is KEY — it's the most noticeable transition in dubbing.
+        // Human hearing is more sensitive to sounds appearing than disappearing.
+        $fadeIn = 0.40;
+        $fadeOut = 0.80;
 
         $terms = [];
         foreach ($blocks as $b) {
             $rampUpStart = $b['start'] - $fadeIn;
             $rampDownEnd = $b['end'] + $fadeOut;
-            // min(max((t - rampUpStart) / fadeIn, 0), 1) * min(max((rampDownEnd - t) / fadeOut, 0), 1)
             $terms[] = sprintf(
                 'min(max((t-%.3f)/%.3f\\,0)\\,1)*min(max((%.3f-t)/%.3f\\,0)\\,1)',
                 $rampUpStart,
@@ -108,10 +113,10 @@ class MixDubbedAudioJob implements ShouldQueue, ShouldBeUnique
             );
         }
 
-        // volume = 1 - min(sum, 1) * 0.55
-        // During TTS: 1 - 1*0.55 = 0.45 (-7dB) - gradual feels less noticeable
-        // Between TTS: 1 - 0*0.55 = 1.0  (full volume)
-        return '1-min(' . implode('+', $terms) . '\\,1)*0.55';
+        // Duck depth: 0.50 → during speech bed is at 50% volume (-6dB)
+        // Less aggressive than before (was 0.55 → 45%), keeps background present
+        // but clearly subordinate to speech.
+        return '1-min(' . implode('+', $terms) . '\\,1)*0.50';
     }
 
     public function handle(): void
@@ -195,18 +200,23 @@ class MixDubbedAudioJob implements ShouldQueue, ShouldBeUnique
                 $delayMs = max(0, (int) round($slotStart * 1000));
                 $label = "tts{$i}";
 
-                // Same-speaker crossfade: longer fades for smooth blend between
-                // consecutive lines from the same speaker (gap < 500ms)
+                // TTS segment fades — prevent clicks at segment boundaries
+                // while keeping speech onset crisp and natural.
+                //
+                // Same speaker, rapid succession: longer fades blend consecutive
+                // lines smoothly (sounds like continuous speech).
+                // Different speaker or pause: shorter fades keep dialogue snappy
+                // but still avoid hard clicks.
                 $currentSpeakerId = $seg->speaker_id;
                 $gap = $slotStart - $prevEndTime;
 
-                if ($currentSpeakerId && $currentSpeakerId === $prevSpeakerId && $gap < 0.5) {
-                    // Same speaker, rapid succession: smooth blend
-                    $fadeIn = 0.15;
-                    $fadeOut = 0.15;
+                if ($currentSpeakerId && $currentSpeakerId === $prevSpeakerId && $gap < 0.8) {
+                    // Same speaker continuing: smooth blend
+                    $fadeIn = 0.06;
+                    $fadeOut = 0.12;
                 } else {
-                    // Different speaker or large gap: quick transition
-                    $fadeIn = 0.05;
+                    // Speaker change or pause: clean transition
+                    $fadeIn = 0.03;
                     $fadeOut = 0.08;
                 }
 
@@ -277,20 +287,20 @@ class MixDubbedAudioJob implements ShouldQueue, ShouldBeUnique
             ]);
 
             // BACKGROUND BED with time-based ducking
-            // Keep background loud like original, only duck during speech
+            // Gentle filtering + smooth volume automation during speech
             $filtersMain[] =
                 "[0:a]"
                 . "aresample=48000,"
                 . "aformat=sample_fmts=fltp:channel_layouts=stereo,"
-                . "highpass=f=60,"   // Remove rumble
-                . "lowpass=f=14000," // Remove hiss
-                . "volume={$duckExpr}:eval=frame"  // Duck during TTS only
+                . "highpass=f=40,"       // Gentle rumble removal (40Hz, not 60)
+                . "volume={$duckExpr}:eval=frame"  // Smooth duck during TTS
                 . "[ducked]";
 
-            // Final mix - bed (ducked) + TTS
+            // Final mix — bed (ducked) + TTS vocals
+            // loudnorm with higher LRA (13) allows more natural dynamics
             $filtersMain[] =
                 "[ducked][ttsbus]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,"
-                . "loudnorm=I=-14:TP=-1.5:LRA=11,"    // broadcast loudness standard
+                . "loudnorm=I=-14:TP=-1.5:LRA=13,"
                 . "alimiter=limit=0.95"
                 . "[mixed]";
 
@@ -370,7 +380,7 @@ class MixDubbedAudioJob implements ShouldQueue, ShouldBeUnique
             $nextStart = (float) $next->start_time;
 
             if ($currentEnd > $nextStart) {
-                $newEnd = $nextStart - 0.03; // 30ms gap - tighter, more natural
+                $newEnd = $nextStart - 0.05; // 50ms gap — room for fade-out tail
                 if ($newEnd > (float) $current->start_time + 0.1) {
                     // Only adjust in-memory attribute for mixing, not saved to DB
                     $current->setAttribute('end_time', round($newEnd, 3));
