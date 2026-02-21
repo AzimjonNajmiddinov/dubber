@@ -355,6 +355,38 @@ def ready():
         return {"ok": False, "error": str(e)}
 
 
+@app.get("/debug/diarize-check")
+def debug_diarize_check():
+    """Diagnostic: check diarization pipeline status without running analysis."""
+    result = {
+        "enable_diarization": ENABLE_DIARIZATION,
+        "hf_token_set": bool(HF_TOKEN),
+        "hf_token_prefix": HF_TOKEN[:8] + "..." if HF_TOKEN else None,
+        "diarization_model": DIARIZATION_MODEL,
+        "pipeline_loaded": _diarize_pipeline is not None,
+        "pipeline_type": type(_diarize_pipeline).__name__ if _diarize_pipeline else None,
+    }
+
+    if _diarize_pipeline is not None:
+        result["has_model_attr"] = hasattr(_diarize_pipeline, "model")
+        if hasattr(_diarize_pipeline, "model"):
+            result["model_type"] = type(_diarize_pipeline.model).__name__
+    else:
+        # Try to init now and report
+        try:
+            pipe = get_diarize_pipeline()
+            result["init_result"] = "success" if pipe is not None else "returned_none"
+            result["pipeline_loaded_after_init"] = pipe is not None
+            if pipe is not None:
+                result["pipeline_type"] = type(pipe).__name__
+                result["has_model_attr"] = hasattr(pipe, "model")
+        except Exception as e:
+            result["init_result"] = f"error: {e}"
+            result["init_traceback"] = traceback.format_exc()
+
+    return result
+
+
 def _analyze_audio(audio_path: str, min_speakers: Optional[int] = None, max_speakers: Optional[int] = None) -> dict:
     """Core analysis logic shared by path-based and upload endpoints."""
     # 1) TRANSCRIBE
@@ -367,6 +399,7 @@ def _analyze_audio(audio_path: str, min_speakers: Optional[int] = None, max_spea
 
     # 2) DIARIZE (optional - gracefully degrade if unavailable)
     diar_rows = []
+    diarization_status = "disabled"  # Track what actually happened
     if ENABLE_DIARIZATION:
         try:
             diarize = get_diarize_pipeline()
@@ -376,18 +409,39 @@ def _analyze_audio(audio_path: str, min_speakers: Optional[int] = None, max_spea
                     diarize_kwargs["min_speakers"] = min_speakers
                 if max_speakers is not None:
                     diarize_kwargs["max_speakers"] = max_speakers
+
+                # If caller didn't specify min_speakers, auto-hint based on duration.
+                # Pyannote's default clustering threshold (~0.7) is aggressive and
+                # often collapses distinct speakers into one cluster.
+                # For audio > 60s, hint min_speakers=2 to prevent this.
+                # Short clips (<60s) may genuinely be single-speaker — leave unconstrained.
+                if min_speakers is None and max_speakers is None:
+                    try:
+                        import librosa
+                        dur = librosa.get_duration(filename=audio_path)
+                        if dur > 60:
+                            diarize_kwargs["min_speakers"] = 2
+                            print(f"[DIARIZE] Auto-set min_speakers=2 (duration={dur:.1f}s > 60s)", flush=True)
+                    except Exception:
+                        pass
+
                 print(f"[DIARIZE] Calling with kwargs: {diarize_kwargs}", flush=True)
                 diarization_df = diarize(audio_path, **diarize_kwargs)
                 diar_rows = diarization_df.to_dict("records")
+                diarization_status = "ok"
 
                 # Debug: log diarization results
-                print(f"[DIARIZE] Found {len(diar_rows)} speaker segments", flush=True)
+                unique_speakers = set(r["speaker"] for r in diar_rows)
+                print(f"[DIARIZE] Found {len(diar_rows)} speaker segments, {len(unique_speakers)} unique speakers: {sorted(unique_speakers)}", flush=True)
                 for i, row in enumerate(diar_rows[:30]):  # limit to 30 for readability
                     print(f"  Diar[{i}]: {row['start']:.2f}-{row['end']:.2f} -> {row['speaker']}", flush=True)
             else:
+                diarization_status = "pipeline_unavailable"
                 print("[DIARIZE] Pipeline not available, skipping diarization", flush=True)
         except Exception as e:
+            diarization_status = f"error: {e}"
             print(f"[DIARIZE] Failed: {e}, continuing without diarization", flush=True)
+            traceback.print_exc()
             diar_rows = []
 
     # 3) Assign speaker to each segment using overlap-based matching
@@ -496,14 +550,13 @@ def _analyze_audio(audio_path: str, min_speakers: Optional[int] = None, max_spea
             "emotion_confidence": None,
         }
 
-    # Track whether diarization actually ran
-    diarization_ran = ENABLE_DIARIZATION and bool(diar_rows)
-
     return {
         "language": getattr(info, "language", None),
         "segments": final_segments,
         "speakers": speakers,
         "diarization_enabled": ENABLE_DIARIZATION,
+        "diarization_status": diarization_status,
+        "diarization_segments": len(diar_rows),
         "speakers_detected": len(speakers),
     }
 

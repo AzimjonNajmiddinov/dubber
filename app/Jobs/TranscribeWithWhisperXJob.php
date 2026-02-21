@@ -214,11 +214,15 @@ class TranscribeWithWhisperXJob implements ShouldQueue, ShouldBeUnique
 
                 // Log diarization diagnostics
                 $diarizationEnabled = $data['diarization_enabled'] ?? null;
+                $diarizationStatus = $data['diarization_status'] ?? 'unknown';
+                $diarizationSegments = $data['diarization_segments'] ?? null;
                 $speakersDetected = $data['speakers_detected'] ?? count($speakerMeta);
 
                 Log::info('WhisperX diarization result', [
                     'video_id' => $video->id,
                     'diarization_enabled' => $diarizationEnabled,
+                    'diarization_status' => $diarizationStatus,
+                    'diarization_segments' => $diarizationSegments,
                     'speakers_detected' => $speakersDetected,
                     'speaker_keys' => array_keys($speakerMeta),
                 ]);
@@ -226,6 +230,13 @@ class TranscribeWithWhisperXJob implements ShouldQueue, ShouldBeUnique
                 if ($diarizationEnabled === false) {
                     Log::warning('WhisperX diarization was disabled (missing HF_TOKEN?)', [
                         'video_id' => $video->id,
+                    ]);
+                }
+
+                if ($diarizationStatus !== 'ok' && $diarizationStatus !== 'disabled') {
+                    Log::warning('WhisperX diarization did not complete successfully', [
+                        'video_id' => $video->id,
+                        'diarization_status' => $diarizationStatus,
                     ]);
                 }
 
