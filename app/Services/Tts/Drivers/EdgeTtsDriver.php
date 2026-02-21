@@ -169,15 +169,6 @@ class EdgeTtsDriver implements TtsDriverInterface
         $direction = strtolower($options['direction'] ?? $segment->direction ?? 'normal');
         $speedMultiplier = (float) ($options['speed'] ?? 1.0);
 
-        // UZBEK PRONUNCIATION FIX:
-        // Edge TTS doesn't correctly pronounce Uzbek o' and g' characters.
-        // o' should sound like German/Turkish "ö" (rounded front vowel)
-        // g' should sound like Turkish "ğ" (soft g, voiced velar fricative)
-        // We substitute these characters for better pronunciation.
-        if ($language === 'uz' || str_contains($language, 'uzbek') || str_contains($language, 'Uzbek')) {
-            $text = $this->fixUzbekPronunciation($text);
-        }
-
         // Select voice based on speaker gender
         $voice = $this->selectVoice($speaker, $language);
 
@@ -253,6 +244,14 @@ class EdgeTtsDriver implements TtsDriverInterface
 
         // Normalize text for TTS (converts numbers to words, normalizes apostrophes, etc.)
         $text = TextNormalizer::normalize($text, $language);
+
+        // UZBEK PRONUNCIATION FIX — must run AFTER TextNormalizer:
+        // TextNormalizer converts all apostrophes to ASCII (U+0027).
+        // Edge TTS Uzbek voices need U+02BB (modifier letter turned comma)
+        // for correct oʻ and gʻ pronunciation. This step converts them back.
+        if ($language === 'uz' || str_contains($language, 'uzbek')) {
+            $text = $this->fixUzbekPronunciation($text);
+        }
 
         $useSsml = config('dubber.tts.edge_ssml', true);
         $tmpFile = "/tmp/tts_{$videoId}_{$segmentId}_" . Str::random(8);

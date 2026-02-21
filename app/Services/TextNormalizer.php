@@ -14,16 +14,17 @@ class TextNormalizer
     {
         $lang = strtolower($language);
 
-        // Normalize Uzbek special characters (o', g') for TTS
-        if (in_array($lang, ['uz', 'uzbek'])) {
-            $text = self::normalizeUzbekCharacters($text);
-        }
-
         // Expand units/abbreviations FIRST (while numbers are still digits)
         $text = self::expandAbbreviations($text, $lang);
 
         // Convert numbers to words AFTER abbreviations
         $text = self::convertNumbersToWords($text, $lang);
+
+        // Normalize Uzbek apostrophes LAST — after abbreviation/number expansion
+        // which may introduce ASCII apostrophes (e.g. "to'rt", "Qo'shma")
+        if (in_array($lang, ['uz', 'uzbek'])) {
+            $text = self::normalizeUzbekCharacters($text);
+        }
 
         return $text;
     }
@@ -31,34 +32,29 @@ class TextNormalizer
     /**
      * Normalize Uzbek special characters for TTS.
      *
-     * Uzbek Latin uses o' and g' for special sounds:
-     * - o' (oʻ) - open O sound
-     * - g' (gʻ) - voiced uvular fricative
+     * Uzbek Latin uses oʻ and gʻ for special sounds:
+     * - oʻ = /ɒ/ open back rounded vowel
+     * - gʻ = /ʁ/ voiced uvular fricative
      *
-     * For Edge TTS (uz-UZ-SardorNeural/MadinaNeural): Keep original o' and g'
-     * as these native Uzbek voices understand them correctly.
-     *
-     * Phonetic conversion (ö, gh) available via uzbekToTurkishPhonetics() if needed.
+     * Edge TTS Uzbek voices (uz-UZ-SardorNeural/MadinaNeural) need U+02BB
+     * (modifier letter turned comma) for correct pronunciation.
+     * All apostrophe variants are normalized to U+02BB.
      */
     private static function normalizeUzbekCharacters(string $text): string
     {
-        // Normalize all apostrophe variants to ASCII apostrophe
-        // This ensures consistent o' and g' representation
+        // Normalize all apostrophe variants to U+02BB (modifier letter turned comma)
+        // This is the standard Uzbek Latin character that Edge TTS handles correctly
         $apostrophes = [
+            "\u{0027}",  // ASCII APOSTROPHE '
             "\u{2019}",  // RIGHT SINGLE QUOTATION MARK '
             "\u{2018}",  // LEFT SINGLE QUOTATION MARK '
-            "\u{02BB}",  // MODIFIER LETTER TURNED COMMA ʻ
             "\u{02BC}",  // MODIFIER LETTER APOSTROPHE ʼ
             "\u{0060}",  // GRAVE ACCENT `
             "\u{00B4}",  // ACUTE ACCENT ´
             "\u{02C8}",  // MODIFIER LETTER VERTICAL LINE ˈ
             "\u{055A}",  // ARMENIAN APOSTROPHE ՚
         ];
-        $text = str_replace($apostrophes, "'", $text);
-
-        // DO NOT convert o' to ö or g' to gh for Edge TTS
-        // Edge TTS Uzbek voices (uz-UZ-SardorNeural) understand native Uzbek spelling
-        // Keeping original characters produces correct pronunciation
+        $text = str_replace($apostrophes, "\u{02BB}", $text);
 
         return $text;
     }
