@@ -101,11 +101,12 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
                 throw new \RuntimeException('OpenAI API key missing: services.openai.key');
             }
 
-            $client = Http::withToken($apiKey)
+            $makeClient = fn () => Http::withToken($apiKey)
                 ->acceptJson()
                 ->asJson()
-                ->timeout(90)
-                ->retry(2, 1000);
+                ->timeout(90);
+
+            $segmentCount = 0;
 
             foreach ($segments as $seg) {
                 $src = trim((string) $seg->text);
@@ -203,11 +204,36 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
 
                     $messages[] = ['role' => 'user', 'content' => $src];
 
-                    $res = $client->post('https://api.openai.com/v1/chat/completions', [
-                        'model' => 'gpt-4o',
-                        'temperature' => 0.1,
-                        'messages' => $messages,
-                    ]);
+                    $res = null;
+                    for ($apiRetry = 1; $apiRetry <= 6; $apiRetry++) {
+                        $res = $makeClient()->post('https://api.openai.com/v1/chat/completions', [
+                            'model' => 'gpt-4o',
+                            'temperature' => 0.1,
+                            'messages' => $messages,
+                        ]);
+
+                        if ($res->successful()) {
+                            break;
+                        }
+
+                        if ($res->status() === 429) {
+                            $retryAfter = $res->header('Retry-After');
+                            $wait = ($retryAfter && is_numeric($retryAfter))
+                                ? (int) $retryAfter + 1
+                                : min(5 * pow(2, $apiRetry - 1), 120);
+
+                            Log::warning('OpenAI 429 rate limit, waiting', [
+                                'segment_id' => $seg->id,
+                                'api_retry' => $apiRetry,
+                                'wait_seconds' => $wait,
+                            ]);
+                            sleep((int) $wait);
+                            continue;
+                        }
+
+                        // Non-429 error — fail immediately
+                        break;
+                    }
 
                     if ($res->failed()) {
                         $lastBody = mb_substr($res->body(), 0, 4000);
@@ -341,7 +367,7 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
                     ]);
 
                     // Try one more very strict request (single shot)
-                    $res = $client->post('https://api.openai.com/v1/chat/completions', [
+                    $res = $makeClient()->post('https://api.openai.com/v1/chat/completions', [
                         'model' => 'gpt-4o',
                         'temperature' => 0.0,
                         'messages' => [
@@ -375,6 +401,15 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
                     'acting_note' => $actingNote ?: null,
                     'formality' => $formality ?? 'sen',
                 ]);
+
+                $segmentCount++;
+
+                // Pace requests: short delay every segment, longer pause every 20
+                if ($segmentCount % 20 === 0) {
+                    usleep(2_000_000); // 2s pause every 20 segments
+                } else {
+                    usleep(200_000); // 200ms between segments
+                }
             }
 
             $video->update(['status' => 'translated']);
