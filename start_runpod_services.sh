@@ -69,7 +69,7 @@ if [ "$SKIP_DEPS" = false ]; then
         "huggingface_hub>=0.25,<1.0.0" \
         "transformers>=4.48,<4.50" \
         "tokenizers>=0.21,<0.24" \
-        uvicorn fastapi python-multipart aiofiles pydantic soundfile
+        uvicorn fastapi python-multipart aiofiles pydantic soundfile librosa
 
     # Verify torch wasn't changed by transitive dependencies
     TORCH_VER=$(python -c "import torch; print(torch.__version__)" 2>/dev/null || echo "MISSING")
