@@ -8,113 +8,125 @@ use Illuminate\Support\Facades\Process;
 /**
  * EmotionDSPProcessor — Adds emotional expressiveness to flat TTS audio.
  *
- * Uses FFmpeg audio filters (rubberband, tremolo, vibrato, EQ, compression)
+ * Uses FFmpeg audio filters (tempo, EQ, tremolo, vibrato, compression)
  * to transform neutral speech into emotionally expressive speech.
  *
  * Designed to run BETWEEN Edge TTS and OpenVoice in the hybrid pipeline:
- *   1. Edge TTS → correct Uzbek pronunciation (flat/neutral)
- *   2. EmotionDSP → pitch shift, tempo, EQ, dynamics per emotion
+ *   1. Edge TTS → correct Uzbek pronunciation (neutral)
+ *   2. EmotionDSP → tempo, EQ, dynamics per emotion
  *   3. OpenVoice → voice identity swap (preserves emotion from step 2)
  *
- * Based on psychoacoustic research on acoustic correlates of emotion:
- * - Happy/Excited: higher pitch, wider pitch range, faster, brighter
- * - Sad/Tender: lower pitch, narrower range, slower, darker
- * - Angry: higher pitch, very wide range, faster, harsh, compressed
- * - Fear: higher pitch, erratic, faster, trembling
+ * CRITICAL DESIGN RULE — PITCH = IDENTITY, NOT EMOTION:
+ *   A speaker's pitch is what makes them recognizable across segments.
+ *   Shifting pitch for emotions makes the SAME speaker sound like
+ *   DIFFERENT people (angry = high voice, sad = low voice).
+ *   Real humans express emotions through volume, pace, voice quality,
+ *   and timbre — NOT by changing their fundamental frequency.
+ *   Pitch is set once per speaker in EdgeTtsDriver (voice profile)
+ *   and stays constant regardless of emotional state.
+ *
+ * Emotions are expressed via:
+ * - Tempo (faster = excited/angry, slower = sad/thoughtful)
+ * - Volume (louder = confident/angry, softer = sad/intimate)
+ * - EQ/timbre (brighter = happy, warmer = sad, harsh = angry)
+ * - Compression (tighter = angry/tense, open = calm)
+ * - Tremolo/vibrato (trembling = fear, warmth = tender)
  */
 class EmotionDSPProcessor
 {
     /**
      * Emotion DSP recipes.
      *
-     * pitch_semitones: pitch shift via rubberband (positive = higher)
+     * NO PITCH SHIFTING — pitch defines speaker identity, not emotion.
+     * Emotions are expressed via tempo, volume, EQ, compression, tremolo.
+     *
      * tempo: speed multiplier (>1 = faster)
      * volume_db: volume adjustment
      * eq: array of EQ filters [frequency, Q-width, gain_db]
      * tremolo: [frequency_hz, depth] for amplitude modulation
-     * vibrato: [frequency_hz, depth] for pitch modulation
+     * vibrato: [frequency_hz, depth] for micro pitch modulation (warmth, not identity change)
      * compress: [threshold_db, ratio] for dynamic compression
      * lowpass: cutoff frequency (0 = disabled)
      */
     protected array $emotionRecipes = [
         'happy' => [
-            'pitch_semitones' => 1.5,
+            'pitch_semitones' => 0.0,
             'tempo' => 1.08,
             'volume_db' => 2.0,
-            'eq' => [[3000, 2.0, 3.0]], // brighter presence
+            'eq' => [[3000, 2.0, 4.0], [5000, 1.5, 2.0]], // brighter, more air
             'tremolo' => null,
             'vibrato' => null,
-            'compress' => null,
+            'compress' => [-20, 2], // slight compression for energy
             'lowpass' => 0,
         ],
         'excited' => [
-            'pitch_semitones' => 2.0,
+            'pitch_semitones' => 0.0,
             'tempo' => 1.12,
-            'volume_db' => 3.0,
-            'eq' => [[3000, 2.0, 4.0], [800, 1.0, 1.5]],
+            'volume_db' => 3.5,
+            'eq' => [[3000, 2.0, 5.0], [800, 1.0, 2.0], [6000, 1.5, 2.0]], // very bright, full
             'tremolo' => null,
             'vibrato' => null,
-            'compress' => null,
+            'compress' => [-18, 3], // energetic compression
             'lowpass' => 0,
         ],
         'sad' => [
-            'pitch_semitones' => -1.0,
+            'pitch_semitones' => 0.0,
             'tempo' => 0.88,
-            'volume_db' => -3.0,
-            'eq' => [[300, 1.0, 2.0]], // warmer low-mids
+            'volume_db' => -4.0,
+            'eq' => [[300, 1.0, 3.0], [3000, 1.5, -2.0]], // warm lows, reduced brightness
             'tremolo' => null,
             'vibrato' => [3.0, 0.003], // subtle warmth wobble
             'compress' => null,
-            'lowpass' => 10000, // softer highs
+            'lowpass' => 9000, // muffled, soft highs
         ],
         'angry' => [
-            'pitch_semitones' => 2.0,
+            'pitch_semitones' => 0.0,
             'tempo' => 1.10,
-            'volume_db' => 4.0,
-            'eq' => [[3000, 1.5, 5.0], [800, 1.0, 2.0]], // harsh presence
+            'volume_db' => 5.0,
+            'eq' => [[2500, 1.5, 6.0], [800, 1.0, 3.0], [5000, 1.0, 2.0]], // harsh, aggressive presence
             'tremolo' => null,
             'vibrato' => null,
-            'compress' => [-15, 4], // heavy compression for intensity
+            'compress' => [-12, 5], // heavy compression — intense, pushed
             'lowpass' => 0,
         ],
         'fear' => [
-            'pitch_semitones' => 2.0,
+            'pitch_semitones' => 0.0,
             'tempo' => 1.12,
-            'volume_db' => -1.0,
-            'eq' => [[4000, 2.0, 2.0]], // slight edge
+            'volume_db' => -2.0,
+            'eq' => [[4000, 2.0, 3.0], [2000, 1.0, 1.5]], // edge, tension
             'tremolo' => [7.0, 0.12], // trembling amplitude
-            'vibrato' => [8.0, 0.015], // pitch wobble
-            'compress' => null,
+            'vibrato' => [8.0, 0.012], // pitch wobble (micro, not identity-changing)
+            'compress' => [-18, 3], // tight, constricted
             'lowpass' => 0,
         ],
         'surprise' => [
-            'pitch_semitones' => 3.0,
-            'tempo' => 1.05,
-            'volume_db' => 3.0,
-            'eq' => [[3500, 2.0, 3.0]], // bright, open
+            'pitch_semitones' => 0.0,
+            'tempo' => 1.06,
+            'volume_db' => 4.0,
+            'eq' => [[3500, 2.0, 4.0], [6000, 1.5, 2.5]], // very bright, open
             'tremolo' => null,
             'vibrato' => null,
-            'compress' => null,
+            'compress' => [-20, 2], // slight punch
             'lowpass' => 0,
         ],
         'tender' => [
-            'pitch_semitones' => -0.5,
+            'pitch_semitones' => 0.0,
             'tempo' => 0.92,
-            'volume_db' => -4.0,
-            'eq' => [[200, 1.0, 2.0]], // warm
+            'volume_db' => -5.0,
+            'eq' => [[200, 1.0, 3.0], [3000, 1.5, -2.0]], // warm, intimate
             'tremolo' => null,
-            'vibrato' => [4.0, 0.004], // gentle warmth
+            'vibrato' => [4.0, 0.004], // gentle warmth wobble
             'compress' => null,
-            'lowpass' => 12000, // gentle rolloff
+            'lowpass' => 10000, // gentle rolloff
         ],
         'contempt' => [
-            'pitch_semitones' => -0.5,
+            'pitch_semitones' => 0.0,
             'tempo' => 0.95,
             'volume_db' => 0.0,
-            'eq' => [[1000, 2.0, 2.0]], // nasal
+            'eq' => [[1000, 2.0, 3.0], [3000, 1.5, -1.0]], // nasal, slightly muted
             'tremolo' => null,
             'vibrato' => null,
-            'compress' => null,
+            'compress' => [-22, 2], // controlled, flat
             'lowpass' => 0,
         ],
         'neutral' => [
@@ -166,9 +178,10 @@ class EmotionDSPProcessor
             'highpass' => 100,
         ],
         'pleading' => [
-            'pitch_semitones' => 1.0,
             'tempo_mult' => 1.05,
-            'vibrato' => [5.0, 0.008],
+            'volume_db' => -2.0,
+            'vibrato' => [5.0, 0.006], // desperation wobble
+            'compress' => [-18, 3], // tight, urgent
         ],
     ];
 
@@ -210,26 +223,11 @@ class EmotionDSPProcessor
             return false;
         }
 
-        // Pitch shifting requires rubberband (separate from other filters)
-        $pitchSemitones = $recipe['pitch_semitones'] ?? 0.0;
-        $needsPitchShift = abs($pitchSemitones) > 0.1;
-
+        // No pitch shifting — pitch = speaker identity, stays constant
+        // All emotion expression through tempo, volume, EQ, compression, tremolo
         $tmpPath = $audioPath . '.emotion.wav';
-        $success = false;
-
-        if ($needsPitchShift) {
-            // Apply pitch shift + other filters in one pass
-            // rubberband pitch ratio: 2^(semitones/12)
-            $pitchRatio = pow(2, $pitchSemitones / 12);
-            $rubberbandFilter = sprintf('rubberband=pitch=%.4f', $pitchRatio);
-
-            $allFilters = $rubberbandFilter . ',' . implode(',', $filters);
-            $success = $this->runFfmpeg($audioPath, $tmpPath, $allFilters);
-        } else {
-            // No pitch shift needed
-            $filterChain = implode(',', $filters);
-            $success = $this->runFfmpeg($audioPath, $tmpPath, $filterChain);
-        }
+        $filterChain = implode(',', $filters);
+        $success = $this->runFfmpeg($audioPath, $tmpPath, $filterChain);
 
         if ($success && file_exists($tmpPath) && filesize($tmpPath) > 1000) {
             rename($tmpPath, $audioPath);
@@ -239,8 +237,8 @@ class EmotionDSPProcessor
                 'emotion' => $emotion,
                 'intensity' => round($intensity, 2),
                 'delivery' => $delivery,
-                'pitch_semitones' => round($pitchSemitones, 1),
                 'tempo' => $recipe['tempo'] ?? 1.0,
+                'volume_db' => round($recipe['volume_db'] ?? 0, 1),
             ]);
 
             return true;
