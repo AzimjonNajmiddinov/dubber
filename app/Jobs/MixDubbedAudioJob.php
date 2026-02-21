@@ -176,8 +176,6 @@ class MixDubbedAudioJob implements ShouldQueue, ShouldBeUnique
             $filtersBase = [];
             $ttsLabels = [];
             $i = 1;
-            $prevSpeakerId = null;
-            $prevEndTime = 0;
 
             foreach ($segments as $seg) {
                 $ttsRel = $seg->tts_audio_path;
@@ -189,51 +187,18 @@ class MixDubbedAudioJob implements ShouldQueue, ShouldBeUnique
 
                 $inputs[] = '-i ' . escapeshellarg($ttsAbs);
 
-                // Get TTS duration for fade timing
-                $probeCmd = sprintf(
-                    'ffprobe -v error -show_entries format=duration -of csv=p=0 %s 2>/dev/null',
-                    escapeshellarg($ttsAbs)
-                );
-                $ttsDuration = (float) trim(shell_exec($probeCmd) ?? '0');
-
                 $slotStart = (float) $seg->start_time;
                 $delayMs = max(0, (int) round($slotStart * 1000));
                 $label = "tts{$i}";
-
-                // TTS segment fades — prevent clicks at segment boundaries
-                // while keeping speech onset crisp and natural.
-                //
-                // Same speaker, rapid succession: longer fades blend consecutive
-                // lines smoothly (sounds like continuous speech).
-                // Different speaker or pause: shorter fades keep dialogue snappy
-                // but still avoid hard clicks.
-                $currentSpeakerId = $seg->speaker_id;
-                $gap = $slotStart - $prevEndTime;
-
-                if ($currentSpeakerId && $currentSpeakerId === $prevSpeakerId && $gap < 0.8) {
-                    // Same speaker continuing: smooth blend
-                    $fadeIn = 0.06;
-                    $fadeOut = 0.12;
-                } else {
-                    // Speaker change or pause: clean transition
-                    $fadeIn = 0.03;
-                    $fadeOut = 0.08;
-                }
-
-                $fadeOutStart = max(0, $ttsDuration - $fadeOut);
 
                 $filtersBase[] =
                     "[{$i}:a]"
                     . "aresample=48000,"
                     . "aformat=sample_fmts=fltp:channel_layouts=stereo,"
-                    . "afade=t=in:st=0:d={$fadeIn},"
-                    . "afade=t=out:st={$fadeOutStart}:d={$fadeOut},"
                     . "adelay={$delayMs}|{$delayMs}"
                     . "[{$label}]";
 
                 $ttsLabels[] = "[{$label}]";
-                $prevSpeakerId = $currentSpeakerId;
-                $prevEndTime = (float) $seg->end_time;
                 $i++;
             }
 
@@ -275,25 +240,14 @@ class MixDubbedAudioJob implements ShouldQueue, ShouldBeUnique
                 throw new \RuntimeException("TTS-only render failed for video {$video->id}");
             }
 
-            // 5) Bed + deterministic time-based ducking + final mix
+            // 5) Bed + final mix (no ducking — bed is already no_vocals stem)
             $filtersMain = $filtersBase;
 
-            // Build volume expression that mutes the bed during TTS segments
-            $duckExpr = $this->buildDuckingExpression($segments);
-
-            Log::info('Bed ducking expression built', [
-                'video_id' => $video->id,
-                'expression_length' => strlen($duckExpr),
-            ]);
-
-            // BACKGROUND BED with time-based ducking
-            // Gentle filtering + smooth volume automation during speech
             $filtersMain[] =
                 "[0:a]"
                 . "aresample=48000,"
                 . "aformat=sample_fmts=fltp:channel_layouts=stereo,"
-                . "highpass=f=40,"       // Gentle rumble removal (40Hz, not 60)
-                . "volume={$duckExpr}:eval=frame"  // Smooth duck during TTS
+                . "highpass=f=40"
                 . "[ducked]";
 
             // Final mix — bed (ducked) + TTS vocals

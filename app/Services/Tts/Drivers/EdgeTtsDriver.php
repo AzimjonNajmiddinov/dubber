@@ -19,30 +19,16 @@ class EdgeTtsDriver implements TtsDriverInterface
      */
     protected array $voiceMap = [
         'uz' => [
-            'male' => [
-                'uz-UZ-SardorNeural',
-                'tr-TR-AhmetNeural',      // Turkish - phonetically close
-                'az-AZ-BabekNeural',      // Azerbaijani - very close to Uzbek
-                'kk-KZ-DauletNeural',     // Kazakh - Turkic family
-            ],
-            'female' => [
-                'uz-UZ-MadinaNeural',
-                'tr-TR-EmelNeural',       // Turkish
-                'az-AZ-BanuNeural',       // Azerbaijani
-                'kk-KZ-AigulNeural',      // Kazakh
-            ],
+            'male'   => ['uz-UZ-SardorNeural'],
+            'female' => ['uz-UZ-MadinaNeural'],
         ],
         'ru' => [
-            'male' => ['ru-RU-DmitryNeural'],
-            'female' => ['ru-RU-SvetlanaNeural', 'ru-RU-DariyaNeural'],
+            'male'   => ['ru-RU-DmitryNeural'],
+            'female' => ['ru-RU-SvetlanaNeural'],
         ],
         'en' => [
-            'male' => ['en-US-GuyNeural', 'en-US-ChristopherNeural', 'en-GB-RyanNeural'],
-            'female' => ['en-US-JennyNeural', 'en-US-AriaNeural', 'en-GB-SoniaNeural'],
-        ],
-        'tr' => [
-            'male' => ['tr-TR-AhmetNeural'],
-            'female' => ['tr-TR-EmelNeural'],
+            'male'   => ['en-US-GuyNeural'],
+            'female' => ['en-US-JennyNeural'],
         ],
     ];
 
@@ -52,11 +38,13 @@ class EdgeTtsDriver implements TtsDriverInterface
      */
     protected array $voiceProfiles = [
         ['pitch_offset' => 0,   'name' => 'default'],
-        ['pitch_offset' => -25, 'name' => 'deep'],
-        ['pitch_offset' => 20,  'name' => 'bright'],
-        ['pitch_offset' => -40, 'name' => 'bass'],
-        ['pitch_offset' => 30,  'name' => 'thin'],
-        ['pitch_offset' => -12, 'name' => 'warm'],
+        ['pitch_offset' => -30, 'name' => 'deep'],
+        ['pitch_offset' => 25,  'name' => 'bright'],
+        ['pitch_offset' => -50, 'name' => 'bass'],
+        ['pitch_offset' => 40,  'name' => 'thin'],
+        ['pitch_offset' => -15, 'name' => 'warm'],
+        ['pitch_offset' => 15,  'name' => 'light'],
+        ['pitch_offset' => -8,  'name' => 'mellow'],
     ];
 
     /**
@@ -349,26 +337,11 @@ class EdgeTtsDriver implements TtsDriverInterface
             $gender = 'female';
         }
 
+        // One voice per gender per language — speaker differentiation via pitch profiles
         $langVoices = $this->voiceMap[$language] ?? $this->voiceMap['uz'];
         $genderVoices = $langVoices[$gender] ?? $langVoices['male'];
 
-        // Avoid duplicate voices: check what same-gender speakers already use
-        if ($speaker->video_id) {
-            $usedVoices = Speaker::where('video_id', $speaker->video_id)
-                ->where('gender', $gender)
-                ->where('id', '!=', $speaker->id)
-                ->whereNotNull('tts_voice')
-                ->pluck('tts_voice')
-                ->toArray();
-
-            $available = array_diff($genderVoices, $usedVoices);
-            if (!empty($available)) {
-                return array_values($available)[0];
-            }
-        }
-
-        // All voices used or no video context, fall back to ID-based
-        return $genderVoices[$speaker->id % count($genderVoices)];
+        return $genderVoices[0];
     }
 
     /**

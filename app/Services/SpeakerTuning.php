@@ -30,40 +30,16 @@ class SpeakerTuning
         // Voice pools by language and gender - different speakers get different voices
         $voicePools = [
             'uz' => [
-                'male' => [
-                    'uz-UZ-SardorNeural',
-                    'tr-TR-AhmetNeural',      // Turkish - phonetically close
-                    'az-AZ-BabekNeural',      // Azerbaijani - very close to Uzbek
-                    'kk-KZ-DauletNeural',     // Kazakh - Turkic family
-                ],
-                'female' => [
-                    'uz-UZ-MadinaNeural',
-                    'tr-TR-EmelNeural',       // Turkish
-                    'az-AZ-BanuNeural',       // Azerbaijani
-                    'kk-KZ-AigulNeural',      // Kazakh
-                ],
+                'male'   => ['uz-UZ-SardorNeural'],
+                'female' => ['uz-UZ-MadinaNeural'],
             ],
             'ru' => [
-                'male' => [
-                    'ru-RU-DmitryNeural',
-                ],
-                'female' => [
-                    'ru-RU-SvetlanaNeural',
-                ],
+                'male'   => ['ru-RU-DmitryNeural'],
+                'female' => ['ru-RU-SvetlanaNeural'],
             ],
             'en' => [
-                'male' => [
-                    'en-US-GuyNeural',
-                    'en-US-ChristopherNeural',
-                    'en-GB-RyanNeural',
-                    'en-AU-WilliamMultilingualNeural',
-                ],
-                'female' => [
-                    'en-US-JennyNeural',
-                    'en-US-AriaNeural',
-                    'en-GB-SoniaNeural',
-                    'en-AU-NatashaNeural',
-                ],
+                'male'   => ['en-US-GuyNeural'],
+                'female' => ['en-US-JennyNeural'],
             ],
         ];
 
@@ -85,9 +61,8 @@ class SpeakerTuning
         $pitch = '+0Hz';
         $gain  = 0.0;
 
-        // Per-speaker pitch offsets: [0, -15, +15, -30, +30, ...]
-        // Makes same-gender speakers clearly distinguishable
-        $pitchOffsets = [0, -15, +15, -30, +30];
+        // Per-speaker pitch offsets — wider spread since all speakers share one base voice
+        $pitchOffsets = [0, -20, +20, -35, +35, -10, +10, -45];
         $speakerPitchOffset = $pitchOffsets[$speakerIndex % count($pitchOffsets)];
 
         // Gender-based base pitch + speaker differentiation
@@ -158,7 +133,7 @@ class SpeakerTuning
 
         // Clamp to safe ranges (avoid ultrasound-like high pitches)
         $rate = $this->clampRate($rate, -10, +12);      // percent
-        $pitch = $this->clampPitchHz($pitch, -45, +35); // Hz - widened for distinct speaker differentiation
+        $pitch = $this->clampPitchHz($pitch, -55, +50); // Hz - wide range for single-voice speaker differentiation
         $gain = $this->clampFloat($gain, -3.0, +3.0);   // dB
 
         $speaker->tts_rate = $rate;
