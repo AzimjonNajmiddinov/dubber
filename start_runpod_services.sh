@@ -146,8 +146,8 @@ if [ "$VENV_OK" = false ]; then
     venv/bin/pip install --no-warn-script-location -q --no-deps git+https://github.com/myshell-ai/OpenVoice.git
 
     # Install OpenVoice-specific deps not in system Python
-    echo "    Installing OpenVoice deps (librosa, wavmark, inflect)..."
-    venv/bin/pip install --no-warn-script-location -q librosa wavmark inflect
+    echo "    Installing OpenVoice deps (librosa, wavmark, inflect, unidecode)..."
+    venv/bin/pip install --no-warn-script-location -q librosa wavmark inflect unidecode
 
     # Final verification
     if venv/bin/python -c "import uvicorn; import torch; import openvoice; print('OpenVoice venv OK')" 2>/dev/null; then
