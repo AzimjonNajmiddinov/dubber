@@ -135,13 +135,19 @@ if [ "$VENV_OK" = false ]; then
     echo "    Upgrading pip..."
     venv/bin/pip install --no-warn-script-location -q --upgrade pip
 
-    # Install ONLY OpenVoice-specific deps (torch/av/numpy come from system)
+    # Install web framework (not in system Python)
     echo "    Installing uvicorn + fastapi..."
     venv/bin/pip install --no-warn-script-location -q uvicorn fastapi python-multipart pydantic
 
-    # Install OpenVoice from GitHub (its deps like librosa install in venv, isolated from system)
-    echo "    Installing OpenVoice..."
-    venv/bin/pip install --no-warn-script-location -q git+https://github.com/myshell-ai/OpenVoice.git
+    # Install OpenVoice with --no-deps to avoid rebuilding av/torch from source.
+    # System Python already has: torch, av, numpy, scipy, soundfile, torchaudio
+    # We only need to install OpenVoice code + its few unique deps (librosa, wavmark)
+    echo "    Installing OpenVoice (no-deps)..."
+    venv/bin/pip install --no-warn-script-location -q --no-deps git+https://github.com/myshell-ai/OpenVoice.git
+
+    # Install OpenVoice-specific deps not in system Python
+    echo "    Installing librosa + wavmark..."
+    venv/bin/pip install --no-warn-script-location -q librosa wavmark
 
     # Final verification
     if venv/bin/python -c "import uvicorn; import torch; import openvoice; print('OpenVoice venv OK')" 2>/dev/null; then
