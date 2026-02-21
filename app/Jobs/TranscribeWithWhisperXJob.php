@@ -121,10 +121,11 @@ class TranscribeWithWhisperXJob implements ShouldQueue, ShouldBeUnique
             // 2) Call WhisperX service
             $whisperxUrl = config('services.whisperx.url', 'http://whisperx:8000');
 
-            // Split long audio into chunks to avoid proxy timeouts
-            // 900s threshold lets pyannote diarize full conversations (correct speaker IDs)
-            if ($dur !== null && $dur > 900) {
-                Log::info('Audio exceeds 900s, splitting into chunks', [
+            // Split long audio into chunks to avoid RunPod proxy timeouts (100s limit).
+            // Each chunk gets its own diarization pass; speakers are merged cross-chunk
+            // by gender + pitch proximity in mergeChunkResults().
+            if ($dur !== null && $dur > 120) {
+                Log::info('Long audio, splitting into chunks for proxy timeout', [
                     'video_id' => $video->id,
                     'duration' => $dur,
                 ]);
@@ -434,7 +435,7 @@ class TranscribeWithWhisperXJob implements ShouldQueue, ShouldBeUnique
             mkdir($chunkDir, 0755, true);
         }
 
-        $chunkDuration = 900;
+        $chunkDuration = 120;
         $chunks = [];
         $offset = 0.0;
         $index = 0;
@@ -485,7 +486,9 @@ class TranscribeWithWhisperXJob implements ShouldQueue, ShouldBeUnique
         $res = Http::timeout(600)
             ->connectTimeout(5)
             ->attach('audio', file_get_contents($chunkPath), basename($chunkPath))
-            ->post("{$whisperxUrl}/analyze-upload");
+            ->post("{$whisperxUrl}/analyze-upload", [
+                'lite' => 1,
+            ]);
 
         if ($res->failed()) {
             throw new \RuntimeException("WhisperX chunk request failed (HTTP {$res->status()})");

@@ -387,7 +387,7 @@ def debug_diarize_check():
     return result
 
 
-def _analyze_audio(audio_path: str, min_speakers: Optional[int] = None, max_speakers: Optional[int] = None) -> dict:
+def _analyze_audio(audio_path: str, min_speakers: Optional[int] = None, max_speakers: Optional[int] = None, lite: bool = False) -> dict:
     """Core analysis logic shared by path-based and upload endpoints."""
     # 1) TRANSCRIBE
     whisper_model = get_whisper_model()
@@ -519,18 +519,27 @@ def _analyze_audio(audio_path: str, min_speakers: Optional[int] = None, max_spea
                 }
                 continue
 
-            gender, gconf = predict_gender(y_spk, sr=sr) if ENABLE_GENDER else ("unknown", None)
+            # Pitch estimation is fast (pure DSP, no ML) — always run it
             age_group, pitch_med = estimate_age_group_from_pitch(y_spk, sr=sr)
 
-            emotion, econf = ("neutral", None)
-            if ENABLE_EMOTION:
-                tmp_path = f"/tmp/spk_{spk.replace('/', '_')}.wav"
-                sf.write(tmp_path, y_spk, sr)
-                emotion, econf = predict_emotion(tmp_path)
-                try:
-                    os.remove(tmp_path)
-                except Exception:
-                    pass
+            if lite:
+                # Lite mode: skip heavy ML models (gender, emotion) for speed.
+                # Used for chunked processing where proxy timeouts are tight.
+                # Gender is inferred cross-chunk via pitch proximity in PHP.
+                gender, gconf = "unknown", None
+                emotion, econf = "neutral", None
+                print(f"  [LITE] Speaker {spk}: pitch={pitch_med}, age={age_group} (skipped gender/emotion)", flush=True)
+            else:
+                gender, gconf = predict_gender(y_spk, sr=sr) if ENABLE_GENDER else ("unknown", None)
+                emotion, econf = ("neutral", None)
+                if ENABLE_EMOTION:
+                    tmp_path = f"/tmp/spk_{spk.replace('/', '_')}.wav"
+                    sf.write(tmp_path, y_spk, sr)
+                    emotion, econf = predict_emotion(tmp_path)
+                    try:
+                        os.remove(tmp_path)
+                    except Exception:
+                        pass
 
             speakers[spk] = {
                 "gender": gender,
@@ -580,6 +589,7 @@ def analyze_upload(
     audio: UploadFile = File(...),
     min_speakers: Optional[int] = Form(None),
     max_speakers: Optional[int] = Form(None),
+    lite: Optional[int] = Form(None),
 ):
     """Analyze audio via file upload (for remote clients without shared filesystem)."""
     with _analyze_lock:
@@ -591,8 +601,9 @@ def analyze_upload(
                 shutil.copyfileobj(audio.file, tmp)
                 tmp_path = tmp.name
 
-            print(f"[UPLOAD] Received {audio.filename}, saved to {tmp_path} ({os.path.getsize(tmp_path)} bytes)", flush=True)
-            return _analyze_audio(tmp_path, min_speakers=min_speakers, max_speakers=max_speakers)
+            is_lite = bool(lite)
+            print(f"[UPLOAD] Received {audio.filename}, saved to {tmp_path} ({os.path.getsize(tmp_path)} bytes), lite={is_lite}", flush=True)
+            return _analyze_audio(tmp_path, min_speakers=min_speakers, max_speakers=max_speakers, lite=is_lite)
         except HTTPException:
             raise
         except Exception as e:
