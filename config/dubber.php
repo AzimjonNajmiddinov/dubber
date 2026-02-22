@@ -24,7 +24,7 @@ return [
         'auto_clone' => env('TTS_AUTO_CLONE', true),
 
         // Use SSML markup for Edge-TTS (per-sentence prosody, breaks, intonation)
-        'edge_ssml' => env('TTS_EDGE_SSML', false),  // SSML broken in edge-tts 7.x - speaks XML tags as text
+        'edge_ssml' => env('TTS_EDGE_SSML', true),
     ],
 
     // Uzbek Edge TTS voices available on your system:

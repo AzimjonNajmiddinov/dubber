@@ -183,9 +183,9 @@ class EdgeTtsDriver implements TtsDriverInterface
         $speakerRateFactor = $speaker->speaking_rate_factor ?? 1.0;
         $speakerBaseRate = (int) round(($speakerRateFactor - 1.0) * 100); // e.g. 1.08 → +8%
 
-        // Emotion/direction rate modifiers — small for natural variation
-        $emotionRate = (int) round($this->parsePercentage($emotionProsody['rate']) * 0.3);
-        $directionRate = (int) round($this->parsePercentage($directionProsody['rate']) * 0.3);
+        // Emotion/direction rate modifiers — moderate for natural expressiveness
+        $emotionRate = (int) round($this->parsePercentage($emotionProsody['rate']) * 0.6);
+        $directionRate = (int) round($this->parsePercentage($directionProsody['rate']) * 0.6);
 
         // Combine: speaker baseline + emotion variation
         // Clamped to ±15% (speaker base can use wider range than emotion alone)
