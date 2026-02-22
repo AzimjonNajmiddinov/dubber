@@ -80,7 +80,8 @@ class HybridUzbekDriver implements TtsDriverInterface
         if (!empty($actingDirection)) {
             $emotion = $actingDirection['emotion'] ?? 'neutral';
             $delivery = $actingDirection['delivery'] ?? 'normal';
-            if ($emotion !== 'neutral' || $delivery !== 'normal') {
+            $audioSource = $actingDirection['audio_source'] ?? 'direct';
+            if ($emotion !== 'neutral' || $delivery !== 'normal' || $audioSource !== 'direct') {
                 // Scale emotion intensity by speaker's expressiveness
                 // Some speakers are more expressive (0.8-1.0), others are restrained (0.2-0.5)
                 $speakerExpressiveness = $speaker->expressiveness ?? 0.6;

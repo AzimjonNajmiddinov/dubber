@@ -23,6 +23,7 @@ class VideoSegment extends Model
         'tts_gain_db',
         'tts_lufs',
         'formality',
+        'audio_source',
         'translation_attempt'
     ];
 

@@ -275,6 +275,13 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
                             $detectedDirection = strtolower(trim($parsed['d'] ?? 'normal'));
                             $detectedIntent = strtolower(trim($parsed['i'] ?? 'inform'));
                             $actingNote = trim($parsed['n'] ?? '');
+                            $audioSource = strtolower(trim($parsed['s'] ?? 'direct'));
+
+                            // Validate audio source
+                            $validAudioSources = ['direct', 'phone', 'tv', 'voiceover'];
+                            if (!in_array($audioSource, $validAudioSources)) {
+                                $audioSource = 'direct';
+                            }
 
                             // Validate emotion (expanded list)
                             $validEmotions = ['neutral', 'happy', 'sad', 'angry', 'fear', 'surprise', 'excited', 'tender', 'anxious', 'contempt', 'disgusted'];
@@ -318,6 +325,7 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
                                 'intent' => $detectedIntent,
                                 'acting_note' => $actingNote,
                                 'formality' => $formality,
+                                'audio_source' => $audioSource,
                             ]);
                         }
                     }
@@ -400,6 +408,7 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
                     'intent' => $detectedIntent ?? 'inform',
                     'acting_note' => $actingNote ?: null,
                     'formality' => $formality ?? 'sen',
+                    'audio_source' => $audioSource ?? 'direct',
                 ]);
 
                 $segmentCount++;
@@ -532,8 +541,9 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
             "3. Detect the DELIVERY style (how to physically speak the line)\n" .
             "4. Detect the INTENT (what speaker is trying to achieve)\n" .
             "5. Determine FORMALITY (sen/siz) from speaker relationships in scene context\n" .
-            "6. Return JSON format with ALL fields:\n" .
-            "   {\"t\":\"translation\",\"e\":\"emotion\",\"d\":\"delivery\",\"i\":\"intent\",\"n\":\"acting_note\",\"f\":\"sen_or_siz\"}\n\n" .
+            "6. Detect AUDIO SOURCE — how this voice reaches the audience\n" .
+            "7. Return JSON format with ALL fields:\n" .
+            "   {\"t\":\"translation\",\"e\":\"emotion\",\"d\":\"delivery\",\"i\":\"intent\",\"n\":\"acting_note\",\"f\":\"sen_or_siz\",\"s\":\"audio_source\"}\n\n" .
             "EMOTIONS (primary feeling - choose one):\n" .
             "neutral, happy, sad, angry, fear, surprise, excited, tender, anxious, contempt\n\n" .
             "DELIVERY STYLES (physical voice quality - choose one):\n" .
@@ -550,6 +560,13 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
             "- matter_of_fact: flat, emotionless exposition\n\n" .
             "INTENT (speaker's goal - choose one):\n" .
             "inform, persuade, comfort, threaten, mock, confide, question, command, plead, accuse, apologize, celebrate, mourn\n\n" .
+            "AUDIO SOURCE (s): How this voice reaches the audience — choose one:\n" .
+            "- direct: speaker is physically present in the scene (DEFAULT — most lines)\n" .
+            "- phone: voice heard through a phone/video call (other end of conversation)\n" .
+            "- tv: voice from a TV, radio, PA system, or loudspeaker\n" .
+            "- voiceover: narration, inner thoughts, or off-screen commentary\n" .
+            "Context clues: phone ringing, 'hello?', one-sided conversation, 'on the phone',\n" .
+            "TV news, radio broadcast, announcement. If unsure, use 'direct'.\n\n" .
             "ACTING NOTE (n): 3-5 word direction for voice actor. Examples:\n" .
             "- 'intensely angry, threatening'\n" .
             "- 'whispered, sharing a secret'\n" .

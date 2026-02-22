@@ -345,12 +345,19 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
         // Get intent for enhanced TTS control
         $intent = strtolower((string) ($seg->intent ?? 'inform'));
 
+        // Get audio source (phone, tv, voiceover, or direct)
+        $audioSource = strtolower((string) ($seg->audio_source ?? 'direct'));
+        if (!in_array($audioSource, ['direct', 'phone', 'tv', 'voiceover'])) {
+            $audioSource = 'direct';
+        }
+
         // Build comprehensive acting direction
         $actingDirection = [
             'emotion' => $emotion,
             'emotion_intensity' => $this->getEmotionIntensity($seg->text ?? '', $emotion),
             'delivery' => $direction,
             'intent' => $intent,
+            'audio_source' => $audioSource,
             'vocal_quality' => $this->getVocalQualities($emotion, $direction),
             'acting_note' => $seg->acting_note ?? null,
             'paralinguistics' => [],

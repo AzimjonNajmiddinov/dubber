@@ -186,6 +186,36 @@ class EmotionDSPProcessor
     ];
 
     /**
+     * Audio source filters — simulate how voice sounds through different media.
+     *
+     * Applied AFTER emotion/delivery DSP. These simulate the acoustic
+     * characteristics of hearing someone through a phone, TV, etc.
+     */
+    protected array $audioSourceFilters = [
+        'phone' => [
+            // Telephone bandpass: 300-3400Hz (ITU-T G.712 standard)
+            'highpass' => 300,
+            'lowpass' => 3400,
+            'eq' => [[1000, 1.0, 3.0], [2500, 1.5, 2.0]], // nasal telephone presence
+            'compress' => [-20, 4], // phone compresses dynamics heavily
+            'volume_db' => -3.0, // slightly quieter (other end of call)
+        ],
+        'tv' => [
+            // TV/radio: narrower than direct but wider than phone
+            'highpass' => 120,
+            'lowpass' => 8000,
+            'eq' => [[2000, 1.0, 2.0]], // slight mid presence (speaker coloration)
+            'compress' => [-22, 2], // mild broadcast compression
+            'volume_db' => -2.0,
+        ],
+        'voiceover' => [
+            // Clean narration: slight intimacy (proximity effect)
+            'eq' => [[200, 1.0, 2.0], [4000, 1.5, 1.5]], // warm bass + clarity
+            'compress' => [-24, 2], // gentle broadcast compression
+        ],
+    ];
+
+    /**
      * Apply emotion DSP to an audio file in-place.
      *
      * @param string $audioPath Path to WAV file (modified in-place)
@@ -201,9 +231,10 @@ class EmotionDSPProcessor
         $emotion = strtolower($actingDirection['emotion'] ?? 'neutral');
         $intensity = (float) ($actingDirection['emotion_intensity'] ?? 0.5);
         $delivery = strtolower($actingDirection['delivery'] ?? 'normal');
+        $audioSource = strtolower($actingDirection['audio_source'] ?? 'direct');
 
-        // Skip processing for neutral emotion with normal delivery
-        if ($emotion === 'neutral' && $delivery === 'normal') {
+        // Skip processing for neutral emotion with normal delivery and direct source
+        if ($emotion === 'neutral' && $delivery === 'normal' && $audioSource === 'direct') {
             return false;
         }
 
@@ -215,6 +246,9 @@ class EmotionDSPProcessor
 
         // Apply delivery modifiers on top
         $recipe = $this->applyDeliveryModifiers($recipe, $delivery);
+
+        // Apply audio source filter (phone, tv, voiceover)
+        $recipe = $this->applyAudioSourceFilter($recipe, $audioSource);
 
         // Build ffmpeg filter chain
         $filters = $this->buildFilterChain($recipe);
@@ -237,6 +271,7 @@ class EmotionDSPProcessor
                 'emotion' => $emotion,
                 'intensity' => round($intensity, 2),
                 'delivery' => $delivery,
+                'audio_source' => $audioSource,
                 'tempo' => $recipe['tempo'] ?? 1.0,
                 'volume_db' => round($recipe['volume_db'] ?? 0, 1),
             ]);
@@ -343,6 +378,47 @@ class EmotionDSPProcessor
         // Highpass from delivery
         if (isset($mods['highpass'])) {
             $recipe['highpass'] = $mods['highpass'];
+        }
+
+        return $recipe;
+    }
+
+    /**
+     * Apply audio source filter (phone, tv, voiceover) on top of emotion+delivery.
+     */
+    protected function applyAudioSourceFilter(array $recipe, string $audioSource): array
+    {
+        $filter = $this->audioSourceFilters[$audioSource] ?? null;
+        if (!$filter) {
+            return $recipe;
+        }
+
+        // Highpass — take the higher of emotion vs source
+        if (isset($filter['highpass'])) {
+            $recipe['highpass'] = max($recipe['highpass'] ?? 0, $filter['highpass']);
+        }
+
+        // Lowpass — take the lower of emotion vs source (more restrictive)
+        if (isset($filter['lowpass'])) {
+            $existing = $recipe['lowpass'] ?? 0;
+            $recipe['lowpass'] = $existing > 0
+                ? min($existing, $filter['lowpass'])
+                : $filter['lowpass'];
+        }
+
+        // Additive volume
+        if (isset($filter['volume_db'])) {
+            $recipe['volume_db'] = ($recipe['volume_db'] ?? 0) + $filter['volume_db'];
+        }
+
+        // Override compression (source compression is more important than emotion)
+        if (isset($filter['compress'])) {
+            $recipe['compress'] = $filter['compress'];
+        }
+
+        // Merge EQ (additive)
+        if (!empty($filter['eq'])) {
+            $recipe['eq'] = array_merge($recipe['eq'] ?? [], $filter['eq']);
         }
 
         return $recipe;
