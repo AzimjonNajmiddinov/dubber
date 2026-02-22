@@ -90,6 +90,7 @@
             <div style="margin-top:12px;" class="actions">
                 <a class="btn btn-primary btn-download btn-disabled" href="#">Download dubbed</a>
                 <a class="btn btn-primary btn-download-lipsynced btn-disabled" href="#">Download lipsynced</a>
+                <a class="btn" href="{{ route('stream.player', $video) }}">Player</a>
                 <button class="btn btn-refresh" type="button">Refresh segments</button>
             </div>
 
