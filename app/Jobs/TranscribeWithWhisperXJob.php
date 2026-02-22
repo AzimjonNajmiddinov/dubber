@@ -712,7 +712,27 @@ class TranscribeWithWhisperXJob implements ShouldQueue, ShouldBeUnique
         $merged = [];
         $deleted = [];
 
-        // Pass 1: Pitch-based merge — similar pitch = same person
+        // Pass 1: Merge speakers with unrealistic pitch (< 75Hz = likely music/rumble)
+        foreach ($sorted as $speaker) {
+            if (in_array($speaker->id, $deleted)) continue;
+
+            $pitch = $speaker->pitch_median_hz;
+            if ($pitch && $pitch < 75) {
+                $dominant = $sorted->first(fn($s) => !in_array($s->id, $deleted) && $s->id !== $speaker->id && (!$s->pitch_median_hz || $s->pitch_median_hz >= 75));
+                if ($dominant) {
+                    $this->mergeSpeaker($videoId, $speaker, $dominant, $counts);
+                    $merged[] = [
+                        'from' => $speaker->label,
+                        'into' => $dominant->label,
+                        'reason' => "unrealistic_pitch ({$pitch}Hz < 75Hz, likely background noise)",
+                        'segments_moved' => $counts[$speaker->id],
+                    ];
+                    $deleted[] = $speaker->id;
+                }
+            }
+        }
+
+        // Pass 2: Pitch-based merge — similar pitch = same person
         foreach ($sorted as $i => $speakerA) {
             if (in_array($speakerA->id, $deleted)) continue;
 
@@ -741,15 +761,15 @@ class TranscribeWithWhisperXJob implements ShouldQueue, ShouldBeUnique
             }
         }
 
-        // Pass 2: Merge orphan speakers (no pitch, few segments)
+        // Pass 3: Merge orphan speakers (no pitch, few segments)
         foreach ($sorted as $speaker) {
             if (in_array($speaker->id, $deleted)) continue;
 
             $count = $counts[$speaker->id];
             $pct = ($count / $totalSegments) * 100;
 
-            // No pitch data + tiny contribution = noise
-            if (!$speaker->pitch_median_hz && $count < 5) {
+            // No pitch data = likely noise/music/background picked up as speaker
+            if (!$speaker->pitch_median_hz && $pct < 20) {
                 $dominant = $sorted->first(fn($s) => !in_array($s->id, $deleted) && $s->id !== $speaker->id);
                 if ($dominant) {
                     $this->mergeSpeaker($videoId, $speaker, $dominant, $counts);
