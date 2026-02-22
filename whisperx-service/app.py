@@ -410,20 +410,10 @@ def _analyze_audio(audio_path: str, min_speakers: Optional[int] = None, max_spea
                 if max_speakers is not None:
                     diarize_kwargs["max_speakers"] = max_speakers
 
-                # If caller didn't specify min_speakers, auto-hint based on duration.
-                # Pyannote's default clustering threshold (~0.7) is aggressive and
-                # often collapses distinct speakers into one cluster.
-                # For audio > 60s, hint min_speakers=2 to prevent this.
-                # Short clips (<60s) may genuinely be single-speaker — leave unconstrained.
-                if min_speakers is None and max_speakers is None:
-                    try:
-                        import librosa
-                        dur = librosa.get_duration(filename=audio_path)
-                        if dur > 60:
-                            diarize_kwargs["min_speakers"] = 2
-                            print(f"[DIARIZE] Auto-set min_speakers=2 (duration={dur:.1f}s > 60s)", flush=True)
-                    except Exception:
-                        pass
+                # Let pyannote decide speaker count naturally.
+                # Previously auto-hinted min_speakers=2 for long audio, but this
+                # forced multiple speakers on single-speaker videos.
+                # Callers can still pass min_speakers/max_speakers explicitly.
 
                 print(f"[DIARIZE] Calling with kwargs: {diarize_kwargs}", flush=True)
                 diarization_df = diarize(audio_path, **diarize_kwargs)
