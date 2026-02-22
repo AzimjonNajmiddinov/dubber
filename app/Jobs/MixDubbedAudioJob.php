@@ -256,17 +256,14 @@ class MixDubbedAudioJob implements ShouldQueue, ShouldBeUnique
                 throw new \RuntimeException("TTS-only render failed for video {$video->id}");
             }
 
-            // 5) Bed + final mix — duck bed during speech to hide Demucs vocal residue
+            // 5) Bed + final mix
             $filtersMain = $filtersBase;
-
-            $duckExpr = $this->buildDuckingExpression($segments);
 
             $filtersMain[] =
                 "[0:a]"
                 . "aresample=48000,"
                 . "aformat=sample_fmts=fltp:channel_layouts=stereo,"
-                . "highpass=f=40,"
-                . "volume='" . $duckExpr . "':eval=frame"
+                . "highpass=f=40"
                 . "[ducked]";
 
             // Final mix — bed (ducked) + TTS vocals
