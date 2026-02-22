@@ -114,19 +114,65 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
             $outDirRel = "audio/tts/{$video->id}";
             Storage::disk('local')->makeDirectory($outDirRel);
 
-            // Step 3: Generate TTS for each segment sequentially
+            // Step 3: Dispatch per-segment TTS jobs in parallel
+            // Each segment is processed by its own queue job for ~4x speedup
             $segmentList = $segments->values();
             $segmentCount = $segmentList->count();
 
-            for ($i = 0; $i < $segmentCount; $i++) {
-                $seg = $segmentList[$i];
-                $this->processSegment($seg, $driver, $video);
+            Log::info('Dispatching parallel TTS jobs', [
+                'video_id' => $video->id,
+                'segment_count' => $segmentCount,
+            ]);
+
+            foreach ($segmentList as $seg) {
+                GenerateTtsForSegmentJob::dispatch($seg->id, $video->id)
+                    ->onQueue('segment-generation');
+            }
+
+            // Poll until all segments have TTS audio (with timeout)
+            $maxWait = 1800; // 30 min max
+            $waited = 0;
+            $pollInterval = 5;
+
+            while ($waited < $maxWait) {
+                sleep($pollInterval);
+                $waited += $pollInterval;
+
+                $done = VideoSegment::where('video_id', $video->id)
+                    ->whereNotNull('tts_audio_path')
+                    ->count();
+
+                if ($done >= $segmentCount) {
+                    break;
+                }
+
+                // Log progress every 30s
+                if ($waited % 30 === 0) {
+                    Log::info('TTS progress', [
+                        'video_id' => $video->id,
+                        'done' => $done,
+                        'total' => $segmentCount,
+                        'waited' => $waited,
+                    ]);
+                }
+            }
+
+            // Verify all segments completed
+            $completedCount = VideoSegment::where('video_id', $video->id)
+                ->whereNotNull('tts_audio_path')
+                ->count();
+
+            if ($completedCount < $segmentCount) {
+                throw new \RuntimeException(
+                    "TTS generation incomplete: {$completedCount}/{$segmentCount} segments after {$waited}s"
+                );
             }
 
             Log::info('TTS generation complete', [
                 'video_id' => $video->id,
-                'segments_processed' => $segments->count(),
+                'segments_processed' => $completedCount,
                 'driver' => $driverName,
+                'total_wait' => $waited,
             ]);
 
             // Check voice consistency and log any outliers
