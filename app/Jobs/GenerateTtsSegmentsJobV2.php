@@ -93,7 +93,14 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
                 'auto_clone' => $autoClone,
             ]);
 
-            // Step 1: Clone voices if enabled and driver supports it
+            // Step 1a: Always assign Voice DNA (profiles, rate, expressiveness)
+            // so speakers sound different even without voice cloning
+            $speakers = Speaker::where('video_id', $video->id)->get();
+            if ($speakers->isNotEmpty()) {
+                $this->assignVoiceDna($video, $speakers);
+            }
+
+            // Step 1b: Clone voices if enabled and driver supports it
             if ($autoClone && $driver->supportsVoiceCloning()) {
                 $this->cloneSpeakerVoices($video, $driver);
             }
