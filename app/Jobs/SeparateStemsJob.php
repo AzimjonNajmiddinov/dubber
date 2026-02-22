@@ -109,9 +109,9 @@ class SeparateStemsJob implements ShouldQueue, ShouldBeUnique
     {
         Log::info('Using remote Demucs (RunPod)', ['video_id' => $video->id, 'url' => $demucsUrl]);
 
-        // Upload audio file to RunPod
+        // Upload audio file to RunPod (stream to avoid OOM on large files)
         $res = Http::timeout(600)
-            ->attach('audio', file_get_contents($inputAbs), "{$video->id}.wav")
+            ->attach('audio', fopen($inputAbs, 'r'), "{$video->id}.wav")
             ->post("{$demucsUrl}/separate", [
                 'model' => 'htdemucs',
                 'two_stems' => 'vocals',

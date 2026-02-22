@@ -12,6 +12,7 @@ import os
 import io
 import hashlib
 import logging
+import tempfile
 from pathlib import Path
 from contextlib import asynccontextmanager
 
@@ -19,7 +20,6 @@ import torch
 import torchaudio
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -61,6 +61,70 @@ def load_converter():
     except Exception as e:
         logger.error(f"Failed to load OpenVoice converter: {e}")
         raise
+
+
+def extract_se_direct(audio_path: str, converter) -> torch.Tensor:
+    """
+    Extract speaker embedding directly using the converter model.
+    Bypasses se_extractor to avoid whisper_timestamped/faster_whisper deps.
+
+    Splits audio into chunks and passes them to converter.extract_se().
+    """
+    from pydub import AudioSegment
+    from pydub.silence import detect_nonsilent
+
+    audio = AudioSegment.from_file(audio_path)
+
+    # Find non-silent regions to get clean speech segments
+    nonsilent = detect_nonsilent(audio, min_silence_len=500, silence_thresh=-40)
+
+    if not nonsilent:
+        # Fallback: use whole audio
+        nonsilent = [(0, len(audio))]
+
+    # Merge close segments and split into 5-15s chunks
+    chunks = []
+    current_start, current_end = nonsilent[0]
+
+    for start, end in nonsilent[1:]:
+        if start - current_end < 1000:  # merge if gap < 1s
+            current_end = end
+        else:
+            chunks.append((current_start, current_end))
+            current_start, current_end = start, end
+    chunks.append((current_start, current_end))
+
+    # Filter to reasonable lengths (1.5s - 20s)
+    valid_chunks = [(s, e) for s, e in chunks if 1500 <= (e - s) <= 20000]
+
+    if not valid_chunks:
+        # Use the longest chunk regardless
+        valid_chunks = [max(chunks, key=lambda x: x[1] - x[0])]
+
+    # Export chunks as temp WAV files
+    tmp_dir = Path(tempfile.mkdtemp(prefix="openvoice_se_"))
+    wav_files = []
+
+    try:
+        for i, (start, end) in enumerate(valid_chunks[:5]):  # max 5 chunks
+            chunk = audio[start:end]
+            chunk_path = tmp_dir / f"chunk_{i}.wav"
+            chunk.export(str(chunk_path), format="wav")
+            wav_files.append(str(chunk_path))
+
+        if not wav_files:
+            raise ValueError("No valid audio chunks for SE extraction")
+
+        # Use converter's extract_se method directly
+        se_path = str(tmp_dir / "se.pth")
+        se = converter.extract_se(wav_files, se_save_path=se_path)
+
+        return se
+
+    finally:
+        # Cleanup temp files
+        import shutil
+        shutil.rmtree(str(tmp_dir), ignore_errors=True)
 
 
 def get_se(speaker_key: str) -> torch.Tensor:
@@ -111,7 +175,7 @@ async def health():
 
 
 @app.post("/extract-se")
-async def extract_se(
+async def extract_se_endpoint(
     audio: UploadFile = File(...),
     speaker_key: str = Form(...),
 ):
@@ -122,7 +186,7 @@ async def extract_se(
     try:
         converter = load_converter()
 
-        # Save uploaded audio to temp file (OpenVoice needs file path)
+        # Save uploaded audio to temp file
         tmp_path = CACHE_PATH / f"tmp_ref_{speaker_key}.wav"
         audio_bytes = await audio.read()
 
@@ -134,11 +198,8 @@ async def extract_se(
             audio_tensor = torch.mean(audio_tensor, dim=0, keepdim=True)
         torchaudio.save(str(tmp_path), audio_tensor, 22050)
 
-        # Extract speaker embedding
-        from openvoice import se_extractor
-        target_se, _ = se_extractor.get_se(
-            str(tmp_path), converter, vad=True
-        )
+        # Extract speaker embedding directly (no whisper/VAD deps needed)
+        target_se = extract_se_direct(str(tmp_path), converter)
 
         # Cache in memory and on disk
         speaker_embeddings[speaker_key] = target_se
@@ -193,11 +254,8 @@ async def convert(
             audio_tensor = torch.mean(audio_tensor, dim=0, keepdim=True)
         torchaudio.save(str(tmp_input), audio_tensor, sr)
 
-        # Extract source SE from the Edge TTS audio
-        from openvoice import se_extractor
-        source_se, _ = se_extractor.get_se(
-            str(tmp_input), converter, vad=False
-        )
+        # Extract source SE directly from Edge TTS audio
+        source_se = extract_se_direct(str(tmp_input), converter)
 
         # Run voice conversion
         converter.convert(
