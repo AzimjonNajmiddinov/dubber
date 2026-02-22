@@ -640,7 +640,7 @@ class GenerateTtsSegmentsJobV2 implements ShouldQueue, ShouldBeUnique
             $sizeReductionPct = (1 - $newSize / $origSize) * 100;
             $durationReductionPct = $origDuration > 0 ? (1 - $newDuration / $origDuration) * 100 : 0;
 
-            if ($sizeReductionPct <= 20 && $durationReductionPct <= 20 && $newDuration > 0.1) {
+            if ($sizeReductionPct <= 60 && $durationReductionPct <= 60 && $newDuration > 0.1) {
                 Log::debug('Stripped silence from TTS audio', [
                     'path' => basename($audioPath),
                     'orig_duration' => round($origDuration, 2),
