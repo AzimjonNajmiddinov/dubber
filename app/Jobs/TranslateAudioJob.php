@@ -478,22 +478,12 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
 
         if ($slotDuration > 0) {
             $normalRate = $isUzbek ? 9 : 10;
-            $fastRate = $isUzbek ? 11 : 13;
 
             $idealChars = (int) round($slotDuration * $normalRate);
-            $maxChars = (int) round($slotDuration * $fastRate);
 
             $slotRounded = round($slotDuration, 1);
 
-            if ($slotDuration < 1.5) {
-                $budgetRule = "Time: {$slotRounded}s. HARD MAX: {$maxChars} chars. Going over will cause re-translation.\n" .
-                    "Use the SHORTEST possible translation that preserves meaning.\n\n";
-            } elseif ($slotDuration < 3.0) {
-                $budgetRule = "Time: {$slotRounded}s. Target ~{$idealChars} chars. HARD MAX: {$maxChars} chars.\n" .
-                    "Going over {$maxChars} chars will cause re-translation.\n\n";
-            } else {
-                $budgetRule = "Time: {$slotRounded}s. Target ~{$idealChars} chars (max {$maxChars}).\n\n";
-            }
+            $budgetRule = "Time slot: {$slotRounded}s. Aim for ~{$idealChars} chars. Be concise but NEVER drop meaning.\n\n";
         }
 
         // Uzbek-specific translation rules
@@ -576,6 +566,7 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
             "FORMALITY (f): \"sen\" or \"siz\" based on speaker relationship in scene context.\n\n" .
             "TRANSLATION RULES:\n" .
             "- Translate MEANING, not word-by-word\n" .
+            "- NEVER omit meaning, context, or nuance to save characters. Full meaning is more important than brevity.\n" .
             "- Match formality to speaker relationship (see scene context)\n" .
             "- Keep it concise for dubbing\n" .
             $budgetRule .

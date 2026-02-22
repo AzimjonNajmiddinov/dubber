@@ -154,9 +154,6 @@ class MixDubbedAudioJob implements ShouldQueue, ShouldBeUnique
                 throw new \RuntimeException("No TTS segments found for video {$video->id}");
             }
 
-            // Resolve overlapping segments before mixing (adjusts timing in-memory only)
-            $segments = $this->resolveOverlaps($segments, $video->id);
-
             // Output WAV for ReplaceVideoAudioJob
             $finalRel = "audio/final/{$video->id}.wav";
             $finalAbs = Storage::disk('local')->path($finalRel);
@@ -177,7 +174,10 @@ class MixDubbedAudioJob implements ShouldQueue, ShouldBeUnique
             $ttsLabels = [];
             $i = 1;
 
-            foreach ($segments as $seg) {
+            $segmentValues = $segments->values();
+            $segmentCount = $segmentValues->count();
+
+            foreach ($segmentValues as $idx => $seg) {
                 $ttsRel = $seg->tts_audio_path;
                 $ttsAbs = Storage::disk('local')->path($ttsRel);
 
@@ -191,12 +191,28 @@ class MixDubbedAudioJob implements ShouldQueue, ShouldBeUnique
                 $delayMs = max(0, (int) round($slotStart * 1000));
                 $label = "tts{$i}";
 
-                $filtersBase[] =
-                    "[{$i}:a]"
-                    . "aresample=48000,"
-                    . "aformat=sample_fmts=fltp:channel_layouts=stereo,"
-                    . "adelay={$delayMs}|{$delayMs}"
-                    . "[{$label}]";
+                // Compute max allowed duration: gap until next segment starts
+                $maxDuration = null;
+                if ($idx < $segmentCount - 1) {
+                    $nextSeg = $segmentValues[$idx + 1];
+                    $gap = (float) $nextSeg->start_time - (float) $seg->start_time;
+                    if ($gap > 0) {
+                        $maxDuration = $gap - 0.03; // 30ms safety margin
+                    }
+                }
+
+                $filters = "aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo";
+
+                // Hard-trim TTS audio so it cannot bleed into the next segment
+                if ($maxDuration !== null && $maxDuration > 0.1) {
+                    $fadeStart = max(0, $maxDuration - 0.05);
+                    $filters .= ",atrim=end=" . number_format($maxDuration, 3, '.', '');
+                    $filters .= ",afade=t=out:st=" . number_format($fadeStart, 3, '.', '') . ":d=0.05";
+                }
+
+                $filters .= ",adelay={$delayMs}|{$delayMs}";
+
+                $filtersBase[] = "[{$i}:a]{$filters}[{$label}]";
 
                 $ttsLabels[] = "[{$label}]";
                 $i++;
@@ -314,42 +330,4 @@ class MixDubbedAudioJob implements ShouldQueue, ShouldBeUnique
         }
     }
 
-    /**
-     * Resolve overlapping TTS segments by trimming earlier segments.
-     * Adjusts timing in-memory only - does not modify DB records.
-     *
-     * If segment B starts before segment A ends, A's end_time is shortened
-     * to B.start_time - 50ms to create a small gap.
-     */
-    protected function resolveOverlaps($segments, int $videoId)
-    {
-        $overlapCount = 0;
-        $items = $segments->values();
-
-        for ($i = 0; $i < $items->count() - 1; $i++) {
-            $current = $items[$i];
-            $next = $items[$i + 1];
-
-            $currentEnd = (float) $current->end_time;
-            $nextStart = (float) $next->start_time;
-
-            if ($currentEnd > $nextStart) {
-                $newEnd = $nextStart - 0.05; // 50ms gap — room for fade-out tail
-                if ($newEnd > (float) $current->start_time + 0.1) {
-                    // Only adjust in-memory attribute for mixing, not saved to DB
-                    $current->setAttribute('end_time', round($newEnd, 3));
-                    $overlapCount++;
-                }
-            }
-        }
-
-        if ($overlapCount > 0) {
-            Log::warning('Resolved overlapping TTS segments for mixing', [
-                'video_id' => $videoId,
-                'overlaps_resolved' => $overlapCount,
-            ]);
-        }
-
-        return $segments;
-    }
 }
