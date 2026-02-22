@@ -413,6 +413,10 @@ class TranscribeWithWhisperXJob implements ShouldQueue, ShouldBeUnique
                     VideoSegment::insert($rows);
                 }
 
+                // Merge minor speakers into the dominant speaker
+                // Prevents pyannote over-splitting (e.g. 1 real speaker → 3 detected)
+                $this->mergeMinorSpeakers($video->id);
+
                 $video->update(['status' => 'transcribed']);
             });
 
@@ -672,6 +676,70 @@ class TranscribeWithWhisperXJob implements ShouldQueue, ShouldBeUnique
         $chunkDir = Storage::disk('local')->path("audio/stt/chunks/{$this->videoId}");
         if (is_dir($chunkDir)) {
             @rmdir($chunkDir); // only removes if empty
+        }
+    }
+
+    /**
+     * Merge minor speakers into the dominant speaker.
+     *
+     * Pyannote often over-splits a single speaker into 2-3 due to pitch/tone
+     * variation. This merges any speaker with less than 10% of total segments
+     * (and fewer than 5 segments) into the dominant speaker.
+     */
+    private function mergeMinorSpeakers(int $videoId): void
+    {
+        $speakers = Speaker::where('video_id', $videoId)->get();
+        if ($speakers->count() <= 1) return;
+
+        // Count segments per speaker
+        $counts = [];
+        $totalSegments = 0;
+        foreach ($speakers as $speaker) {
+            $count = VideoSegment::where('video_id', $videoId)
+                ->where('speaker_id', $speaker->id)
+                ->count();
+            $counts[$speaker->id] = $count;
+            $totalSegments += $count;
+        }
+
+        if ($totalSegments === 0) return;
+
+        // Find the dominant speaker (most segments)
+        $dominantId = array_keys($counts, max($counts))[0];
+        $dominantSpeaker = $speakers->firstWhere('id', $dominantId);
+
+        // Merge minor speakers (< 10% of total AND < 5 segments)
+        $merged = [];
+        foreach ($speakers as $speaker) {
+            if ($speaker->id === $dominantId) continue;
+
+            $count = $counts[$speaker->id];
+            $pct = ($count / $totalSegments) * 100;
+
+            if ($count < 5 || $pct < 10) {
+                // Reassign all segments to dominant speaker
+                VideoSegment::where('video_id', $videoId)
+                    ->where('speaker_id', $speaker->id)
+                    ->update(['speaker_id' => $dominantId]);
+
+                $merged[] = [
+                    'from' => $speaker->label,
+                    'segments' => $count,
+                    'pct' => round($pct, 1),
+                ];
+
+                // Delete the minor speaker
+                $speaker->delete();
+            }
+        }
+
+        if (!empty($merged)) {
+            Log::info('Merged minor speakers into dominant', [
+                'video_id' => $videoId,
+                'dominant' => $dominantSpeaker->label,
+                'dominant_segments' => $counts[$dominantId],
+                'merged' => $merged,
+            ]);
         }
     }
 }
