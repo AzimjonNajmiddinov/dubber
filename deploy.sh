@@ -31,58 +31,40 @@ echo ""
 # ------------------------------------------
 # 1. Maintenance mode ON
 # ------------------------------------------
-echo -e "${YELLOW}[1/7] Enabling maintenance mode...${NC}"
+echo -e "${YELLOW}[1/6] Enabling maintenance mode...${NC}"
 php artisan down --refresh=30 --retry=60 2>/dev/null || true
 echo -e "  Maintenance mode ${GREEN}ON${NC}"
 
 # ------------------------------------------
 # 2. Pull latest code (includes public/build)
 # ------------------------------------------
-echo -e "${YELLOW}[2/7] Pulling latest code from git...${NC}"
+echo -e "${YELLOW}[2/6] Pulling latest code from git...${NC}"
 
-# Backup .env.cpanel before git reset (it contains real credentials)
-if [ -f .env.cpanel ]; then
-    cp .env.cpanel /tmp/.env.cpanel.bak
-fi
+# Backup .env before git reset
+cp .env /tmp/.env.bak 2>/dev/null || true
 
 git fetch origin
 git reset --hard origin/main
 
-# Restore .env.cpanel with real credentials
-if [ -f /tmp/.env.cpanel.bak ]; then
-    cp /tmp/.env.cpanel.bak .env.cpanel
-    rm -f /tmp/.env.cpanel.bak
+# Restore .env
+if [ -f /tmp/.env.bak ]; then
+    cp /tmp/.env.bak .env
+    rm -f /tmp/.env.bak
 fi
 
 echo -e "  Latest code pulled ${GREEN}OK${NC}"
 
-# ------------------------------------------
-# 3. Copy .env.cpanel -> .env
-# ------------------------------------------
-echo -e "${YELLOW}[3/7] Setting up environment...${NC}"
-if [ -f .env.cpanel ]; then
-    cp .env.cpanel .env
-    echo -e "  .env.cpanel copied to .env ${GREEN}OK${NC}"
-else
-    echo -e "${RED}ERROR: .env.cpanel not found!${NC}"
-    echo "Create .env.cpanel with your production settings first."
+# Check .env exists
+if [ ! -f .env ]; then
+    echo -e "${RED}ERROR: .env file not found! Create it manually first.${NC}"
     php artisan up 2>/dev/null || true
     exit 1
-fi
-
-# Generate APP_KEY if not set
-if ! grep -q "^APP_KEY=base64:" .env 2>/dev/null; then
-    php artisan key:generate --force
-    # Save the generated key back to .env.cpanel so it persists
-    APP_KEY=$(grep "^APP_KEY=" .env)
-    sed -i "s|^APP_KEY=.*|$APP_KEY|" .env.cpanel 2>/dev/null || true
-    echo -e "  App key generated and saved ${GREEN}OK${NC}"
 fi
 
 # ------------------------------------------
 # 4. Install PHP dependencies
 # ------------------------------------------
-echo -e "${YELLOW}[4/7] Installing PHP dependencies...${NC}"
+echo -e "${YELLOW}[3/6] Installing PHP dependencies...${NC}"
 COMPOSER_CMD=$(which composer 2>/dev/null || echo "$HOME/bin/composer")
 php -d allow_url_fopen=1 "$COMPOSER_CMD" install \
     --no-dev \
@@ -94,14 +76,14 @@ echo -e "  Composer install ${GREEN}OK${NC}"
 # ------------------------------------------
 # 5. Database migrations
 # ------------------------------------------
-echo -e "${YELLOW}[5/7] Running database migrations...${NC}"
+echo -e "${YELLOW}[4/6] Running database migrations...${NC}"
 php artisan migrate --force
 echo -e "  Migrations ${GREEN}OK${NC}"
 
 # ------------------------------------------
 # 6. Clear & rebuild caches
 # ------------------------------------------
-echo -e "${YELLOW}[6/7] Rebuilding caches...${NC}"
+echo -e "${YELLOW}[5/6] Rebuilding caches...${NC}"
 php artisan config:clear
 php artisan route:clear
 php artisan view:clear
@@ -116,7 +98,7 @@ echo -e "  Caches rebuilt ${GREEN}OK${NC}"
 # ------------------------------------------
 # 7. Restart queue workers
 # ------------------------------------------
-echo -e "${YELLOW}[7/7] Restarting queue workers...${NC}"
+echo -e "${YELLOW}[6/6] Restarting queue workers...${NC}"
 
 # Signal existing workers to stop gracefully after current job
 php artisan queue:restart 2>/dev/null || true
