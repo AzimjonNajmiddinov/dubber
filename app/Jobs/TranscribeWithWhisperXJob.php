@@ -416,7 +416,7 @@ class TranscribeWithWhisperXJob implements ShouldQueue, ShouldBeUnique
                 $video->update(['status' => 'transcribed']);
             });
 
-            TranslateAudioJob::dispatch($video->id);
+            RefineSpeakerAssignmentJob::dispatch($video->id);
 
         } finally {
             optional($lock)->release();
