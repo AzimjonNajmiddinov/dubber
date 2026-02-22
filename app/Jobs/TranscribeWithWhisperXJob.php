@@ -680,11 +680,13 @@ class TranscribeWithWhisperXJob implements ShouldQueue, ShouldBeUnique
     }
 
     /**
-     * Merge minor speakers into the dominant speaker.
+     * Merge speakers that are acoustically similar (same person split by pyannote).
      *
-     * Pyannote often over-splits a single speaker into 2-3 due to pitch/tone
-     * variation. This merges any speaker with less than 10% of total segments
-     * (and fewer than 5 segments) into the dominant speaker.
+     * Uses pitch proximity: if two speakers' median pitch is within 40Hz,
+     * they're likely the same person. The one with fewer segments gets merged
+     * into the one with more.
+     *
+     * Also merges speakers with no pitch data and fewer than 5 segments.
      */
     private function mergeMinorSpeakers(int $videoId): void
     {
@@ -704,42 +706,85 @@ class TranscribeWithWhisperXJob implements ShouldQueue, ShouldBeUnique
 
         if ($totalSegments === 0) return;
 
-        // Find the dominant speaker (most segments)
-        $dominantId = array_keys($counts, max($counts))[0];
-        $dominantSpeaker = $speakers->firstWhere('id', $dominantId);
+        // Sort speakers by segment count (dominant first)
+        $sorted = $speakers->sortByDesc(fn($s) => $counts[$s->id])->values();
 
-        // Merge minor speakers (< 10% of total AND < 5 segments)
         $merged = [];
-        foreach ($speakers as $speaker) {
-            if ($speaker->id === $dominantId) continue;
+        $deleted = [];
+
+        // Pass 1: Pitch-based merge — similar pitch = same person
+        foreach ($sorted as $i => $speakerA) {
+            if (in_array($speakerA->id, $deleted)) continue;
+
+            foreach ($sorted as $j => $speakerB) {
+                if ($j <= $i) continue;
+                if (in_array($speakerB->id, $deleted)) continue;
+
+                $pitchA = $speakerA->pitch_median_hz;
+                $pitchB = $speakerB->pitch_median_hz;
+
+                // Both have pitch data — compare
+                if ($pitchA && $pitchB) {
+                    $diff = abs($pitchA - $pitchB);
+                    // Within 40Hz = same person (male voice ~85-180Hz, female ~165-255Hz)
+                    if ($diff < 40) {
+                        $this->mergeSpeaker($videoId, $speakerB, $speakerA, $counts);
+                        $merged[] = [
+                            'from' => $speakerB->label,
+                            'into' => $speakerA->label,
+                            'reason' => "pitch_similar ({$pitchB}Hz vs {$pitchA}Hz, diff={$diff}Hz)",
+                            'segments_moved' => $counts[$speakerB->id],
+                        ];
+                        $deleted[] = $speakerB->id;
+                    }
+                }
+            }
+        }
+
+        // Pass 2: Merge orphan speakers (no pitch, few segments)
+        foreach ($sorted as $speaker) {
+            if (in_array($speaker->id, $deleted)) continue;
 
             $count = $counts[$speaker->id];
             $pct = ($count / $totalSegments) * 100;
 
-            if ($count < 5 || $pct < 10) {
-                // Reassign all segments to dominant speaker
-                VideoSegment::where('video_id', $videoId)
-                    ->where('speaker_id', $speaker->id)
-                    ->update(['speaker_id' => $dominantId]);
-
-                $merged[] = [
-                    'from' => $speaker->label,
-                    'segments' => $count,
-                    'pct' => round($pct, 1),
-                ];
-
-                // Delete the minor speaker
-                $speaker->delete();
+            // No pitch data + tiny contribution = noise
+            if (!$speaker->pitch_median_hz && $count < 5) {
+                $dominant = $sorted->first(fn($s) => !in_array($s->id, $deleted) && $s->id !== $speaker->id);
+                if ($dominant) {
+                    $this->mergeSpeaker($videoId, $speaker, $dominant, $counts);
+                    $merged[] = [
+                        'from' => $speaker->label,
+                        'into' => $dominant->label,
+                        'reason' => "no_pitch_data, only {$count} segments ({$pct}%)",
+                        'segments_moved' => $count,
+                    ];
+                    $deleted[] = $speaker->id;
+                }
             }
         }
 
         if (!empty($merged)) {
-            Log::info('Merged minor speakers into dominant', [
+            $remaining = Speaker::where('video_id', $videoId)->count();
+            Log::info('Speaker merge complete', [
                 'video_id' => $videoId,
-                'dominant' => $dominantSpeaker->label,
-                'dominant_segments' => $counts[$dominantId],
-                'merged' => $merged,
+                'original_count' => $speakers->count(),
+                'final_count' => $remaining,
+                'merges' => $merged,
             ]);
         }
+    }
+
+    /**
+     * Merge one speaker into another: move segments, delete the source speaker.
+     */
+    private function mergeSpeaker(int $videoId, Speaker $from, Speaker $into, array &$counts): void
+    {
+        VideoSegment::where('video_id', $videoId)
+            ->where('speaker_id', $from->id)
+            ->update(['speaker_id' => $into->id]);
+
+        $counts[$into->id] += $counts[$from->id];
+        $from->delete();
     }
 }
