@@ -24,6 +24,21 @@ class SpeakerTuning
         $emotion = strtolower((string) ($speaker->emotion ?? 'neutral'));
         $age     = strtolower((string) ($speaker->age_group ?? 'unknown'));
 
+        // Infer gender from pitch when gender is unknown (lite mode skips gender ML)
+        // Female voice: typically >165 Hz median pitch
+        // Male voice: typically <150 Hz median pitch
+        if ($gender === 'unknown' && $speaker->pitch_median_hz) {
+            $pitch_hz = (float) $speaker->pitch_median_hz;
+            if ($pitch_hz >= 165) {
+                $gender = 'female';
+                $speaker->gender = 'female';
+            } elseif ($pitch_hz <= 150) {
+                $gender = 'male';
+                $speaker->gender = 'male';
+            }
+            // 150-165 Hz is ambiguous, leave as unknown
+        }
+
         // Get speaker index for this video to assign different voices
         $speakerIndex = $this->getSpeakerIndex($video, $speaker, $gender);
 
