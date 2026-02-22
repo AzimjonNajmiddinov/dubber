@@ -9,8 +9,9 @@ use App\Http\Controllers\LiveDubController;
 use App\Http\Controllers\OnlineDubController;
 use App\Http\Controllers\QueueMonitorController;
 
-Route::get('/', [VideoController::class, 'index'])->name('videos.index');
+Route::get('/', fn () => redirect()->route('dub.index'));
 
+Route::get('/dashboard', [VideoController::class, 'index'])->name('videos.index');
 Route::post('/upload', [VideoController::class, 'upload'])->name('videos.upload');
 
 Route::get('/videos', [VideoController::class, 'list'])->name('videos.list');

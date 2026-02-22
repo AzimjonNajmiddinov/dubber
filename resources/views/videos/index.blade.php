@@ -26,26 +26,8 @@ body { font-family: ui-sans-serif, system-ui, -apple-system; margin: 24px; }
     </div>
 @endif
 
-<div class="card">
-    <h2 style="margin-top:0;">Upload video</h2>
-    <form action="{{ route('videos.upload') }}" method="POST" enctype="multipart/form-data">
-        @csrf
-        <div class="row">
-            <input type="file" name="video" required>
-            <select name="target_language" required>
-                <option value="Uzbek">Uzbek</option>
-                <option value="English">English</option>
-                <option value="Russian">Russian</option>
-            </select>
-            <button class="btn btn-primary" type="submit">Upload & Start</button>
-        </div>
-        @error('video') <div class="muted">{{ $message }}</div> @enderror
-        @error('target_language') <div class="muted">{{ $message }}</div> @enderror
-    </form>
-    <p class="muted" style="margin-bottom:0;">Tip: for best quality keep videos ≤ 5 minutes.</p>
-    <div style="margin-top:12px;">
-        <a class="btn btn-primary" href="{{ route('dub.index') }}">Dub from URL</a>
-    </div>
+<div style="margin-bottom:16px;">
+    <a class="btn btn-primary" href="{{ route('dub.index') }}">+ New Dub</a>
 </div>
 
 <div class="card">
