@@ -39,8 +39,21 @@ echo -e "  Maintenance mode ${GREEN}ON${NC}"
 # 2. Pull latest code (includes public/build)
 # ------------------------------------------
 echo -e "${YELLOW}[2/7] Pulling latest code from git...${NC}"
+
+# Backup .env.cpanel before git reset (it contains real credentials)
+if [ -f .env.cpanel ]; then
+    cp .env.cpanel /tmp/.env.cpanel.bak
+fi
+
 git fetch origin
 git reset --hard origin/main
+
+# Restore .env.cpanel with real credentials
+if [ -f /tmp/.env.cpanel.bak ]; then
+    cp /tmp/.env.cpanel.bak .env.cpanel
+    rm -f /tmp/.env.cpanel.bak
+fi
+
 echo -e "  Latest code pulled ${GREEN}OK${NC}"
 
 # ------------------------------------------
