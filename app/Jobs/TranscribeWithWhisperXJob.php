@@ -124,7 +124,7 @@ class TranscribeWithWhisperXJob implements ShouldQueue, ShouldBeUnique
             // Split long audio into chunks to avoid RunPod proxy timeouts (100s limit).
             // Each chunk gets its own diarization pass; speakers are merged cross-chunk
             // by gender + pitch proximity in mergeChunkResults().
-            if ($dur !== null && $dur > 120) {
+            if ($dur !== null && $dur > 60) {
                 Log::info('Long audio, splitting into chunks for proxy timeout', [
                     'video_id' => $video->id,
                     'duration' => $dur,
@@ -424,7 +424,7 @@ class TranscribeWithWhisperXJob implements ShouldQueue, ShouldBeUnique
     }
 
     /**
-     * Split audio into ~120s chunks using ffmpeg.
+     * Split audio into ~60s chunks using ffmpeg.
      *
      * @return array<int, array{0: string, 1: float}> Array of [chunkPath, offsetSeconds]
      */
@@ -435,7 +435,7 @@ class TranscribeWithWhisperXJob implements ShouldQueue, ShouldBeUnique
             mkdir($chunkDir, 0755, true);
         }
 
-        $chunkDuration = 120;
+        $chunkDuration = 60;
         $chunks = [];
         $offset = 0.0;
         $index = 0;
