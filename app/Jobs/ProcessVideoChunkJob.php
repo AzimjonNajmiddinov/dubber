@@ -1127,10 +1127,9 @@ Output ONLY the numbered lines, no explanations.',
         $pitch = self::PITCH_VARIATIONS[$existingCount % count(self::PITCH_VARIATIONS)];
         $rate = self::RATE_VARIATIONS[$existingCount % count(self::RATE_VARIATIONS)];
 
-        try {
-            return Speaker::create(array_filter([
-                'video_id' => $video->id,
-                'external_key' => $speakerKey,
+        return Speaker::firstOrCreate(
+            ['video_id' => $video->id, 'external_key' => $speakerKey],
+            array_filter([
                 'label' => 'Speaker ' . ($num + 1),
                 'gender' => $gender,
                 'gender_confidence' => $whisperxMeta['gender_confidence'] ?? null,
@@ -1142,15 +1141,8 @@ Output ONLY the numbered lines, no explanations.',
                 'tts_pitch' => $pitch,
                 'tts_rate' => $rate,
                 'tts_driver' => 'edge',
-            ], fn($v) => $v !== null));
-        } catch (\Illuminate\Database\QueryException $e) {
-            if (str_contains($e->getMessage(), 'Duplicate entry')) {
-                return Speaker::where('video_id', $video->id)
-                    ->where('external_key', $speakerKey)
-                    ->firstOrFail();
-            }
-            throw $e;
-        }
+            ], fn($v) => $v !== null)
+        );
     }
 
     /**
