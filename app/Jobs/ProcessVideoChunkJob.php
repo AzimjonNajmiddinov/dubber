@@ -1400,6 +1400,9 @@ Output ONLY the numbered lines, no explanations.',
             ]);
         }
 
+        // Filter out TTS files that failed to generate
+        $ttsFiles = array_filter($ttsFiles, fn($tts) => isset($tts['path']) && file_exists($tts['path']));
+
         if (empty($ttsFiles)) {
             rename($bgTrack, $finalPath);
             return $finalPath;
