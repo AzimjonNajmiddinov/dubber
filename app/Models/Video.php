@@ -18,6 +18,9 @@ class Video extends Model
         'final_audio_path',
         'lipsynced_path',
         'source_url',
+        'stream_url',
+        'stream_audio_url',
+        'duration',
     ];
 
     public function speakers(): HasMany

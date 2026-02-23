@@ -9,20 +9,18 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
-use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Facades\Storage;
-use Illuminate\Support\Str;
 
 /**
- * Downloads video and dispatches chunk processing jobs IMMEDIATELY.
- * Demucs stem separation runs in background - chunks work without it if not ready.
+ * Resolves video source and dispatches chunk processing jobs IMMEDIATELY.
  *
- * Optimized for fast processing of small segments from big movies:
- * - Configurable chunk duration (smaller = faster per-chunk, larger = fewer jobs)
- * - Prioritized first chunk dispatch
- * - Background stem separation that chunks can leverage when ready
+ * For URL-based videos: resolves direct stream URLs via yt-dlp --get-url,
+ * gets duration via ffprobe, and dispatches chunks that stream directly from CDN.
+ * Full download runs in background (BackgroundDownloadJob) for stem separation.
+ *
+ * For file uploads: uses local file directly (original behavior).
  */
 class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
 {
@@ -32,10 +30,6 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
     public int $tries = 2;
     public int $uniqueFor = 3600;
 
-    // Chunk duration in seconds - configurable via environment
-    // Smaller = faster processing per chunk, but more overhead
-    // Larger = slower per chunk, but less overhead
-    // Recommended: 8-15 seconds for optimal balance
     private const DEFAULT_CHUNK_DURATION = 10;
 
     public function __construct(public int $videoId) {}
@@ -59,35 +53,162 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
     {
         $video = Video::findOrFail($this->videoId);
 
-        // Step 1: Download if needed
-        if (!$video->original_path || !Storage::disk('local')->exists($video->original_path)) {
-            $this->downloadVideo($video);
-            $video->refresh();
-        }
+        $hasLocalFile = $video->original_path && Storage::disk('local')->exists($video->original_path);
 
-        if (!$video->original_path) {
-            throw new \RuntimeException('Video download failed');
+        if ($hasLocalFile) {
+            // File upload path — use local file directly
+            $this->handleLocalFile($video);
+        } elseif ($video->source_url) {
+            // URL path — resolve stream URLs, dispatch chunks immediately
+            $this->handleStreamUrl($video);
+        } else {
+            throw new \RuntimeException('No video source (no local file, no source URL)');
         }
+    }
 
-        // Step 2: Get video duration IMMEDIATELY
+    /**
+     * Original flow for file uploads: local file exists, use it directly.
+     */
+    private function handleLocalFile(Video $video): void
+    {
         $videoPath = Storage::disk('local')->path($video->original_path);
-        $duration = $this->getVideoDuration($videoPath);
+        $duration = $this->getMediaDuration($videoPath);
 
         if ($duration <= 0) {
             throw new \RuntimeException('Could not determine video duration');
         }
 
-        // Step 3: Calculate chunks
+        $video->update(['duration' => $duration]);
+
+        $this->dispatchChunks($video, $duration);
+
+        // Start stem separation in background (extract audio + Demucs)
+        $this->extractFullAudio($video);
+        SeparateStemsJob::dispatch($video->id)->onQueue('default');
+        Log::info('Stem separation dispatched to background', ['video_id' => $video->id]);
+    }
+
+    /**
+     * Stream flow: resolve direct CDN URLs, get duration remotely, dispatch chunks.
+     * Full download happens in background via BackgroundDownloadJob.
+     */
+    private function handleStreamUrl(Video $video): void
+    {
+        $video->update(['status' => 'resolving_stream']);
+
+        // Step 1: Resolve direct stream URL(s) via yt-dlp --get-url
+        $streamUrls = $this->resolveStreamUrls($video->source_url);
+
+        if (!$streamUrls['video']) {
+            // yt-dlp --get-url failed — fall back to full download
+            Log::warning('Stream URL resolution failed, falling back to full download', [
+                'video_id' => $video->id,
+            ]);
+            $this->downloadAndProcess($video);
+            return;
+        }
+
+        // Step 2: Get duration via ffprobe on the stream URL
+        $duration = $this->getMediaDuration($streamUrls['video']);
+
+        if ($duration <= 0) {
+            Log::warning('Could not get duration from stream URL, falling back to full download', [
+                'video_id' => $video->id,
+            ]);
+            $this->downloadAndProcess($video);
+            return;
+        }
+
+        // Step 3: Store stream info on video
+        $video->update([
+            'stream_url' => $streamUrls['video'],
+            'stream_audio_url' => $streamUrls['audio'],
+            'duration' => $duration,
+        ]);
+
+        Log::info('Stream URLs resolved', [
+            'video_id' => $video->id,
+            'has_separate_audio' => $streamUrls['audio'] !== null,
+            'duration' => $duration,
+        ]);
+
+        // Step 4: Dispatch chunks immediately (they'll stream from CDN)
+        $this->dispatchChunks($video, $duration);
+
+        // Step 5: Start full download in background for stem separation
+        BackgroundDownloadJob::dispatch($video->id)->onQueue('default');
+        Log::info('Background download dispatched', ['video_id' => $video->id]);
+    }
+
+    /**
+     * Resolve direct stream URLs using yt-dlp --get-url.
+     * Returns 1 URL for muxed streams, 2 URLs for separate video+audio (DASH).
+     *
+     * @return array{video: ?string, audio: ?string}
+     */
+    private function resolveStreamUrls(string $sourceUrl): array
+    {
+        $cookiesFile = $this->findCookiesFile();
+
+        $cmd = ['yt-dlp', '--get-url', '-f', 'bv[height<=720]+ba/b[height<=720]/b'];
+
+        if ($cookiesFile) {
+            $cmd[] = '--cookies';
+            $cmd[] = $cookiesFile;
+        }
+
+        $cmd[] = '--no-playlist';
+        $cmd[] = $sourceUrl;
+
+        $result = Process::timeout(60)->run($cmd);
+
+        if (!$result->successful()) {
+            Log::warning('yt-dlp --get-url failed', [
+                'error' => substr($result->errorOutput(), -300),
+            ]);
+            return ['video' => null, 'audio' => null];
+        }
+
+        $urls = array_filter(array_map('trim', explode("\n", trim($result->output()))));
+
+        if (count($urls) >= 2) {
+            // Separate video + audio streams (DASH)
+            return ['video' => $urls[0], 'audio' => $urls[1]];
+        } elseif (count($urls) === 1) {
+            // Muxed stream (video + audio in one URL)
+            return ['video' => $urls[0], 'audio' => null];
+        }
+
+        return ['video' => null, 'audio' => null];
+    }
+
+    /**
+     * Fallback: full download then process (original behavior).
+     */
+    private function downloadAndProcess(Video $video): void
+    {
+        $this->downloadVideo($video);
+        $video->refresh();
+
+        if (!$video->original_path) {
+            throw new \RuntimeException('Video download failed');
+        }
+
+        $this->handleLocalFile($video);
+    }
+
+    private function dispatchChunks(Video $video, float $duration): void
+    {
         $chunks = $this->calculateChunks($duration);
         $video->update(['status' => 'processing_chunks']);
 
-        Log::info('Starting chunk processing - dispatching immediately', [
+        Log::info('Dispatching chunk jobs', [
             'video_id' => $video->id,
             'duration' => $duration,
             'total_chunks' => count($chunks),
         ]);
 
-        // Step 4: Dispatch FIRST chunk with HIGH priority (no delay)
+        // Dispatch first chunk with HIGH priority (no delay)
         if (!empty($chunks)) {
             ProcessVideoChunkJob::dispatch(
                 $video->id,
@@ -99,15 +220,11 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
             Log::info('First chunk dispatched immediately', ['video_id' => $video->id]);
         }
 
-        // Step 5: Start Demucs in background (non-blocking)
-        $this->startBackgroundStemSeparation($video);
-
-        // Step 6: Dispatch remaining chunks (they'll process in parallel)
+        // Dispatch remaining chunks with staggered delays
         foreach ($chunks as $index => $chunk) {
-            if ($index === 0) continue; // Already dispatched
+            if ($index === 0) continue;
 
-            // Small delay for chunks 2+ to let first chunk get ahead
-            $delay = $index <= 3 ? $index * 2 : 5; // First few chunks staggered, rest same delay
+            $delay = $index <= 3 ? $index * 2 : 5;
 
             ProcessVideoChunkJob::dispatch(
                 $video->id,
@@ -121,20 +238,6 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
             'video_id' => $video->id,
             'total_chunks' => count($chunks),
         ]);
-    }
-
-    /**
-     * Start stem separation in background - doesn't block chunk processing.
-     */
-    private function startBackgroundStemSeparation(Video $video): void
-    {
-        // Extract audio first (quick)
-        $this->extractFullAudio($video);
-
-        // Dispatch Demucs as separate background job
-        SeparateStemsJob::dispatch($video->id)->onQueue('default');
-
-        Log::info('Stem separation dispatched to background', ['video_id' => $video->id]);
     }
 
     private function extractFullAudio(Video $video): void
@@ -160,6 +263,52 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
         }
     }
 
+    private function getMediaDuration(string $pathOrUrl): float
+    {
+        $result = Process::timeout(30)->run([
+            'ffprobe',
+            '-v', 'error',
+            '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            $pathOrUrl,
+        ]);
+
+        return $result->successful() ? (float) trim($result->output()) : 0;
+    }
+
+    private function calculateChunks(float $duration): array
+    {
+        $chunks = [];
+        $start = 0;
+        $chunkDuration = $this->getChunkDuration($duration);
+
+        while ($start < $duration) {
+            $end = min($start + $chunkDuration, $duration);
+            $chunks[] = ['start' => $start, 'end' => $end];
+            $start = $end;
+        }
+
+        return $chunks;
+    }
+
+    private function getChunkDuration(float $totalDuration): float
+    {
+        $envDuration = env('DUBBER_CHUNK_DURATION');
+        if ($envDuration !== null && is_numeric($envDuration)) {
+            return max(5, min(30, (float)$envDuration));
+        }
+
+        if ($totalDuration <= 60) {
+            return 8;
+        } elseif ($totalDuration <= 300) {
+            return 10;
+        } elseif ($totalDuration <= 1800) {
+            return 12;
+        } else {
+            return 15;
+        }
+    }
+
     private function downloadVideo(Video $video): void
     {
         if (!$video->source_url) {
@@ -169,7 +318,7 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
         $video->update(['status' => 'downloading']);
 
         Storage::disk('local')->makeDirectory('videos/originals');
-        $filename = Str::random(16) . '.mp4';
+        $filename = \Illuminate\Support\Str::random(16) . '.mp4';
         $relativePath = "videos/originals/{$filename}";
         $absolutePath = Storage::disk('local')->path($relativePath);
 
@@ -180,19 +329,12 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
         $downloaded = false;
         $lastError = '';
 
-        // Check for cookies file (needed for YouTube bot detection bypass)
         $cookiesFile = $this->findCookiesFile();
 
         if ($isYouTube) {
-            // YouTube: try different clients
             $clients = ['default', 'mweb', 'web', 'android'];
             foreach ($clients as $client) {
                 @unlink($absolutePath);
-
-                Log::info('Trying YouTube download', [
-                    'video_id' => $video->id,
-                    'client' => $client,
-                ]);
 
                 $cmd = [
                     'yt-dlp',
@@ -218,20 +360,12 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
 
                 if ($result->successful() && file_exists($absolutePath) && filesize($absolutePath) > 10000) {
                     $downloaded = true;
-                    Log::info('Video downloaded', [
-                        'video_id' => $video->id,
-                        'client' => $client,
-                        'size' => filesize($absolutePath),
-                    ]);
                     break;
                 }
 
                 $lastError = $result->errorOutput() ?: $result->output();
             }
         } elseif ($isHLS) {
-            // HLS stream: download best video + best audio and merge
-            Log::info('Downloading HLS stream', ['video_id' => $video->id]);
-
             $result = Process::timeout(1800)->run([
                 'yt-dlp',
                 '-f', 'bestvideo+bestaudio/best',
@@ -242,17 +376,10 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
 
             if ($result->successful() && file_exists($absolutePath) && filesize($absolutePath) > 10000) {
                 $downloaded = true;
-                Log::info('HLS stream downloaded', [
-                    'video_id' => $video->id,
-                    'size' => filesize($absolutePath),
-                ]);
             } else {
                 $lastError = $result->errorOutput() ?: $result->output();
             }
         } else {
-            // Generic URL: try simple download
-            Log::info('Downloading generic URL', ['video_id' => $video->id]);
-
             $result = Process::timeout(1800)->run([
                 'yt-dlp',
                 '-f', 'bestvideo[height<=720]+bestaudio/best[height<=720]/best',
@@ -263,16 +390,11 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
 
             if ($result->successful() && file_exists($absolutePath) && filesize($absolutePath) > 10000) {
                 $downloaded = true;
-                Log::info('Video downloaded', [
-                    'video_id' => $video->id,
-                    'size' => filesize($absolutePath),
-                ]);
             } else {
                 $lastError = $result->errorOutput() ?: $result->output();
             }
         }
 
-        // Fallback: try Invidious API if yt-dlp failed (YouTube only)
         if (!$downloaded) {
             $downloaded = $this->downloadWithInvidious($url, $absolutePath);
         }
@@ -286,63 +408,6 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
             'original_path' => $relativePath,
             'status' => 'uploaded',
         ]);
-    }
-
-    private function getVideoDuration(string $path): float
-    {
-        $result = Process::timeout(30)->run([
-            'ffprobe',
-            '-v', 'error',
-            '-show_entries', 'format=duration',
-            '-of', 'default=noprint_wrappers=1:nokey=1',
-            $path,
-        ]);
-
-        return $result->successful() ? (float) trim($result->output()) : 0;
-    }
-
-    private function calculateChunks(float $duration): array
-    {
-        $chunks = [];
-        $start = 0;
-        $chunkDuration = $this->getChunkDuration($duration);
-
-        while ($start < $duration) {
-            $end = min($start + $chunkDuration, $duration);
-            $chunks[] = ['start' => $start, 'end' => $end];
-            $start = $end;
-        }
-
-        return $chunks;
-    }
-
-    /**
-     * Get optimal chunk duration based on video length and configuration.
-     * Shorter videos use smaller chunks for faster completion.
-     * Longer videos use slightly larger chunks to reduce job overhead.
-     */
-    private function getChunkDuration(float $totalDuration): float
-    {
-        // Environment override takes priority
-        $envDuration = env('DUBBER_CHUNK_DURATION');
-        if ($envDuration !== null && is_numeric($envDuration)) {
-            return max(5, min(30, (float)$envDuration));
-        }
-
-        // Adaptive chunk sizing based on video length
-        if ($totalDuration <= 60) {
-            // Short videos (< 1 min): 8 second chunks for fast processing
-            return 8;
-        } elseif ($totalDuration <= 300) {
-            // Medium videos (1-5 min): 10 second chunks
-            return 10;
-        } elseif ($totalDuration <= 1800) {
-            // Long videos (5-30 min): 12 second chunks
-            return 12;
-        } else {
-            // Very long videos (> 30 min): 15 second chunks to reduce overhead
-            return 15;
-        }
     }
 
     private function downloadWithInvidious(string $url, string $outputPath): bool
@@ -361,7 +426,7 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
 
         foreach ($instances as $instance) {
             try {
-                $response = Http::timeout(15)->get("{$instance}/api/v1/videos/{$videoId}");
+                $response = \Illuminate\Support\Facades\Http::timeout(15)->get("{$instance}/api/v1/videos/{$videoId}");
                 if (!$response->successful()) continue;
 
                 $data = $response->json();
@@ -375,12 +440,11 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
 
                 if (!$downloadUrl) continue;
 
-                Http::withOptions(['sink' => $outputPath, 'timeout' => 3600, 'connect_timeout' => 30])
+                \Illuminate\Support\Facades\Http::withOptions(['sink' => $outputPath, 'timeout' => 3600, 'connect_timeout' => 30])
                     ->withHeaders(['User-Agent' => 'Mozilla/5.0'])
                     ->get($downloadUrl);
 
                 if (file_exists($outputPath) && filesize($outputPath) > 10000) {
-                    Log::info('Invidious download successful', ['instance' => $instance, 'size' => filesize($outputPath)]);
                     return true;
                 }
             } catch (\Throwable $e) {

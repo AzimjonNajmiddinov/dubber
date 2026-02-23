@@ -84,12 +84,16 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
     public function handle(): void
     {
         $video = Video::find($this->videoId);
-        if (!$video || !$video->original_path) {
+        if (!$video) {
             return;
         }
 
-        $videoPath = Storage::disk('local')->path($video->original_path);
-        if (!file_exists($videoPath)) {
+        // Resolve video/audio sources: local file or stream URL
+        $videoSource = $this->getVideoSource($video);
+        $audioSource = $this->getAudioSource($video);
+
+        if (!$videoSource) {
+            Log::warning('No video source available', ['video_id' => $this->videoId, 'chunk' => $this->chunkIndex]);
             return;
         }
 
@@ -100,6 +104,7 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
             'chunk' => $this->chunkIndex,
             'start' => $this->startTime,
             'duration' => $duration,
+            'source' => $video->original_path ? 'local' : 'stream',
         ]);
 
         $chunkDir = "videos/chunks/{$this->videoId}";
@@ -109,7 +114,7 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
         // OPTIMIZATION 1: Combined audio extraction (single FFmpeg pass for both HQ and transcription)
         $audioHqPath = "{$chunkDirAbs}/audio_hq_{$this->chunkIndex}.wav";
         $audioTranscribePath = "{$chunkDirAbs}/audio_{$this->chunkIndex}.wav";
-        $this->extractAudioCombined($videoPath, $audioHqPath, $audioTranscribePath, $this->startTime, $duration);
+        $this->extractAudioCombined($audioSource, $audioHqPath, $audioTranscribePath, $this->startTime, $duration);
 
         // OPTIMIZATION 2: Early transcription to detect silence BEFORE stem separation
         $transcription = $this->transcribe($audioTranscribePath);
@@ -119,7 +124,7 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
         if (empty($segments)) {
             Log::info('No speech in chunk - fast path', ['chunk' => $this->chunkIndex]);
             // OPTIMIZATION 3: Skip stem separation for silent chunks
-            $this->createSilentChunk($video, $videoPath, $chunkDir, $duration);
+            $this->createSilentChunk($video, $videoSource, $audioSource, $chunkDir, $duration);
             $this->cleanup([$audioHqPath, $audioTranscribePath]);
             $this->checkAndTriggerCombine($video);
             return;
@@ -142,7 +147,7 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
 
         // Create video chunk
         $outputPath = "{$chunkDir}/seg_{$this->chunkIndex}.mp4";
-        $this->createVideoChunk($videoPath, $finalAudioPath, $outputPath, $this->startTime, $duration);
+        $this->createVideoChunk($videoSource, $finalAudioPath, $outputPath, $this->startTime, $duration);
 
         // Save segments
         $this->saveSegments($video, $processedSegments);
@@ -165,17 +170,59 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
         $this->checkAndTriggerCombine($video);
     }
 
+    /**
+     * Get the video source: local file path or stream URL.
+     */
+    private function getVideoSource(Video $video): ?string
+    {
+        if ($video->original_path) {
+            $localPath = Storage::disk('local')->path($video->original_path);
+            if (file_exists($localPath)) {
+                return $localPath;
+            }
+        }
+
+        return $video->stream_url;
+    }
+
+    /**
+     * Get the audio source: local file path, separate audio stream URL, or video stream URL.
+     * For DASH streams, audio is in a separate URL from video.
+     */
+    private function getAudioSource(Video $video): ?string
+    {
+        if ($video->original_path) {
+            $localPath = Storage::disk('local')->path($video->original_path);
+            if (file_exists($localPath)) {
+                return $localPath;
+            }
+        }
+
+        return $video->stream_audio_url ?? $video->stream_url;
+    }
+
     private function checkAndTriggerCombine(Video $video): void
     {
-        $videoPath = Storage::disk('local')->path($video->original_path);
-        $result = Process::timeout(10)->run([
-            'ffprobe', '-v', 'error',
-            '-show_entries', 'format=duration',
-            '-of', 'default=noprint_wrappers=1:nokey=1',
-            $videoPath,
-        ]);
+        $video->refresh();
 
-        $duration = (float) trim($result->output());
+        // Use stored duration (set by StartChunkProcessingJob)
+        $duration = (float) $video->duration;
+
+        // Fall back to ffprobe if duration not stored
+        if ($duration <= 0) {
+            $source = $this->getVideoSource($video);
+            if (!$source) return;
+
+            $result = Process::timeout(10)->run([
+                'ffprobe', '-v', 'error',
+                '-show_entries', 'format=duration',
+                '-of', 'default=noprint_wrappers=1:nokey=1',
+                $source,
+            ]);
+
+            $duration = (float) trim($result->output());
+        }
+
         if ($duration <= 0) return;
 
         $chunkDuration = $duration <= 60 ? 8 : ($duration <= 300 ? 10 : ($duration <= 1800 ? 12 : 15));
@@ -262,23 +309,42 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
     /**
      * Create chunk for silent segments - skip all heavy processing
      */
-    private function createSilentChunk(Video $video, string $videoPath, string $chunkDir, float $duration): void
+    private function createSilentChunk(Video $video, string $videoSource, ?string $audioSource, string $chunkDir, float $duration): void
     {
         $outputPath = "{$chunkDir}/seg_{$this->chunkIndex}.mp4";
         $outputAbs = Storage::disk('local')->path($outputPath);
 
-        // Just copy video with reduced audio volume (fast, no stem separation needed)
-        Process::timeout(60)->run([
-            'ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
-            '-ss', (string)$this->startTime,
-            '-i', $videoPath,
-            '-t', (string)$duration,
-            '-c:v', 'copy',
-            '-af', 'volume=0.3',
-            '-c:a', 'aac', '-b:a', '96k',
-            '-movflags', '+faststart',
-            $outputAbs,
-        ]);
+        if ($audioSource && $audioSource !== $videoSource) {
+            // DASH: separate video + audio streams
+            Process::timeout(60)->run([
+                'ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
+                '-ss', (string)$this->startTime,
+                '-i', $videoSource,
+                '-ss', (string)$this->startTime,
+                '-i', $audioSource,
+                '-t', (string)$duration,
+                '-map', '0:v:0',
+                '-map', '1:a:0',
+                '-c:v', 'copy',
+                '-af', 'volume=0.3',
+                '-c:a', 'aac', '-b:a', '96k',
+                '-movflags', '+faststart',
+                $outputAbs,
+            ]);
+        } else {
+            // Muxed source (local file or muxed stream)
+            Process::timeout(60)->run([
+                'ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
+                '-ss', (string)$this->startTime,
+                '-i', $videoSource,
+                '-t', (string)$duration,
+                '-c:v', 'copy',
+                '-af', 'volume=0.3',
+                '-c:a', 'aac', '-b:a', '96k',
+                '-movflags', '+faststart',
+                $outputAbs,
+            ]);
+        }
 
         VideoSegment::create([
             'video_id' => $video->id,
