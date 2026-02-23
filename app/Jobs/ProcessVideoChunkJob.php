@@ -577,25 +577,30 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
     {
         try {
             $whisperxUrl = config('services.whisperx.url', 'http://whisperx:8000');
+            $isRemote = str_contains($whisperxUrl, 'runpod.net') || str_contains($whisperxUrl, 'https://');
 
-            // Try path-based first (shared filesystem), fall back to file upload (remote)
-            // lite=1: skip diarization/gender/emotion for chunks (just transcribe + align)
-            $audioRel = str_replace(Storage::disk('local')->path(''), '', $audioPath);
-            $response = Http::timeout(120)->post("{$whisperxUrl}/analyze", [
-                'audio_path' => $audioRel,
-                'lite' => 1,
-            ]);
-
-            // If path-based fails (404 = file not found on remote), try file upload
-            if ($response->status() === 404 && file_exists($audioPath)) {
-                Log::info('WhisperX path not found, using file upload', [
-                    'audio_path' => $audioRel,
-                ]);
+            if ($isRemote) {
+                // Remote (RunPod): always use file upload
                 $response = Http::timeout(180)
                     ->attach('audio', file_get_contents($audioPath), basename($audioPath))
                     ->post("{$whisperxUrl}/analyze-upload", [
                         'lite' => 1,
                     ]);
+            } else {
+                // Local (Docker): use path-based, fall back to upload
+                $audioRel = str_replace(Storage::disk('local')->path(''), '', $audioPath);
+                $response = Http::timeout(120)->post("{$whisperxUrl}/analyze", [
+                    'audio_path' => $audioRel,
+                    'lite' => 1,
+                ]);
+
+                if ($response->status() === 404 && file_exists($audioPath)) {
+                    $response = Http::timeout(180)
+                        ->attach('audio', file_get_contents($audioPath), basename($audioPath))
+                        ->post("{$whisperxUrl}/analyze-upload", [
+                            'lite' => 1,
+                        ]);
+                }
             }
 
             if ($response->failed()) {
