@@ -2,8 +2,7 @@
 
 namespace App\Http\Controllers;
 
-use App\Jobs\DownloadVideoFromUrlJob;
-use App\Jobs\ExtractAudioJob;
+use App\Jobs\StartChunkProcessingJob;
 use App\Models\Video;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -115,11 +114,11 @@ class OnlineDubController extends Controller
             'target_language' => $request->target_language,
         ]);
 
-        ExtractAudioJob::dispatch($video->id);
+        StartChunkProcessingJob::dispatch($video->id);
 
         return response()->json([
             'ok' => true,
-            'redirect' => route('dub.progress', $video),
+            'redirect' => route('stream.player', $video),
         ]);
     }
 
@@ -132,7 +131,7 @@ class OnlineDubController extends Controller
             ->first();
 
         if ($existing) {
-            return redirect()->route('dub.progress', $existing);
+            return redirect()->route('stream.player', $existing);
         }
 
         $video = Video::create([
@@ -147,13 +146,18 @@ class OnlineDubController extends Controller
             'target_language' => $targetLanguage,
         ]);
 
-        DownloadVideoFromUrlJob::dispatch($video->id);
+        StartChunkProcessingJob::dispatch($video->id);
 
-        return redirect()->route('dub.progress', $video);
+        return redirect()->route('stream.player', $video);
     }
 
     public function progress(Video $video)
     {
+        // Chunk-based videos should use the streaming player
+        if (in_array($video->status, ['processing_chunks', 'combining_chunks'])) {
+            return redirect()->route('stream.player', $video);
+        }
+
         $ready = in_array($video->status, ['dubbed_complete', 'lipsync_done', 'done']);
         $failed = in_array($video->status, ['failed', 'download_failed']);
 
@@ -164,6 +168,8 @@ class OnlineDubController extends Controller
             'uploaded' => [10, 'Downloaded'],
             'audio_extracted' => [20, 'Extracting audio'],
             'stems_separated' => [30, 'Separating audio tracks'],
+            'processing_chunks' => [40, 'Processing chunks'],
+            'combining_chunks' => [85, 'Combining chunks'],
             'transcribed' => [40, 'Transcribed'],
             'translated' => [55, 'Translated'],
             'tts_generated' => [70, 'Voice generated'],
