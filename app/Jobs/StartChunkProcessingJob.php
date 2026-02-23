@@ -9,6 +9,7 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Facades\Storage;
@@ -78,9 +79,18 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
             throw new \RuntimeException('Could not determine video duration');
         }
 
-        $video->update(['duration' => $duration]);
+        $video->update(['duration' => $duration, 'status' => 'processing_chunks']);
 
-        $this->dispatchChunks($video, $duration);
+        $chunks = $this->calculateChunks($duration);
+
+        Log::info('Starting batched transcription + chunk dispatch', [
+            'video_id' => $video->id,
+            'duration' => $duration,
+            'total_chunks' => count($chunks),
+        ]);
+
+        // Batched WhisperX transcription + progressive chunk dispatch
+        $this->transcribeAndDispatchBatched($video, $videoPath, $duration, $chunks);
 
         // Start stem separation in background (extract audio + Demucs)
         $this->extractFullAudio($video);
@@ -124,6 +134,7 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
             'stream_url' => $streamUrls['video'],
             'stream_audio_url' => $streamUrls['audio'],
             'duration' => $duration,
+            'status' => 'processing_chunks',
         ]);
 
         Log::info('Stream URLs resolved', [
@@ -132,8 +143,17 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
             'duration' => $duration,
         ]);
 
-        // Step 4: Dispatch chunks immediately (they'll stream from CDN)
-        $this->dispatchChunks($video, $duration);
+        // Step 4: Batched WhisperX transcription + progressive chunk dispatch
+        $chunks = $this->calculateChunks($duration);
+        $audioSource = $streamUrls['audio'] ?? $streamUrls['video'];
+
+        Log::info('Starting batched transcription + chunk dispatch', [
+            'video_id' => $video->id,
+            'duration' => $duration,
+            'total_chunks' => count($chunks),
+        ]);
+
+        $this->transcribeAndDispatchBatched($video, $audioSource, $duration, $chunks);
 
         // Step 5: Start full download in background for stem separation
         BackgroundDownloadJob::dispatch($video->id)->onQueue('default');
@@ -221,6 +241,273 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
         Log::info('All chunk jobs dispatched', [
             'video_id' => $video->id,
             'total_chunks' => count($chunks),
+        ]);
+    }
+
+    /**
+     * Transcribe audio in WhisperX batches and progressively dispatch chunk jobs.
+     *
+     * Short videos (< 10 min): single batch = full audio.
+     * Long videos: ~120s batches to stay within RunPod proxy timeout.
+     * After each batch, segments are split by chunk boundaries and written as JSONs,
+     * then chunk jobs are dispatched so TTS processing starts while next batch transcribes.
+     */
+    private function transcribeAndDispatchBatched(Video $video, string $source, float $duration, array $chunks): void
+    {
+        $whisperxBatchDuration = 120.0;
+        $isShortVideo = $duration <= 600; // < 10 min
+
+        $chunkDir = "videos/chunks/{$video->id}";
+        Storage::disk('local')->makeDirectory($chunkDir);
+        Storage::disk('local')->makeDirectory('audio/stt');
+
+        // Calculate WhisperX batches
+        $batches = [];
+        if ($isShortVideo) {
+            $batches[] = ['start' => 0.0, 'duration' => $duration];
+        } else {
+            $batchStart = 0.0;
+            while ($batchStart < $duration) {
+                $batchDur = min($whisperxBatchDuration, $duration - $batchStart);
+                $batches[] = ['start' => $batchStart, 'duration' => $batchDur];
+                $batchStart += $whisperxBatchDuration;
+            }
+        }
+
+        Log::info('Batched transcription starting', [
+            'video_id' => $video->id,
+            'duration' => $duration,
+            'batches' => count($batches),
+            'chunks' => count($chunks),
+        ]);
+
+        $transcriptionStart = microtime(true);
+
+        foreach ($batches as $batchIndex => $batch) {
+            $batchStart = $batch['start'];
+            $batchDuration = $batch['duration'];
+            $batchEnd = $batchStart + $batchDuration;
+
+            // Extract STT audio for this batch
+            $audioPath = Storage::disk('local')->path("audio/stt/{$video->id}_batch_{$batchIndex}.wav");
+
+            $extracted = $this->extractAudioSegment($source, $batchStart, $batchDuration, $audioPath);
+            if (!$extracted) {
+                Log::warning('Failed to extract batch audio, chunks will fall back to per-chunk transcription', [
+                    'video_id' => $video->id,
+                    'batch' => $batchIndex,
+                ]);
+                $this->dispatchChunksInRange($video, $chunks, $batchStart, $batchEnd);
+                continue;
+            }
+
+            // Call WhisperX
+            $transcription = $this->callWhisperX($audioPath, $batchDuration);
+            @unlink($audioPath);
+
+            if (empty($transcription['segments'])) {
+                Log::info('No speech in batch, dispatching chunks without pre-transcription', [
+                    'video_id' => $video->id,
+                    'batch' => $batchIndex,
+                    'batch_start' => $batchStart,
+                ]);
+                $this->dispatchChunksInRange($video, $chunks, $batchStart, $batchEnd);
+                continue;
+            }
+
+            Log::info('WhisperX batch transcription result', [
+                'video_id' => $video->id,
+                'batch' => $batchIndex,
+                'batch_start' => $batchStart,
+                'segments' => count($transcription['segments']),
+                'speakers' => count($transcription['speaker_meta']),
+            ]);
+
+            // Split segments by chunk boundaries and write JSONs
+            $this->splitSegmentsByChunks(
+                $video,
+                $transcription['segments'],
+                $transcription['speaker_meta'],
+                $chunks,
+                $batchStart,
+                $batchEnd
+            );
+
+            // Dispatch chunks in this batch's range (progressive — TTS starts while next batch transcribes)
+            $this->dispatchChunksInRange($video, $chunks, $batchStart, $batchEnd);
+        }
+
+        $elapsed = round(microtime(true) - $transcriptionStart, 1);
+        Log::info('Batched transcription complete', [
+            'video_id' => $video->id,
+            'batches' => count($batches),
+            'elapsed_seconds' => $elapsed,
+        ]);
+    }
+
+    /**
+     * Extract mono 16kHz audio segment for WhisperX transcription.
+     */
+    private function extractAudioSegment(string $source, float $start, float $duration, string $outputPath): bool
+    {
+        $result = Process::timeout(120)->run([
+            'ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
+            '-ss', (string)$start,
+            '-i', $source,
+            '-t', (string)$duration,
+            '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le',
+            $outputPath,
+        ]);
+
+        return $result->successful() && file_exists($outputPath) && filesize($outputPath) > 1000;
+    }
+
+    /**
+     * Call WhisperX service with an audio file (replicates ProcessVideoChunkJob logic).
+     *
+     * @return array{segments: array, speaker_meta: array}
+     */
+    private function callWhisperX(string $audioPath, float $audioDuration): array
+    {
+        try {
+            $whisperxUrl = config('services.whisperx.url', 'http://whisperx:8000');
+            $isRemote = str_contains($whisperxUrl, 'runpod.net') || str_contains($whisperxUrl, 'https://');
+
+            $extraParams = ['lite' => 1];
+            if ($audioDuration > 60) {
+                $extraParams['min_speakers'] = 2;
+            }
+
+            if ($isRemote) {
+                $response = Http::timeout(300)
+                    ->attach('audio', file_get_contents($audioPath), basename($audioPath))
+                    ->post("{$whisperxUrl}/analyze-upload", $extraParams);
+            } else {
+                $audioRel = str_replace(Storage::disk('local')->path(''), '', $audioPath);
+                $response = Http::timeout(300)->post("{$whisperxUrl}/analyze", array_merge(
+                    ['audio_path' => $audioRel],
+                    $extraParams
+                ));
+
+                if ($response->status() === 404 && file_exists($audioPath)) {
+                    $response = Http::timeout(300)
+                        ->attach('audio', file_get_contents($audioPath), basename($audioPath))
+                        ->post("{$whisperxUrl}/analyze-upload", $extraParams);
+                }
+            }
+
+            if ($response->failed()) {
+                Log::warning('WhisperX batch request failed', [
+                    'status' => $response->status(),
+                    'body' => mb_substr($response->body(), 0, 500),
+                ]);
+                return ['segments' => [], 'speaker_meta' => []];
+            }
+
+            if ($response->json('error')) {
+                Log::warning('WhisperX batch returned error', [
+                    'error' => $response->json('error'),
+                    'message' => $response->json('message'),
+                ]);
+                return ['segments' => [], 'speaker_meta' => []];
+            }
+
+            $segments = $response->json()['segments'] ?? [];
+            $speakerMeta = $response->json()['speakers'] ?? [];
+
+            $parsedSegments = collect($segments)
+                ->map(fn($seg) => [
+                    'start' => (float)($seg['start'] ?? 0),
+                    'end' => (float)($seg['end'] ?? 0),
+                    'text' => trim($seg['text'] ?? ''),
+                    'speaker' => $seg['speaker'] ?? 'SPEAKER_00',
+                    'emotion' => $seg['emotion'] ?? null,
+                    'emotion_confidence' => $seg['emotion_confidence'] ?? null,
+                ])
+                ->filter(fn($s) => !empty($s['text']) && $s['end'] > $s['start'])
+                ->values()
+                ->all();
+
+            return ['segments' => $parsedSegments, 'speaker_meta' => $speakerMeta];
+
+        } catch (\Exception $e) {
+            Log::error('WhisperX batch transcription exception', ['error' => $e->getMessage()]);
+            return ['segments' => [], 'speaker_meta' => []];
+        }
+    }
+
+    /**
+     * Split WhisperX segments by chunk boundaries and write per-chunk JSON files.
+     * Segment timestamps from WhisperX are batch-relative (0 to batchDuration).
+     * They are converted to chunk-local timestamps in the output JSONs.
+     */
+    private function splitSegmentsByChunks(Video $video, array $segments, array $speakerMeta, array $chunks, float $batchStart, float $batchEnd): void
+    {
+        $chunkDir = "videos/chunks/{$video->id}";
+
+        foreach ($chunks as $index => $chunk) {
+            $chunkStart = $chunk['start'];
+            $chunkEnd = $chunk['end'];
+
+            // Skip chunks outside this batch's range
+            if ($chunkEnd <= $batchStart || $chunkStart >= $batchEnd) {
+                continue;
+            }
+
+            // Find segments that overlap with this chunk
+            $chunkSegments = [];
+            foreach ($segments as $seg) {
+                // Convert batch-relative timestamps to global video time
+                $segGlobalStart = $batchStart + $seg['start'];
+                $segGlobalEnd = $batchStart + $seg['end'];
+
+                // Check overlap with chunk
+                if ($segGlobalEnd <= $chunkStart || $segGlobalStart >= $chunkEnd) {
+                    continue;
+                }
+
+                // Convert to chunk-local timestamps
+                $chunkSegments[] = [
+                    'start' => round(max(0, $segGlobalStart - $chunkStart), 3),
+                    'end' => round(min($chunkEnd - $chunkStart, $segGlobalEnd - $chunkStart), 3),
+                    'text' => $seg['text'],
+                    'speaker' => $seg['speaker'],
+                    'emotion' => $seg['emotion'] ?? null,
+                    'emotion_confidence' => $seg['emotion_confidence'] ?? null,
+                ];
+            }
+
+            // Write JSON for this chunk (even if empty — signals "no speech" vs "not transcribed")
+            $jsonPath = "{$chunkDir}/transcription_{$index}.json";
+            Storage::disk('local')->put($jsonPath, json_encode([
+                'segments' => $chunkSegments,
+                'speaker_meta' => $speakerMeta,
+            ], JSON_UNESCAPED_UNICODE));
+        }
+    }
+
+    /**
+     * Dispatch ProcessVideoChunkJob for chunks whose start falls within [rangeStart, rangeEnd).
+     */
+    private function dispatchChunksInRange(Video $video, array $chunks, float $rangeStart, float $rangeEnd): void
+    {
+        $dispatched = 0;
+        foreach ($chunks as $index => $chunk) {
+            if ($chunk['start'] >= $rangeStart && $chunk['start'] < $rangeEnd) {
+                ProcessVideoChunkJob::dispatch(
+                    $video->id,
+                    $index,
+                    $chunk['start'],
+                    $chunk['end']
+                )->onQueue('chunks');
+                $dispatched++;
+            }
+        }
+
+        Log::info('Chunk jobs dispatched for batch range', [
+            'video_id' => $video->id,
+            'range' => "{$rangeStart}-{$rangeEnd}",
+            'dispatched' => $dispatched,
         ]);
     }
 

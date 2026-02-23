@@ -556,6 +556,22 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
      */
     private function transcribe(string $audioPath): array
     {
+        // Check for pre-transcribed data from batched WhisperX (written by StartChunkProcessingJob)
+        $jsonPath = "videos/chunks/{$this->videoId}/transcription_{$this->chunkIndex}.json";
+        if (Storage::disk('local')->exists($jsonPath)) {
+            $data = json_decode(Storage::disk('local')->get($jsonPath), true);
+            if (!empty($data['segments'])) {
+                Log::info('Using pre-transcribed data', [
+                    'chunk' => $this->chunkIndex,
+                    'segments' => count($data['segments']),
+                ]);
+                Storage::disk('local')->delete($jsonPath);
+                return ['segments' => $data['segments'], 'speaker_meta' => $data['speaker_meta'] ?? []];
+            }
+            // JSON exists but empty segments — clean up and continue to detect silence properly
+            Storage::disk('local')->delete($jsonPath);
+        }
+
         $result = $this->transcribeWhisperX($audioPath);
         if (!empty($result['segments'])) return $result;
 
