@@ -208,30 +208,14 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
             'total_chunks' => count($chunks),
         ]);
 
-        // Dispatch first chunk with HIGH priority (no delay)
-        if (!empty($chunks)) {
-            ProcessVideoChunkJob::dispatch(
-                $video->id,
-                0,
-                $chunks[0]['start'],
-                $chunks[0]['end']
-            )->onQueue('chunks');
-
-            Log::info('First chunk dispatched immediately', ['video_id' => $video->id]);
-        }
-
-        // Dispatch remaining chunks with staggered delays
+        // Dispatch ALL chunks immediately for parallel processing
         foreach ($chunks as $index => $chunk) {
-            if ($index === 0) continue;
-
-            $delay = $index <= 3 ? $index * 2 : 5;
-
             ProcessVideoChunkJob::dispatch(
                 $video->id,
                 $index,
                 $chunk['start'],
                 $chunk['end']
-            )->onQueue('chunks')->delay(now()->addSeconds($delay));
+            )->onQueue('chunks');
         }
 
         Log::info('All chunk jobs dispatched', [
