@@ -669,10 +669,10 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
             $prevDuration = $prev['end'] - $prev['start'];
             $sameSpeaker = $seg['speaker'] === $prev['speaker'];
 
-            // Break on: different speaker, pause > 0.5s, or segment already > 5s long
+            // Break on: different speaker, significant pause > 0.8s, or segment already > 6s long
             $shouldBreak = !$sameSpeaker
-                || $gap > 0.5
-                || $prevDuration > 5.0;
+                || $gap > 0.8
+                || $prevDuration > 6.0;
 
             if ($shouldBreak) {
                 $merged[] = $seg;
