@@ -579,9 +579,11 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
             $whisperxUrl = config('services.whisperx.url', 'http://whisperx:8000');
 
             // Try path-based first (shared filesystem), fall back to file upload (remote)
+            // lite=1: skip diarization/gender/emotion for chunks (just transcribe + align)
             $audioRel = str_replace(Storage::disk('local')->path(''), '', $audioPath);
             $response = Http::timeout(120)->post("{$whisperxUrl}/analyze", [
                 'audio_path' => $audioRel,
+                'lite' => 1,
             ]);
 
             // If path-based fails (404 = file not found on remote), try file upload
@@ -591,7 +593,9 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
                 ]);
                 $response = Http::timeout(180)
                     ->attach('audio', file_get_contents($audioPath), basename($audioPath))
-                    ->post("{$whisperxUrl}/analyze-upload");
+                    ->post("{$whisperxUrl}/analyze-upload", [
+                        'lite' => 1,
+                    ]);
             }
 
             if ($response->failed()) {

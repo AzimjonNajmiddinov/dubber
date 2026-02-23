@@ -20,6 +20,7 @@ import torch
 
 # Heavy imports are kept, but model construction is lazy.
 from faster_whisper import WhisperModel
+import whisperx
 from whisperx.diarize import DiarizationPipeline
 from transformers import AutoFeatureExtractor, Wav2Vec2ForSequenceClassification
 from speechbrain.inference.classifiers import EncoderClassifier
@@ -66,6 +67,9 @@ _state_lock = threading.Lock()
 
 _whisper_model: Optional[WhisperModel] = None
 _diarize_pipeline: Optional[DiarizationPipeline] = None
+_align_model: Optional[Any] = None
+_align_metadata: Optional[Dict] = None
+_align_language: Optional[str] = None
 
 _gender_ok: bool = False
 _gender_extractor: Optional[Any] = None
@@ -80,6 +84,7 @@ class AnalyzeRequest(BaseModel):
     audio_path: str
     min_speakers: Optional[int] = None
     max_speakers: Optional[int] = None
+    lite: Optional[int] = None
 
 
 # ---------------- HELPERS ----------------
@@ -202,6 +207,30 @@ def get_diarize_pipeline() -> Optional[DiarizationPipeline]:
     return _diarize_pipeline
 
 
+def get_align_model(language_code: str):
+    """Lazy-load whisperx alignment model. Reloads if language changes."""
+    global _align_model, _align_metadata, _align_language
+    if _align_model is not None and _align_language == language_code:
+        return _align_model, _align_metadata
+    with _state_lock:
+        if _align_model is not None and _align_language == language_code:
+            return _align_model, _align_metadata
+        try:
+            print(f"[ALIGN] Loading alignment model for '{language_code}' on {DEVICE}", flush=True)
+            _align_model, _align_metadata = whisperx.load_align_model(
+                language_code=language_code,
+                device=DEVICE,
+            )
+            _align_language = language_code
+            print(f"[ALIGN] Model loaded successfully", flush=True)
+        except Exception as e:
+            print(f"[ALIGN] Failed to load alignment model: {e}", flush=True)
+            _align_model = None
+            _align_metadata = None
+            _align_language = None
+    return _align_model, _align_metadata
+
+
 def init_gender_model_if_needed() -> Tuple[bool, Optional[str]]:
     global _gender_ok, _gender_extractor, _gender_model
     if not ENABLE_GENDER:
@@ -318,8 +347,9 @@ def predict_emotion(tmp_wav_path: str):
         return "neutral", None
 
 
-# Optional: prevent concurrent heavy work (useful for CPU + limited RAM)
-_analyze_lock = threading.Lock()
+# Semaphore allows 2 concurrent GPU operations on RTX 3090 (24GB VRAM).
+# Models are shared singletons; only per-request tensors use extra VRAM (~1-2GB each).
+_analyze_semaphore = threading.Semaphore(2)
 
 
 @app.get("/health")
@@ -332,6 +362,8 @@ def health():
         "enable_gender": ENABLE_GENDER,
         "enable_emotion": ENABLE_EMOTION,
         "whisper_loaded": _whisper_model is not None,
+        "align_loaded": _align_model is not None,
+        "align_language": _align_language,
         "diarize_loaded": _diarize_pipeline is not None,
         "gender_loaded": _gender_ok,
         "emotion_loaded": _emotion_ok,
@@ -397,10 +429,37 @@ def _analyze_audio(audio_path: str, min_speakers: Optional[int] = None, max_spea
         for s in whisper_segments
     ]
 
-    # 2) DIARIZE (optional - gracefully degrade if unavailable)
+    # 2) ALIGN — fix segment timestamps using whisperx forced alignment
+    language = getattr(info, "language", "en") or "en"
+    if segments:
+        try:
+            align_model, align_metadata = get_align_model(language)
+            if align_model is not None:
+                audio_array = whisperx.load_audio(audio_path)
+                aligned = whisperx.align(
+                    segments, align_model, align_metadata, audio_array, DEVICE,
+                )
+                aligned_segs = aligned.get("segments", [])
+                if aligned_segs:
+                    segments = [
+                        {"start": float(s["start"]), "end": float(s["end"]), "text": s.get("text", "").strip()}
+                        for s in aligned_segs
+                        if s.get("text", "").strip()
+                    ]
+                    print(f"[ALIGN] Aligned {len(aligned_segs)} segments", flush=True)
+                else:
+                    print("[ALIGN] Alignment returned empty, keeping raw timestamps", flush=True)
+            else:
+                print("[ALIGN] Alignment model not available, keeping raw timestamps", flush=True)
+        except Exception as e:
+            print(f"[ALIGN] Alignment failed: {e}, keeping raw timestamps", flush=True)
+            traceback.print_exc()
+
+    # 3) DIARIZE (optional - gracefully degrade if unavailable)
+    # In lite mode: skip diarization entirely for speed (chunks are short, usually 1 speaker)
     diar_rows = []
     diarization_status = "disabled"  # Track what actually happened
-    if ENABLE_DIARIZATION:
+    if ENABLE_DIARIZATION and not lite:
         try:
             diarize = get_diarize_pipeline()
             if diarize is not None:
@@ -563,10 +622,11 @@ def _analyze_audio(audio_path: str, min_speakers: Optional[int] = None, max_spea
 @app.post("/analyze")
 def analyze(req: AnalyzeRequest):
     """Analyze audio by file path (requires shared filesystem)."""
-    with _analyze_lock:
+    with _analyze_semaphore:
         try:
             audio_path = resolve_audio_path(req.audio_path)
-            return _analyze_audio(audio_path, min_speakers=req.min_speakers, max_speakers=req.max_speakers)
+            is_lite = bool(req.lite)
+            return _analyze_audio(audio_path, min_speakers=req.min_speakers, max_speakers=req.max_speakers, lite=is_lite)
         except HTTPException:
             raise
         except Exception as e:
@@ -582,7 +642,7 @@ def analyze_upload(
     lite: Optional[int] = Form(None),
 ):
     """Analyze audio via file upload (for remote clients without shared filesystem)."""
-    with _analyze_lock:
+    with _analyze_semaphore:
         tmp_path = None
         try:
             # Save uploaded file to temp location
