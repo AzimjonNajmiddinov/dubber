@@ -636,13 +636,8 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
                 ->values()
                 ->all();
 
-            // Merge word-level micro-segments into sentence-level segments
-            $rawCount = count($parsedSegments);
-            $parsedSegments = $this->mergeWhisperXSegments($parsedSegments);
-
             Log::info('WhisperX transcription result', [
-                'raw_segments' => $rawCount,
-                'merged_segments' => count($parsedSegments),
+                'segments' => count($parsedSegments),
                 'speakers' => count($speakerMeta),
             ]);
 
@@ -652,43 +647,6 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
             Log::error('WhisperX transcription exception', ['error' => $e->getMessage()]);
             return ['segments' => [], 'speaker_meta' => []];
         }
-    }
-
-    /**
-     * Merge consecutive micro-segments (word-level) into sentence-level segments.
-     * WhisperX alignment produces word-level fragments; merge them back to natural sentences.
-     */
-    private function mergeWhisperXSegments(array $segments): array
-    {
-        if (count($segments) <= 1) {
-            return $segments;
-        }
-
-        $merged = [$segments[0]];
-
-        for ($i = 1; $i < count($segments); $i++) {
-            $seg = $segments[$i];
-            $prev = &$merged[count($merged) - 1];
-
-            $gap = $seg['start'] - $prev['end'];
-            $prevDuration = $prev['end'] - $prev['start'];
-            $sameSpeaker = $seg['speaker'] === $prev['speaker'];
-
-            // Break on: different speaker, significant pause > 0.8s, or segment already > 6s long
-            $shouldBreak = !$sameSpeaker
-                || $gap > 0.8
-                || $prevDuration > 6.0;
-
-            if ($shouldBreak) {
-                $merged[] = $seg;
-            } else {
-                $prev['end'] = $seg['end'];
-                $prev['text'] = trim($prev['text']) . ' ' . trim($seg['text']);
-            }
-            unset($prev);
-        }
-
-        return array_values($merged);
     }
 
     private function transcribeOpenAI(string $audioPath): string
