@@ -1486,7 +1486,13 @@ Output ONLY the numbered lines, no explanations.',
         exec($cmd, $output, $code);
 
         if ($code !== 0 || !file_exists($finalPath)) {
-            Log::error('Final audio creation failed', ['chunk' => $this->chunkIndex, 'code' => $code]);
+            Log::error('Final audio creation failed', [
+                'chunk' => $this->chunkIndex,
+                'code' => $code,
+                'tts_count' => count($positionedTts),
+                'ffmpeg_error' => implode("\n", array_slice($output, -5)),
+                'cmd_length' => strlen($cmd),
+            ]);
             return null;
         }
 
@@ -1556,7 +1562,7 @@ Output ONLY the numbered lines, no explanations.',
             @unlink($silentBase);
 
             if ($code !== 0 || !file_exists($batchFile)) {
-                Log::error('Batch mix failed', ['chunk' => $this->chunkIndex, 'batch' => $batchIdx, 'code' => $code]);
+                Log::error('Batch mix failed', ['chunk' => $this->chunkIndex, 'batch' => $batchIdx, 'code' => $code, 'ffmpeg_error' => implode("\n", array_slice($output, -5))]);
                 continue;
             }
 
@@ -1599,7 +1605,7 @@ Output ONLY the numbered lines, no explanations.',
         }
 
         if ($code !== 0 || !file_exists($finalPath)) {
-            Log::error('Final batch audio creation failed', ['chunk' => $this->chunkIndex, 'code' => $code]);
+            Log::error('Final batch audio creation failed', ['chunk' => $this->chunkIndex, 'code' => $code, 'ffmpeg_error' => implode("\n", array_slice($output, -5))]);
             return null;
         }
 
