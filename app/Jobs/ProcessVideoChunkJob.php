@@ -667,13 +667,12 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
 
             $gap = $seg['start'] - $prev['end'];
             $prevDuration = $prev['end'] - $prev['start'];
-            $prevWordCount = str_word_count($prev['text']);
             $sameSpeaker = $seg['speaker'] === $prev['speaker'];
 
-            // Break conditions: different speaker, large gap, or long enough segment with sentence ending
+            // Break on: different speaker, pause > 0.5s, or segment already > 5s long
             $shouldBreak = !$sameSpeaker
-                || $gap > 1.0
-                || ($gap > 0.4 && $prevDuration > 2.0 && $prevWordCount >= 5 && preg_match('/[.!?]$/', rtrim($prev['text'])));
+                || $gap > 0.5
+                || $prevDuration > 5.0;
 
             if ($shouldBreak) {
                 $merged[] = $seg;
