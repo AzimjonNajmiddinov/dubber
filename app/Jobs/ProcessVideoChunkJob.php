@@ -651,9 +651,9 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
 
     /**
      * Merge consecutive micro-segments (word-level) into sentence-level segments.
-     * Same logic as _merge_segments() in whisperx-service/app.py.
+     * WhisperX alignment produces word-level fragments; merge them back to natural sentences.
      */
-    private function mergeWhisperXSegments(array $segments, float $maxGap = 0.3): array
+    private function mergeWhisperXSegments(array $segments): array
     {
         if (count($segments) <= 1) {
             return $segments;
@@ -666,15 +666,20 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
             $prev = &$merged[count($merged) - 1];
 
             $gap = $seg['start'] - $prev['end'];
-            $prevText = rtrim($prev['text']);
-            $endsSentence = (bool) preg_match('/[.!?。]$/', $prevText);
+            $prevDuration = $prev['end'] - $prev['start'];
+            $prevWordCount = str_word_count($prev['text']);
+            $sameSpeaker = $seg['speaker'] === $prev['speaker'];
 
-            // Same speaker, small gap, doesn't end a sentence → merge
-            if ($gap <= $maxGap && !$endsSentence && $seg['speaker'] === $prev['speaker']) {
-                $prev['end'] = $seg['end'];
-                $prev['text'] = $prev['text'] . ' ' . $seg['text'];
-            } else {
+            // Break conditions: different speaker, large gap, or long enough segment with sentence ending
+            $shouldBreak = !$sameSpeaker
+                || $gap > 1.0
+                || ($gap > 0.4 && $prevDuration > 2.0 && $prevWordCount >= 5 && preg_match('/[.!?]$/', rtrim($prev['text'])));
+
+            if ($shouldBreak) {
                 $merged[] = $seg;
+            } else {
+                $prev['end'] = $seg['end'];
+                $prev['text'] = trim($prev['text']) . ' ' . trim($seg['text']);
             }
             unset($prev);
         }
