@@ -680,13 +680,14 @@ class TranscribeWithWhisperXJob implements ShouldQueue, ShouldBeUnique
     }
 
     /**
-     * Merge speakers that are acoustically similar (same person split by pyannote).
+     * Merge minor speakers into the dominant speaker.
      *
-     * Uses pitch proximity: if two speakers' median pitch is within 40Hz,
-     * they're likely the same person. The one with fewer segments gets merged
-     * into the one with more.
+     * Rules (always merge INTO the speaker with most segments):
+     * 1. Pitch similarity: if two speakers are within 40Hz, merge the smaller
+     * 2. Minor speakers: anyone with <25% of total segments gets merged into dominant
      *
-     * Also merges speakers with no pitch data and fewer than 5 segments.
+     * The dominant speaker (most segments) is NEVER merged away — its gender
+     * and voice properties are always preserved.
      */
     private function mergeMinorSpeakers(int $videoId): void
     {
@@ -706,47 +707,27 @@ class TranscribeWithWhisperXJob implements ShouldQueue, ShouldBeUnique
 
         if ($totalSegments === 0) return;
 
-        // Sort speakers by segment count (dominant first)
+        // Sort by segment count descending — dominant is always first
         $sorted = $speakers->sortByDesc(fn($s) => $counts[$s->id])->values();
+        $dominant = $sorted->first();
 
         $merged = [];
         $deleted = [];
 
-        // Pass 1: Merge speakers with unrealistic pitch (< 75Hz = likely music/rumble)
-        foreach ($sorted as $speaker) {
-            if (in_array($speaker->id, $deleted)) continue;
-
-            $pitch = $speaker->pitch_median_hz;
-            if ($pitch && $pitch < 75) {
-                $dominant = $sorted->first(fn($s) => !in_array($s->id, $deleted) && $s->id !== $speaker->id && (!$s->pitch_median_hz || $s->pitch_median_hz >= 75));
-                if ($dominant) {
-                    $this->mergeSpeaker($videoId, $speaker, $dominant, $counts);
-                    $merged[] = [
-                        'from' => $speaker->label,
-                        'into' => $dominant->label,
-                        'reason' => "unrealistic_pitch ({$pitch}Hz < 75Hz, likely background noise)",
-                        'segments_moved' => $counts[$speaker->id],
-                    ];
-                    $deleted[] = $speaker->id;
-                }
-            }
-        }
-
-        // Pass 2: Pitch-based merge — similar pitch = same person
+        // Pass 1: Pitch-based merge — similar pitch = same person split by pyannote
+        // Always merge the smaller speaker into the larger one
         foreach ($sorted as $i => $speakerA) {
             if (in_array($speakerA->id, $deleted)) continue;
 
             foreach ($sorted as $j => $speakerB) {
-                if ($j <= $i) continue;
+                if ($j <= $i) continue; // B always has fewer segments than A
                 if (in_array($speakerB->id, $deleted)) continue;
 
                 $pitchA = $speakerA->pitch_median_hz;
                 $pitchB = $speakerB->pitch_median_hz;
 
-                // Both have pitch data — compare
                 if ($pitchA && $pitchB) {
                     $diff = abs($pitchA - $pitchB);
-                    // Within 40Hz = same person (male voice ~85-180Hz, female ~165-255Hz)
                     if ($diff < 40) {
                         $this->mergeSpeaker($videoId, $speakerB, $speakerA, $counts);
                         $merged[] = [
@@ -761,26 +742,24 @@ class TranscribeWithWhisperXJob implements ShouldQueue, ShouldBeUnique
             }
         }
 
-        // Pass 3: Merge orphan speakers (no pitch, few segments)
+        // Pass 2: Merge minor speakers (<15% of total) into dominant
+        // These are likely background noise, music, or pyannote artifacts
         foreach ($sorted as $speaker) {
             if (in_array($speaker->id, $deleted)) continue;
+            if ($speaker->id === $dominant->id) continue; // never merge dominant
 
             $count = $counts[$speaker->id];
             $pct = ($count / $totalSegments) * 100;
 
-            // No pitch data = likely noise/music/background picked up as speaker
-            if (!$speaker->pitch_median_hz && $pct < 20) {
-                $dominant = $sorted->first(fn($s) => !in_array($s->id, $deleted) && $s->id !== $speaker->id);
-                if ($dominant) {
-                    $this->mergeSpeaker($videoId, $speaker, $dominant, $counts);
-                    $merged[] = [
-                        'from' => $speaker->label,
-                        'into' => $dominant->label,
-                        'reason' => "no_pitch_data, only {$count} segments ({$pct}%)",
-                        'segments_moved' => $count,
-                    ];
-                    $deleted[] = $speaker->id;
-                }
+            if ($pct < 25) {
+                $this->mergeSpeaker($videoId, $speaker, $dominant, $counts);
+                $merged[] = [
+                    'from' => $speaker->label,
+                    'into' => $dominant->label,
+                    'reason' => "minor_speaker ({$count} segments, {$pct}%)",
+                    'segments_moved' => $count,
+                ];
+                $deleted[] = $speaker->id;
             }
         }
 
@@ -790,6 +769,7 @@ class TranscribeWithWhisperXJob implements ShouldQueue, ShouldBeUnique
                 'video_id' => $videoId,
                 'original_count' => $speakers->count(),
                 'final_count' => $remaining,
+                'dominant' => $dominant->label . ' (' . $dominant->gender . ', ' . ($dominant->pitch_median_hz ? round($dominant->pitch_median_hz) . 'Hz' : 'no pitch') . ')',
                 'merges' => $merged,
             ]);
         }
