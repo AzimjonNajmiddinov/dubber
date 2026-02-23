@@ -631,8 +631,13 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
                 ->values()
                 ->all();
 
+            // Merge word-level micro-segments into sentence-level segments
+            $rawCount = count($parsedSegments);
+            $parsedSegments = $this->mergeWhisperXSegments($parsedSegments);
+
             Log::info('WhisperX transcription result', [
-                'segments' => count($parsedSegments),
+                'raw_segments' => $rawCount,
+                'merged_segments' => count($parsedSegments),
                 'speakers' => count($speakerMeta),
             ]);
 
@@ -642,6 +647,39 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
             Log::error('WhisperX transcription exception', ['error' => $e->getMessage()]);
             return ['segments' => [], 'speaker_meta' => []];
         }
+    }
+
+    /**
+     * Merge consecutive micro-segments (word-level) into sentence-level segments.
+     * Same logic as _merge_segments() in whisperx-service/app.py.
+     */
+    private function mergeWhisperXSegments(array $segments, float $maxGap = 0.3): array
+    {
+        if (count($segments) <= 1) {
+            return $segments;
+        }
+
+        $merged = [$segments[0]];
+
+        for ($i = 1; $i < count($segments); $i++) {
+            $seg = $segments[$i];
+            $prev = &$merged[count($merged) - 1];
+
+            $gap = $seg['start'] - $prev['end'];
+            $prevText = rtrim($prev['text']);
+            $endsSentence = (bool) preg_match('/[.!?。]$/', $prevText);
+
+            // Same speaker, small gap, doesn't end a sentence → merge
+            if ($gap <= $maxGap && !$endsSentence && $seg['speaker'] === $prev['speaker']) {
+                $prev['end'] = $seg['end'];
+                $prev['text'] = $prev['text'] . ' ' . $seg['text'];
+            } else {
+                $merged[] = $seg;
+            }
+            unset($prev);
+        }
+
+        return array_values($merged);
     }
 
     private function transcribeOpenAI(string $audioPath): string
