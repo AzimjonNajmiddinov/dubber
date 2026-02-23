@@ -38,13 +38,13 @@ class EdgeTtsDriver implements TtsDriverInterface
      */
     protected array $voiceProfiles = [
         ['pitch_offset' => 0,   'name' => 'default'],
-        ['pitch_offset' => -30, 'name' => 'deep'],
-        ['pitch_offset' => 25,  'name' => 'bright'],
-        ['pitch_offset' => -50, 'name' => 'bass'],
-        ['pitch_offset' => 40,  'name' => 'thin'],
-        ['pitch_offset' => -15, 'name' => 'warm'],
-        ['pitch_offset' => 15,  'name' => 'light'],
-        ['pitch_offset' => -8,  'name' => 'mellow'],
+        ['pitch_offset' => -20, 'name' => 'deep'],
+        ['pitch_offset' => 15,  'name' => 'bright'],
+        ['pitch_offset' => -30, 'name' => 'bass'],
+        ['pitch_offset' => 25,  'name' => 'thin'],
+        ['pitch_offset' => -10, 'name' => 'warm'],
+        ['pitch_offset' => 10,  'name' => 'light'],
+        ['pitch_offset' => -5,  'name' => 'mellow'],
     ];
 
     /**

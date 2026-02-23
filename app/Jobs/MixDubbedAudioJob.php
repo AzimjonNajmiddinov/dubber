@@ -203,11 +203,14 @@ class MixDubbedAudioJob implements ShouldQueue, ShouldBeUnique
 
                 $filters = "aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo";
 
+                // Fade-in for smooth segment start (100ms)
+                $filters .= ",afade=t=in:st=0:d=0.1";
+
                 // Hard-trim TTS audio so it cannot bleed into the next segment
                 if ($maxDuration !== null && $maxDuration > 0.1) {
-                    $fadeStart = max(0, $maxDuration - 0.05);
+                    $fadeStart = max(0, $maxDuration - 0.1);
                     $filters .= ",atrim=end=" . number_format($maxDuration, 3, '.', '');
-                    $filters .= ",afade=t=out:st=" . number_format($fadeStart, 3, '.', '') . ":d=0.05";
+                    $filters .= ",afade=t=out:st=" . number_format($fadeStart, 3, '.', '') . ":d=0.1";
                 }
 
                 $filters .= ",adelay={$delayMs}|{$delayMs}";

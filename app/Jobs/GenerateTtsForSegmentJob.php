@@ -188,9 +188,9 @@ class GenerateTtsForSegmentJob implements ShouldQueue
         if ($audioDuration <= 0) return;
 
         $ratio = $audioDuration / $slotDuration;
-        if ($ratio >= 0.95 && $ratio <= 1.05) return;
+        if ($ratio >= 0.88 && $ratio <= 1.12) return; // 12% tolerance — avoid unnecessary tempo changes
 
-        $tempoFactor = min(1.8, max(0.8, $ratio));
+        $tempoFactor = min(1.5, max(0.85, $ratio)); // Max 1.5x to keep speech intelligible
 
         Log::info('TTS tempo fitting', [
             'path' => basename($audioPath),

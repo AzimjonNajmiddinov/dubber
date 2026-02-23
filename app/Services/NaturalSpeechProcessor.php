@@ -56,13 +56,11 @@ class NaturalSpeechProcessor
         // 4. Add subtle warmth (very gentle low-mid boost)
         $filters[] = 'equalizer=f=200:t=q:w=1:g=1';
 
-        // 5. De-esser: tame harsh sibilants (sh/s/ch) in 4-9kHz range
-        // Dip the sibilance band to reduce "tssss" artifacts from voice conversion
-        $filters[] = 'equalizer=f=6000:t=q:w=2:g=-4';
-        $filters[] = 'equalizer=f=8000:t=q:w=1:g=-3';
+        // 5. Light de-esser: gentle sibilance reduction only
+        $filters[] = 'equalizer=f=7000:t=q:w=2:g=-2';
 
-        // 6. Gentle high-frequency rolloff (natural voice characteristic)
-        $filters[] = 'lowpass=f=12000';
+        // 6. Gentle high-frequency rolloff (preserve brightness up to 14kHz)
+        $filters[] = 'lowpass=f=14000';
 
         // Build filter chain
         $filterChain = implode(',', array_filter($filters));
