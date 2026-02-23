@@ -419,6 +419,35 @@ def debug_diarize_check():
     return result
 
 
+def _merge_segments(segments: list, max_gap: float = 0.3) -> list:
+    """Merge consecutive micro-segments with small gaps into sentence-level segments.
+
+    whisperx.align() can split a single sentence into word-level fragments,
+    producing 80+ segments for 10s of audio. This merges them back into
+    natural sentence boundaries based on gaps and punctuation.
+    """
+    if not segments:
+        return segments
+
+    merged = [dict(segments[0])]
+
+    for seg in segments[1:]:
+        prev = merged[-1]
+        gap = seg["start"] - prev["end"]
+
+        # Merge if gap is small AND previous text doesn't end with sentence-ending punctuation
+        prev_ends_sentence = prev["text"].rstrip().endswith(('.', '!', '?', '。'))
+
+        if gap <= max_gap and not prev_ends_sentence:
+            # Extend previous segment
+            prev["end"] = seg["end"]
+            prev["text"] = prev["text"] + " " + seg["text"]
+        else:
+            merged.append(dict(seg))
+
+    return merged
+
+
 def _analyze_audio(audio_path: str, min_speakers: Optional[int] = None, max_speakers: Optional[int] = None, lite: bool = False) -> dict:
     """Core analysis logic shared by path-based and upload endpoints."""
     # 1) TRANSCRIBE
@@ -441,12 +470,16 @@ def _analyze_audio(audio_path: str, min_speakers: Optional[int] = None, max_spea
                 )
                 aligned_segs = aligned.get("segments", [])
                 if aligned_segs:
-                    segments = [
+                    raw_aligned = [
                         {"start": float(s["start"]), "end": float(s["end"]), "text": s.get("text", "").strip()}
                         for s in aligned_segs
                         if s.get("text", "").strip()
                     ]
-                    print(f"[ALIGN] Aligned {len(aligned_segs)} segments", flush=True)
+                    # Merge micro-segments: whisperx.align() can split sentences into
+                    # word-level fragments (80+ segments for 10s). Merge consecutive
+                    # segments with gaps < 0.3s into sentence-level segments.
+                    segments = _merge_segments(raw_aligned, max_gap=0.3)
+                    print(f"[ALIGN] Aligned {len(aligned_segs)} -> merged to {len(segments)} segments", flush=True)
                 else:
                     print("[ALIGN] Alignment returned empty, keeping raw timestamps", flush=True)
             else:

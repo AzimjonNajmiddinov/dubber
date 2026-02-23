@@ -1430,7 +1430,27 @@ Output ONLY the numbered lines, no explanations.',
             $currentPosition = $startPosition + min($actualDuration, $allowedDuration) + $gapBetweenSegments;
         }
 
-        // Build ffmpeg command
+        // FFmpeg amix crashes with too many inputs (>20).
+        // For large sets, mix in batches of 15, then combine batches with background.
+        $maxPerBatch = 15;
+
+        if (count($positionedTts) <= $maxPerBatch) {
+            // Small set: single-pass mix (original behavior)
+            $result = $this->mixAudioSinglePass($bgTrack, $positionedTts, $finalPath, $duration);
+        } else {
+            // Large set: batch mix to avoid FFmpeg overflow
+            $result = $this->mixAudioBatched($bgTrack, $positionedTts, $finalPath, $outputDir, $duration, $maxPerBatch);
+        }
+
+        @unlink($bgTrack);
+        return $result;
+    }
+
+    /**
+     * Mix background + TTS in a single FFmpeg call (up to ~15 TTS inputs).
+     */
+    private function mixAudioSinglePass(string $bgTrack, array $positionedTts, string $finalPath, float $duration): ?string
+    {
         $inputs = ["-i " . escapeshellarg($bgTrack)];
         $filterParts = ["[0:a]anull[bg]"];
         $overlayInputs = ['[bg]'];
@@ -1464,7 +1484,6 @@ Output ONLY the numbered lines, no explanations.',
             escapeshellarg($finalPath) . " 2>&1";
 
         exec($cmd, $output, $code);
-        @unlink($bgTrack);
 
         if ($code !== 0 || !file_exists($finalPath)) {
             Log::error('Final audio creation failed', ['chunk' => $this->chunkIndex, 'code' => $code]);
@@ -1474,9 +1493,128 @@ Output ONLY the numbered lines, no explanations.',
         return $finalPath;
     }
 
+    /**
+     * Mix many TTS files in batches to avoid FFmpeg amix overflow.
+     * 1) Mix each batch of N TTS files into an intermediate voice track
+     * 2) Mix all intermediate tracks + background into final output
+     */
+    private function mixAudioBatched(string $bgTrack, array $positionedTts, string $finalPath, string $outputDir, float $duration, int $batchSize): ?string
+    {
+        $batches = array_chunk($positionedTts, $batchSize);
+        $batchFiles = [];
+
+        Log::info('Batch mixing TTS', [
+            'chunk' => $this->chunkIndex,
+            'total_tts' => count($positionedTts),
+            'batches' => count($batches),
+        ]);
+
+        foreach ($batches as $batchIdx => $batch) {
+            $batchFile = "{$outputDir}/voice_batch_{$this->chunkIndex}_{$batchIdx}.wav";
+
+            // Create a silent base for this batch
+            $silentBase = "{$outputDir}/silent_base_{$this->chunkIndex}_{$batchIdx}.wav";
+            Process::timeout(10)->run([
+                'ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
+                '-f', 'lavfi', '-i', "anullsrc=r=44100:cl=stereo",
+                '-t', (string)$duration,
+                '-c:a', 'pcm_s16le',
+                $silentBase,
+            ]);
+
+            $inputs = ["-i " . escapeshellarg($silentBase)];
+            $filterParts = ["[0:a]anull[base]"];
+            $overlayInputs = ['[base]'];
+
+            foreach ($batch as $i => $tts) {
+                $inputs[] = "-i " . escapeshellarg($tts['path']);
+                $inputIdx = $i + 1;
+                $delayMs = (int)($tts['start'] * 1000);
+
+                $ttsFilter = "[{$inputIdx}:a]";
+                if ($tts['needs_trim']) {
+                    $trimDur = $tts['trim_duration'];
+                    $fadeStart = max(0, $trimDur - 0.3);
+                    $ttsFilter .= "atrim=0:{$trimDur},afade=t=out:st={$fadeStart}:d=0.3,";
+                }
+                $ttsFilter .= "adelay={$delayMs}|{$delayMs},volume=1.2[v{$i}]";
+                $filterParts[] = $ttsFilter;
+                $overlayInputs[] = "[v{$i}]";
+            }
+
+            $inputCount = count($overlayInputs);
+            $filterParts[] = implode('', $overlayInputs) . "amix=inputs={$inputCount}:duration=longest:dropout_transition=0:normalize=0[out]";
+            $filterComplex = implode(';', $filterParts);
+
+            $cmd = "ffmpeg -y -hide_banner -loglevel error " .
+                implode(' ', $inputs) .
+                " -filter_complex \"{$filterComplex}\" -map \"[out]\" " .
+                "-ar 44100 -ac 2 -c:a pcm_s16le " .
+                escapeshellarg($batchFile) . " 2>&1";
+
+            exec($cmd, $output, $code);
+            @unlink($silentBase);
+
+            if ($code !== 0 || !file_exists($batchFile)) {
+                Log::error('Batch mix failed', ['chunk' => $this->chunkIndex, 'batch' => $batchIdx, 'code' => $code]);
+                continue;
+            }
+
+            $batchFiles[] = $batchFile;
+        }
+
+        if (empty($batchFiles)) {
+            Log::error('All batch mixes failed', ['chunk' => $this->chunkIndex]);
+            return null;
+        }
+
+        // Final mix: background + all voice batch tracks
+        $inputs = ["-i " . escapeshellarg($bgTrack)];
+        $filterParts = ["[0:a]anull[bg]"];
+        $overlayInputs = ['[bg]'];
+
+        foreach ($batchFiles as $i => $batchFile) {
+            $inputs[] = "-i " . escapeshellarg($batchFile);
+            $inputIdx = $i + 1;
+            $filterParts[] = "[{$inputIdx}:a]anull[b{$i}]";
+            $overlayInputs[] = "[b{$i}]";
+        }
+
+        $inputCount = count($overlayInputs);
+        $filterParts[] = implode('', $overlayInputs) . "amix=inputs={$inputCount}:duration=longest:dropout_transition=0:normalize=0[mixed]";
+        $filterParts[] = "[mixed]loudnorm=I=-16:TP=-1.5:LRA=11[out]";
+        $filterComplex = implode(';', $filterParts);
+
+        $cmd = "ffmpeg -y -hide_banner -loglevel error " .
+            implode(' ', $inputs) .
+            " -filter_complex \"{$filterComplex}\" -map \"[out]\" " .
+            "-ar 44100 -ac 2 -c:a pcm_s16le " .
+            escapeshellarg($finalPath) . " 2>&1";
+
+        exec($cmd, $output, $code);
+
+        // Cleanup batch files
+        foreach ($batchFiles as $f) {
+            @unlink($f);
+        }
+
+        if ($code !== 0 || !file_exists($finalPath)) {
+            Log::error('Final batch audio creation failed', ['chunk' => $this->chunkIndex, 'code' => $code]);
+            return null;
+        }
+
+        return $finalPath;
+    }
+
     private function createVideoChunk(string $videoPath, ?string $audioPath, string $outputPath, float $start, float $duration): void
     {
         $outputAbs = Storage::disk('local')->path($outputPath);
+
+        // Ensure output directory exists (guard against race conditions with concurrent chunks)
+        $outputDir = dirname($outputAbs);
+        if (!is_dir($outputDir)) {
+            @mkdir($outputDir, 0755, true);
+        }
 
         if ($audioPath && file_exists($audioPath)) {
             $result = Process::timeout(120)->run([
