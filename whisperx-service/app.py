@@ -419,12 +419,12 @@ def debug_diarize_check():
     return result
 
 
-def _merge_segments(segments: list, max_gap: float = 0.3) -> list:
+def _merge_segments(segments: list, max_gap: float = 0.5) -> list:
     """Merge consecutive micro-segments with small gaps into sentence-level segments.
 
     whisperx.align() can split a single sentence into word-level fragments,
     producing 80+ segments for 10s of audio. This merges them back into
-    natural sentence boundaries based on gaps and punctuation.
+    natural sentence boundaries based on gap size and segment duration.
     """
     if not segments:
         return segments
@@ -434,16 +434,14 @@ def _merge_segments(segments: list, max_gap: float = 0.3) -> list:
     for seg in segments[1:]:
         prev = merged[-1]
         gap = seg["start"] - prev["end"]
+        prev_duration = prev["end"] - prev["start"]
 
-        # Merge if gap is small AND previous text doesn't end with sentence-ending punctuation
-        prev_ends_sentence = prev["text"].rstrip().endswith(('.', '!', '?', '。'))
-
-        if gap <= max_gap and not prev_ends_sentence:
-            # Extend previous segment
+        # Break on significant pause (>0.5s) or segment already long enough (>6s)
+        if gap > max_gap or prev_duration > 6.0:
+            merged.append(dict(seg))
+        else:
             prev["end"] = seg["end"]
             prev["text"] = prev["text"] + " " + seg["text"]
-        else:
-            merged.append(dict(seg))
 
     return merged
 
