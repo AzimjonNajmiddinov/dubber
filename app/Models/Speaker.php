@@ -79,6 +79,7 @@ class Speaker extends Model
     public function getVoiceIdForDriver(string $driver): ?string
     {
         return match ($driver) {
+            'uzbekvoice' => $this->tts_voice,
             'hybrid_uzbek' => $this->openvoice_speaker_key,
             'edge' => $this->tts_voice,
             default => null,

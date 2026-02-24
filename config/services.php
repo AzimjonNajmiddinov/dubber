@@ -49,4 +49,9 @@ return [
     'demucs' => [
         'url' => env('DEMUCS_SERVICE_URL', 'http://demucs:8000'),
     ],
+
+    'uzbekvoice' => [
+        'url' => env('UZBEKVOICE_API_URL', 'https://uzbekvoice.ai/api/v1'),
+        'api_key' => env('UZBEKVOICE_API_KEY', ''),
+    ],
 ];

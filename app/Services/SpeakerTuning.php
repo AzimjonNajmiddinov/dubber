@@ -50,8 +50,20 @@ class SpeakerTuning
         // Get speaker index for this video to assign different voices
         $speakerIndex = $this->getSpeakerIndex($video, $speaker, $gender);
 
-        // Voice pools by language and gender - different speakers get different voices
-        $voicePools = [
+        // Determine which TTS driver is active
+        $ttsDriver = config('dubber.tts.default', 'edge');
+
+        // Voice pools by driver, language and gender
+        // uzbekvoice: native Uzbek voices with emotion variants (base names only)
+        // edge/hybrid_uzbek: Microsoft Edge TTS neural voices
+        $uzbekvoicePools = [
+            'uz' => [
+                'male'   => ['davron', 'jahongir'],
+                'female' => ['dilfuza', 'fotima', 'shoira', 'lola'],
+            ],
+        ];
+
+        $edgePools = [
             'uz' => [
                 'male'   => ['uz-UZ-SardorNeural'],
                 'female' => ['uz-UZ-MadinaNeural'],
@@ -66,11 +78,14 @@ class SpeakerTuning
             ],
         ];
 
-        // Determine language pool
         $lang = $this->isUzbek($target) ? 'uz' : ($this->isRussian($target) ? 'ru' : 'en');
         $genderKey = ($gender === 'female') ? 'female' : 'male';
 
-        $voices = $voicePools[$lang][$genderKey] ?? $voicePools['en'][$genderKey];
+        if ($ttsDriver === 'uzbekvoice' && $lang === 'uz') {
+            $voices = $uzbekvoicePools['uz'][$genderKey];
+        } else {
+            $voices = $edgePools[$lang][$genderKey] ?? $edgePools['en'][$genderKey];
+        }
 
         // Assign voice by cycling through available voices for variety
         $speaker->tts_voice = $voices[$speakerIndex % count($voices)];

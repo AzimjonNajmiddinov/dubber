@@ -8,14 +8,15 @@ return [
     |--------------------------------------------------------------------------
     |
     | Configure which TTS engine to use for dubbing. Available drivers:
-    | - hybrid_uzbek: Edge TTS + EmotionDSP + OpenVoice voice conversion (active)
+    | - uzbekvoice: Native Uzbek voices via uzbekvoice.ai with emotion variants (default)
+    | - hybrid_uzbek: Edge TTS + EmotionDSP + OpenVoice voice conversion
     | - edge: Free Microsoft Edge TTS fallback (no voice cloning)
     |
     */
 
     'tts' => [
         // Default TTS driver to use
-        'default' => env('TTS_DRIVER', 'hybrid_uzbek'),
+        'default' => env('TTS_DRIVER', 'uzbekvoice'),
 
         // Fallback driver if primary fails
         'fallback' => env('TTS_FALLBACK', 'edge'),
