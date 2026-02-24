@@ -254,23 +254,22 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
      */
     private function transcribeAndDispatchBatched(Video $video, string $source, float $duration, array $chunks): void
     {
-        $whisperxBatchDuration = 120.0;
-        $isShortVideo = $duration <= 600; // < 10 min
+        $maxBatchDuration = 3600.0; // Split only if > 1 hour
 
         $chunkDir = "videos/chunks/{$video->id}";
         Storage::disk('local')->makeDirectory($chunkDir);
         Storage::disk('local')->makeDirectory('audio/stt');
 
-        // Calculate WhisperX batches
+        // Send full audio to WhisperX; split into 1-hour pieces only for very long videos
         $batches = [];
-        if ($isShortVideo) {
+        if ($duration <= $maxBatchDuration) {
             $batches[] = ['start' => 0.0, 'duration' => $duration];
         } else {
             $batchStart = 0.0;
             while ($batchStart < $duration) {
-                $batchDur = min($whisperxBatchDuration, $duration - $batchStart);
+                $batchDur = min($maxBatchDuration, $duration - $batchStart);
                 $batches[] = ['start' => $batchStart, 'duration' => $batchDur];
-                $batchStart += $whisperxBatchDuration;
+                $batchStart += $maxBatchDuration;
             }
         }
 
@@ -378,19 +377,22 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
                 $extraParams['min_speakers'] = 2;
             }
 
+            // Scale timeout: ~2x audio duration, min 300s, max 3600s
+            $timeout = (int) min(3600, max(300, $audioDuration * 2));
+
             if ($isRemote) {
-                $response = Http::timeout(300)
+                $response = Http::timeout($timeout)
                     ->attach('audio', file_get_contents($audioPath), basename($audioPath))
                     ->post("{$whisperxUrl}/analyze-upload", $extraParams);
             } else {
                 $audioRel = str_replace(Storage::disk('local')->path(''), '', $audioPath);
-                $response = Http::timeout(300)->post("{$whisperxUrl}/analyze", array_merge(
+                $response = Http::timeout($timeout)->post("{$whisperxUrl}/analyze", array_merge(
                     ['audio_path' => $audioRel],
                     $extraParams
                 ));
 
                 if ($response->status() === 404 && file_exists($audioPath)) {
-                    $response = Http::timeout(300)
+                    $response = Http::timeout($timeout)
                         ->attach('audio', file_get_contents($audioPath), basename($audioPath))
                         ->post("{$whisperxUrl}/analyze-upload", $extraParams);
                 }
