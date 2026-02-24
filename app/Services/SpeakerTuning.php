@@ -58,8 +58,8 @@ class SpeakerTuning
         // edge/hybrid_uzbek: Microsoft Edge TTS neural voices
         $uzbekvoicePools = [
             'uz' => [
-                'male'   => ['davron', 'jahongir'],
-                'female' => ['dilfuza', 'fotima', 'shoira', 'lola'],
+                'male'   => ['lola', 'shoira'],
+                'female' => ['lola', 'shoira'],
             ],
         ];
 

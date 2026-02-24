@@ -25,9 +25,11 @@ class UzbekVoiceDriver implements TtsDriverInterface
 
     /**
      * Voice pools by gender — cycled for multi-speaker variety.
+     * Using only confirmed-working models (lola, shoira).
+     * Pitch shifting provides speaker differentiation.
      */
-    protected array $maleVoices = ['davron', 'jahongir'];
-    protected array $femaleVoices = ['dilfuza', 'fotima', 'shoira', 'lola'];
+    protected array $maleVoices = ['lola', 'shoira'];
+    protected array $femaleVoices = ['lola', 'shoira'];
 
     /**
      * Pitch offsets in semitones for each "round" of voice reuse.
@@ -146,37 +148,71 @@ class UzbekVoiceDriver implements TtsDriverInterface
     }
 
     /**
-     * Call the uzbekvoice.ai TTS API with blocking=true and download the result WAV.
+     * Call the uzbekvoice.ai TTS API with blocking="true" and download the result WAV.
+     * Retries on rate limit (400) and server errors (500) with backoff.
      */
     protected function callApi(string $text, string $model, int $segmentId): string
     {
-        $response = Http::timeout(120)
-            ->withHeaders([
-                'Authorization' => "Bearer {$this->apiKey}",
-                'Accept' => 'application/json',
-            ])
-            ->post("{$this->apiUrl}/tts", [
-                'text' => $text,
-                'model' => $model,
-                'blocking' => true,
-            ]);
+        $maxRetries = 5;
+        $data = null;
 
-        if ($response->failed()) {
-            Log::error('UzbekVoice: API call failed', [
-                'segment_id' => $segmentId,
-                'model' => $model,
-                'status' => $response->status(),
-                'body' => mb_substr($response->body(), 0, 500),
-            ]);
-            throw new RuntimeException(
-                "UzbekVoice API failed for segment {$segmentId}: HTTP {$response->status()}"
-            );
-        }
+        for ($attempt = 1; $attempt <= $maxRetries; $attempt++) {
+            $response = Http::timeout(120)
+                ->withHeaders([
+                    'Authorization' => "Bearer {$this->apiKey}",
+                    'Accept' => 'application/json',
+                ])
+                ->post("{$this->apiUrl}/tts", [
+                    'text' => $text,
+                    'model' => $model,
+                    'blocking' => 'true',
+                ]);
 
-        $data = $response->json();
+            // Rate limit or server overload — back off and retry
+            if (in_array($response->status(), [400, 429, 500, 502, 503])) {
+                $body = $response->body();
+                $isRateLimit = str_contains($body, 'Too many') || str_contains($body, 'active requests');
 
-        if (($data['status'] ?? '') !== 'SUCCESS' || empty($data['result']['url'])) {
-            Log::error('UzbekVoice: unexpected API response', [
+                if ($attempt < $maxRetries && ($isRateLimit || $response->status() >= 500)) {
+                    $delay = $isRateLimit ? $attempt * 5 : $attempt * 3;
+                    Log::info("UzbekVoice: rate limited, retry {$attempt}/{$maxRetries} in {$delay}s", [
+                        'segment_id' => $segmentId,
+                        'status' => $response->status(),
+                    ]);
+                    sleep($delay);
+                    continue;
+                }
+            }
+
+            if ($response->failed()) {
+                Log::error('UzbekVoice: API call failed', [
+                    'segment_id' => $segmentId,
+                    'model' => $model,
+                    'status' => $response->status(),
+                    'body' => mb_substr($response->body(), 0, 500),
+                    'attempt' => $attempt,
+                ]);
+                throw new RuntimeException(
+                    "UzbekVoice API failed for segment {$segmentId}: HTTP {$response->status()}"
+                );
+            }
+
+            $data = $response->json();
+
+            if (($data['status'] ?? '') === 'SUCCESS' && !empty($data['result']['url'])) {
+                break;
+            }
+
+            // API returned non-SUCCESS (PENDING/STARTED) even with blocking — retry
+            if ($attempt < $maxRetries) {
+                Log::info("UzbekVoice: got {$data['status']}, retry {$attempt}/{$maxRetries}", [
+                    'segment_id' => $segmentId,
+                ]);
+                sleep($attempt * 2);
+                continue;
+            }
+
+            Log::error('UzbekVoice: unexpected API response after retries', [
                 'segment_id' => $segmentId,
                 'model' => $model,
                 'response' => mb_substr(json_encode($data), 0, 500),
@@ -264,7 +300,8 @@ class UzbekVoiceDriver implements TtsDriverInterface
      * Select the full model name with emotion variant.
      *
      * Maps detected emotion to available model variants.
-     * Falls back to neutral or base model when emotion isn't available.
+     * Falls back to base model name when emotion isn't available.
+     * Neutral emotion uses the base name (e.g. "davron", not "davron-neutral").
      */
     protected function selectModel(string $baseVoice, string $emotion): string
     {
@@ -294,7 +331,11 @@ class UzbekVoiceDriver implements TtsDriverInterface
             $mapped = 'neutral';
         }
 
-        // Neutral uses base name with -neutral suffix
+        // Neutral uses base model name (e.g. "davron"), non-neutral appends suffix (e.g. "davron-happy")
+        if ($mapped === 'neutral') {
+            return $baseVoice;
+        }
+
         return "{$baseVoice}-{$mapped}";
     }
 
