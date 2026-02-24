@@ -66,15 +66,15 @@ class EdgeTtsDriver implements TtsDriverInterface
         // Positive emotions
         'happy'    => ['rate' => '+5%',  'pitch' => '+0Hz', 'volume' => '+5%'],
         'excited'  => ['rate' => '+8%',  'pitch' => '+0Hz', 'volume' => '+8%'],
-        'tender'   => ['rate' => '-5%',  'pitch' => '+0Hz', 'volume' => '-10%'],
+        'tender'   => ['rate' => '+0%',  'pitch' => '+0Hz', 'volume' => '-10%'],
 
-        // Negative emotions
-        'sad'      => ['rate' => '-8%',  'pitch' => '+0Hz', 'volume' => '-5%'],
+        // Negative emotions — never slow down, express via volume only
+        'sad'      => ['rate' => '+0%',  'pitch' => '+0Hz', 'volume' => '-5%'],
         'angry'    => ['rate' => '+3%',  'pitch' => '+0Hz', 'volume' => '+10%'],
         'fear'     => ['rate' => '+5%',  'pitch' => '+0Hz', 'volume' => '-3%'],
         'anxious'  => ['rate' => '+3%',  'pitch' => '+0Hz', 'volume' => '-3%'],
-        'contempt' => ['rate' => '-3%',  'pitch' => '+0Hz', 'volume' => '+3%'],
-        'disgusted'=> ['rate' => '-2%',  'pitch' => '+0Hz', 'volume' => '+0%'],
+        'contempt' => ['rate' => '+0%',  'pitch' => '+0Hz', 'volume' => '+3%'],
+        'disgusted'=> ['rate' => '+0%',  'pitch' => '+0Hz', 'volume' => '+0%'],
 
         // Reactive emotions
         'surprise' => ['rate' => '+5%',  'pitch' => '+0Hz', 'volume' => '+5%'],
@@ -96,10 +96,10 @@ class EdgeTtsDriver implements TtsDriverInterface
      * Again, NO significant pitch changes to maintain speaker identity!
      */
     protected array $directionProsody = [
-        // Soft deliveries
-        'whisper'       => ['rate' => '-10%', 'pitch' => '+0Hz', 'volume' => '-35%'],
-        'soft'          => ['rate' => '-5%',  'pitch' => '+0Hz', 'volume' => '-15%'],
-        'breathy'       => ['rate' => '-8%',  'pitch' => '+0Hz', 'volume' => '-20%'],
+        // Soft deliveries — express via volume only, never slow down
+        'whisper'       => ['rate' => '+0%',  'pitch' => '+0Hz', 'volume' => '-35%'],
+        'soft'          => ['rate' => '+0%',  'pitch' => '+0Hz', 'volume' => '-15%'],
+        'breathy'       => ['rate' => '+0%',  'pitch' => '+0Hz', 'volume' => '-20%'],
 
         // Standard
         'normal'        => ['rate' => '+0%',  'pitch' => '+0Hz', 'volume' => '+0%'],
@@ -108,20 +108,20 @@ class EdgeTtsDriver implements TtsDriverInterface
         'loud'          => ['rate' => '+3%',  'pitch' => '+0Hz', 'volume' => '+15%'],
         'shout'         => ['rate' => '+5%',  'pitch' => '+0Hz', 'volume' => '+25%'],
 
-        // Controlled/tense deliveries
-        'tense'         => ['rate' => '-3%',  'pitch' => '+0Hz', 'volume' => '+5%'],
-        'trembling'     => ['rate' => '-5%',  'pitch' => '+0Hz', 'volume' => '-5%'],
-        'strained'      => ['rate' => '-5%',  'pitch' => '+0Hz', 'volume' => '+8%'],
+        // Controlled/tense deliveries — express via volume only
+        'tense'         => ['rate' => '+0%',  'pitch' => '+0Hz', 'volume' => '+5%'],
+        'trembling'     => ['rate' => '+0%',  'pitch' => '+0Hz', 'volume' => '-5%'],
+        'strained'      => ['rate' => '+0%',  'pitch' => '+0Hz', 'volume' => '+8%'],
 
         // Emotional deliveries
         'pleading'      => ['rate' => '+5%',  'pitch' => '+0Hz', 'volume' => '-5%'],
-        'matter_of_fact'=> ['rate' => '-2%',  'pitch' => '+0Hz', 'volume' => '-3%'],
+        'matter_of_fact'=> ['rate' => '+0%',  'pitch' => '+0Hz', 'volume' => '-3%'],
 
-        // Legacy mappings (for backwards compatibility)
-        'sarcastic'     => ['rate' => '-3%',  'pitch' => '+0Hz', 'volume' => '+0%'],
+        // Legacy mappings
+        'sarcastic'     => ['rate' => '+0%',  'pitch' => '+0Hz', 'volume' => '+0%'],
         'playful'       => ['rate' => '+5%',  'pitch' => '+0Hz', 'volume' => '+3%'],
-        'cold'          => ['rate' => '-5%',  'pitch' => '+0Hz', 'volume' => '-3%'],
-        'warm'          => ['rate' => '-3%',  'pitch' => '+0Hz', 'volume' => '+3%'],
+        'cold'          => ['rate' => '+0%',  'pitch' => '+0Hz', 'volume' => '-3%'],
+        'warm'          => ['rate' => '+0%',  'pitch' => '+0Hz', 'volume' => '+3%'],
     ];
 
     public function name(): string
@@ -188,9 +188,9 @@ class EdgeTtsDriver implements TtsDriverInterface
         $directionRate = (int) round($this->parsePercentage($directionProsody['rate']) * 0.6);
 
         // Combine: speaker baseline + emotion variation
-        // Clamped to ±15% (speaker base can use wider range than emotion alone)
-        $finalRate = min(15, max(-15, $speakerBaseRate + $emotionRate + $directionRate));
-        $rate = $finalRate >= 0 ? "+{$finalRate}%" : "{$finalRate}%";
+        // Clamped to 0-15% — never slow down, only speed up when needed
+        $finalRate = min(15, max(0, $speakerBaseRate + $emotionRate + $directionRate));
+        $rate = "+{$finalRate}%";
 
         Log::debug('TTS speaker rate', [
             'segment_id' => $segment->id,

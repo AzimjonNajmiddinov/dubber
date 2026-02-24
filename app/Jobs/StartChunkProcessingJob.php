@@ -454,21 +454,21 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
                 continue;
             }
 
-            // Find segments that overlap with this chunk
+            // Find segments whose start falls within this chunk (no overlaps — each segment belongs to exactly one chunk)
             $chunkSegments = [];
             foreach ($segments as $seg) {
                 // Convert batch-relative timestamps to global video time
                 $segGlobalStart = $batchStart + $seg['start'];
                 $segGlobalEnd = $batchStart + $seg['end'];
 
-                // Check overlap with chunk
-                if ($segGlobalEnd <= $chunkStart || $segGlobalStart >= $chunkEnd) {
+                // Assign segment to chunk containing its start time only
+                if ($segGlobalStart < $chunkStart || $segGlobalStart >= $chunkEnd) {
                     continue;
                 }
 
-                // Convert to chunk-local timestamps
+                // Convert to chunk-local timestamps (end may extend beyond chunk — TTS will handle)
                 $chunkSegments[] = [
-                    'start' => round(max(0, $segGlobalStart - $chunkStart), 3),
+                    'start' => round($segGlobalStart - $chunkStart, 3),
                     'end' => round(min($chunkEnd - $chunkStart, $segGlobalEnd - $chunkStart), 3),
                     'text' => $seg['text'],
                     'speaker' => $seg['speaker'],

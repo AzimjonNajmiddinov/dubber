@@ -58,7 +58,7 @@ class ProcessVideoChunkJob implements ShouldQueue, ShouldBeUnique
     ];
 
     private const PITCH_VARIATIONS = ['+0Hz', '-3Hz', '+4Hz', '-2Hz', '+2Hz', '-4Hz'];
-    private const RATE_VARIATIONS = ['+0%', '-5%', '+5%', '-3%', '+3%'];
+    private const RATE_VARIATIONS = ['+0%', '+0%', '+0%', '+0%', '+0%'];
 
     public function __construct(
         public int $videoId,
@@ -1101,22 +1101,36 @@ Output ONLY the numbered lines, no explanations.',
         $pitch = self::PITCH_VARIATIONS[$existingCount % count(self::PITCH_VARIATIONS)];
         $rate = self::RATE_VARIATIONS[$existingCount % count(self::RATE_VARIATIONS)];
 
-        return Speaker::firstOrCreate(
-            ['video_id' => $video->id, 'external_key' => $speakerKey],
-            array_filter([
-                'label' => 'Speaker ' . ($num + 1),
-                'gender' => $gender,
-                'gender_confidence' => $whisperxMeta['gender_confidence'] ?? null,
-                'emotion' => $whisperxMeta['emotion'] ?? 'neutral',
-                'emotion_confidence' => $whisperxMeta['emotion_confidence'] ?? null,
-                'pitch_median_hz' => $whisperxMeta['pitch_median_hz'] ?? null,
-                'age_group' => $whisperxMeta['age_group'] ?? 'unknown',
-                'tts_voice' => $voice,
-                'tts_pitch' => $pitch,
-                'tts_rate' => $rate,
-                'tts_driver' => 'edge',
-            ], fn($v) => $v !== null)
-        );
+        try {
+            return Speaker::firstOrCreate(
+                ['video_id' => $video->id, 'external_key' => $speakerKey],
+                array_filter([
+                    'label' => 'Speaker ' . ($num + 1),
+                    'gender' => $gender,
+                    'gender_confidence' => $whisperxMeta['gender_confidence'] ?? null,
+                    'emotion' => $whisperxMeta['emotion'] ?? 'neutral',
+                    'emotion_confidence' => $whisperxMeta['emotion_confidence'] ?? null,
+                    'pitch_median_hz' => $whisperxMeta['pitch_median_hz'] ?? null,
+                    'age_group' => $whisperxMeta['age_group'] ?? 'unknown',
+                    'tts_voice' => $voice,
+                    'tts_pitch' => $pitch,
+                    'tts_rate' => $rate,
+                    'tts_driver' => 'edge',
+                ], fn($v) => $v !== null)
+            );
+        } catch (\Illuminate\Database\QueryException $e) {
+            // Label uniqueness conflict (SPEAKER_0 vs SPEAKER_00 both map to "Speaker 1")
+            // Fall back to finding existing speaker by label or external_key
+            return Speaker::where('video_id', $video->id)
+                ->where(fn($q) => $q->where('external_key', $speakerKey)->orWhere('label', 'Speaker ' . ($num + 1)))
+                ->first()
+                ?? Speaker::firstOrCreate(
+                    ['video_id' => $video->id, 'label' => 'Speaker ' . ($num + 1)],
+                    ['external_key' => $speakerKey, 'gender' => $gender, 'emotion' => 'neutral',
+                     'age_group' => 'unknown', 'tts_voice' => $voice, 'tts_pitch' => $pitch,
+                     'tts_rate' => $rate, 'tts_driver' => 'edge']
+                );
+        }
     }
 
     /**
@@ -1676,14 +1690,32 @@ Output ONLY the numbered lines, no explanations.',
     private function saveSegments(Video $video, array $segments): void
     {
         foreach ($segments as $seg) {
+            $globalStart = $this->startTime + $seg['start'];
+            $globalEnd = $this->startTime + $seg['end'];
+
+            // Dedup: skip if a segment with same text already exists within 2s window
+            $duplicate = VideoSegment::where('video_id', $video->id)
+                ->where('text', $seg['text'])
+                ->whereBetween('start_time', [$globalStart - 2.0, $globalStart + 2.0])
+                ->exists();
+
+            if ($duplicate) {
+                Log::debug('Skipping duplicate segment', [
+                    'chunk' => $this->chunkIndex,
+                    'start' => $globalStart,
+                    'text' => mb_substr($seg['text'], 0, 50),
+                ]);
+                continue;
+            }
+
             VideoSegment::updateOrCreate(
                 [
                     'video_id' => $video->id,
-                    'start_time' => $this->startTime + $seg['start'],
+                    'start_time' => $globalStart,
                 ],
                 [
                     'speaker_id' => $seg['speaker']->id,
-                    'end_time' => $this->startTime + $seg['end'],
+                    'end_time' => $globalEnd,
                     'text' => $seg['text'],
                     'translated_text' => $seg['translated'],
                     'tts_audio_path' => "videos/chunks/{$video->id}/seg_{$this->chunkIndex}.mp4",
