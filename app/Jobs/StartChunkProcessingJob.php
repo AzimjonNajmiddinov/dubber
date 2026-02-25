@@ -198,7 +198,11 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
      */
     private function transcribeAndSaveSegments(Video $video, string $source, float $duration): int
     {
-        $maxBatchDuration = 3600.0; // Split only if > 1 hour
+        // RunPod proxy has ~100s timeout. WhisperX+diarization on GPU takes ~60-90s
+        // per 120s of audio. Keep batches ≤120s for remote, full audio for local.
+        $whisperxUrl = config('services.whisperx.url', 'http://whisperx:8000');
+        $isRemote = str_contains($whisperxUrl, 'runpod.net') || str_contains($whisperxUrl, 'https://');
+        $maxBatchDuration = $isRemote ? 120.0 : 3600.0;
 
         Storage::disk('local')->makeDirectory('audio/stt');
 
@@ -373,7 +377,8 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
         preg_match('/(\d+)/', $speakerKey, $matches);
         $num = (int)($matches[1] ?? 0);
 
-        $gender = $whisperxMeta['gender'] ?? ($num % 2 === 0 ? 'male' : 'female');
+        $metaGender = $whisperxMeta['gender'] ?? 'unknown';
+        $gender = ($metaGender !== 'unknown') ? $metaGender : ($num % 2 === 0 ? 'male' : 'female');
 
         $lang = strtolower($video->target_language);
         $ttsDriver = config('dubber.tts.default', 'edge');
