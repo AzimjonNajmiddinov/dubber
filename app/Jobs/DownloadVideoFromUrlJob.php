@@ -95,7 +95,13 @@ class DownloadVideoFromUrlJob implements ShouldQueue, ShouldBeUnique
             return;
         }
 
-        // Strategy 4: Direct HTTP download (for direct video URLs)
+        // Strategy 4: ffmpeg for DASH/HLS streams (.mpd, .m3u8 URLs)
+        if ($this->tryFfmpegStream($url, $absolutePath)) {
+            $this->finalizeDownload($video, $relativePath, $absolutePath);
+            return;
+        }
+
+        // Strategy 5: Direct HTTP download (for direct video URLs)
         if ($this->tryDirectDownload($url, $absolutePath)) {
             $this->finalizeDownload($video, $relativePath, $absolutePath);
             return;
@@ -333,6 +339,41 @@ class DownloadVideoFromUrlJob implements ShouldQueue, ShouldBeUnique
         }
 
         return null;
+    }
+
+    private function tryFfmpegStream(string $url, string $outputPath): bool
+    {
+        if (!str_contains($url, '.mpd') && !str_contains($url, '.m3u8')) {
+            return false;
+        }
+
+        Log::info('Attempting ffmpeg stream download', ['url' => $url]);
+
+        @unlink($outputPath);
+
+        $result = Process::timeout(3600)->run([
+            'ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
+            '-i', $url,
+            '-c', 'copy',
+            '-movflags', '+faststart',
+            $outputPath,
+        ]);
+
+        if ($result->successful() && file_exists($outputPath) && filesize($outputPath) > 10000) {
+            Log::info('ffmpeg stream download successful', [
+                'url' => $url,
+                'size' => filesize($outputPath),
+            ]);
+            return true;
+        }
+
+        Log::warning('ffmpeg stream download failed', [
+            'url' => $url,
+            'exit_code' => $result->exitCode(),
+            'stderr' => mb_substr($result->errorOutput(), 0, 500),
+        ]);
+
+        return false;
     }
 
     private function tryDirectDownload(string $url, string $outputPath): bool

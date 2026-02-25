@@ -51,8 +51,8 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
 
     private const VOICES_UZBEKVOICE = [
         'uz' => [
-            'male' => ['lola', 'shoira'],
-            'female' => ['lola', 'shoira'],
+            'male' => ['uz-UZ-SardorNeural'],
+            'female' => ['uz-UZ-MadinaNeural'],
         ],
     ];
 
@@ -334,24 +334,14 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
     {
         $segmentIds = $video->segments()->pluck('id');
         $dispatched = 0;
-        $ttsDriver = config('dubber.tts.default', 'uzbekvoice');
-
-        // Stagger dispatches for API-based drivers to avoid rate limits.
-        // UzbekVoice API allows limited concurrent requests — delay jobs by 3s each.
-        $delaySeconds = ($ttsDriver === 'uzbekvoice') ? 3 : 0;
-
         foreach ($segmentIds as $segmentId) {
-            $job = ProcessSegmentTtsJob::dispatch($segmentId)->onQueue('chunks');
-            if ($delaySeconds > 0) {
-                $job->delay(now()->addSeconds($dispatched * $delaySeconds));
-            }
+            ProcessSegmentTtsJob::dispatch($segmentId)->onQueue('chunks');
             $dispatched++;
         }
 
         Log::info('Dispatched segment TTS jobs', [
             'video_id' => $video->id,
             'dispatched' => $dispatched,
-            'stagger_delay' => $delaySeconds,
         ]);
     }
 
@@ -386,7 +376,7 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
         $gender = $whisperxMeta['gender'] ?? ($num % 2 === 0 ? 'male' : 'female');
 
         $lang = strtolower($video->target_language);
-        $ttsDriver = config('dubber.tts.default', 'uzbekvoice');
+        $ttsDriver = config('dubber.tts.default', 'edge');
 
         // Select voice pool based on active TTS driver
         if ($ttsDriver === 'uzbekvoice' && isset(self::VOICES_UZBEKVOICE[$lang])) {
@@ -630,6 +620,7 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
         $url = $video->source_url;
         $isYouTube = str_contains($url, 'youtube.com') || str_contains($url, 'youtu.be');
         $isHLS = str_contains($url, '.m3u8');
+        $isDASH = str_contains($url, '.mpd');
 
         $downloaded = false;
         $lastError = '';
@@ -670,7 +661,8 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
 
                 $lastError = $result->errorOutput() ?: $result->output();
             }
-        } elseif ($isHLS) {
+        } elseif ($isHLS || $isDASH) {
+            // Try yt-dlp first for HLS/DASH streams
             $result = Process::timeout(1800)->run([
                 'yt-dlp',
                 '-f', 'bestvideo+bestaudio/best',
@@ -683,6 +675,24 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
                 $downloaded = true;
             } else {
                 $lastError = $result->errorOutput() ?: $result->output();
+
+                // Fallback: ffmpeg direct stream copy for DASH/HLS
+                Log::info('yt-dlp failed for stream URL, trying ffmpeg', ['url' => $url]);
+                @unlink($absolutePath);
+
+                $ffResult = Process::timeout(3600)->run([
+                    'ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
+                    '-i', $url,
+                    '-c', 'copy',
+                    '-movflags', '+faststart',
+                    $absolutePath,
+                ]);
+
+                if ($ffResult->successful() && file_exists($absolutePath) && filesize($absolutePath) > 10000) {
+                    $downloaded = true;
+                } else {
+                    $lastError = $ffResult->errorOutput() ?: $lastError;
+                }
             }
         } else {
             $result = Process::timeout(1800)->run([
