@@ -16,7 +16,7 @@ return [
 
     'tts' => [
         // Default TTS driver to use
-        'default' => env('TTS_DRIVER', 'uzbekvoice'),
+        'default' => env('TTS_DRIVER', 'edge'),
 
         // Fallback driver if primary fails
         'fallback' => env('TTS_FALLBACK', 'edge'),

@@ -6,8 +6,6 @@ use App\Models\Speaker;
 use App\Models\Video;
 use App\Models\VideoSegment;
 use App\Services\SpeakerTuning;
-use App\Services\TextNormalizer;
-use App\Services\TextToSpeech\NaturalSpeechProcessor;
 use App\Services\Tts\TtsManager;
 use App\Traits\DetectsEnglish;
 use Illuminate\Bus\Queueable;
@@ -19,7 +17,6 @@ use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Facades\Storage;
 
 /**
@@ -315,92 +312,33 @@ Output ONLY the numbered lines, no explanations.',
     }
 
     /**
-     * Generate TTS audio for a segment using the configured driver system.
-     *
-     * @return string|null Relative path to TTS audio file, or null on failure
+     * Generate TTS audio for a segment. Plain text → speech, no extra processing.
      */
     private function generateTts(VideoSegment $segment, Speaker $speaker, Video $video): ?string
     {
         $text = $segment->translated_text;
-        $emotion = $this->detectSegmentEmotion($segment, $speaker);
-        $targetDuration = (float) $segment->end_time - (float) $segment->start_time;
-
-        // Natural speech processing
-        $naturalSpeech = new NaturalSpeechProcessor();
-        $processedText = $naturalSpeech->process($text, $emotion);
-        $processedText = TextNormalizer::normalize($processedText, $video->target_language);
-
-        // Pre-calculate speed to fit time slot
-        $speed = $this->calculateSpeed($processedText, $targetDuration);
 
         $options = [
-            'emotion' => $emotion,
-            'speed' => $speed,
             'language' => $video->target_language ?? 'uz',
-            'gain_db' => (float) ($speaker->tts_gain_db ?? 0),
         ];
 
-        if ($speaker->voice_cloned && $speaker->openvoice_speaker_key) {
-            $options['voice_id'] = $speaker->openvoice_speaker_key;
-        }
-
         $ttsManager = app(TtsManager::class);
-        $fallbackDriverName = config('dubber.tts.fallback', 'edge');
+        $driverName = $speaker->getEffectiveTtsDriver() ?? config('dubber.tts.default', 'edge');
 
-        // Determine driver: cloned → hybrid_uzbek, otherwise configured default
-        $driverName = ($speaker->voice_cloned && $speaker->openvoice_speaker_key)
-            ? 'hybrid_uzbek'
-            : ($speaker->getEffectiveTtsDriver() ?? config('dubber.tts.default', 'uzbekvoice'));
-
-        $ttsPath = null;
-
-        // Try primary driver
         try {
-            if ($ttsManager->hasDriver($driverName)) {
-                $ttsPath = $ttsManager->driver($driverName)->synthesize(
-                    $processedText, $speaker, $segment, $options
-                );
-            }
+            $ttsPath = $ttsManager->driver($driverName)->synthesize(
+                $text, $speaker, $segment, $options
+            );
         } catch (\Throwable $e) {
-            Log::warning("TTS driver [{$driverName}] failed, trying fallback", [
-                'segment_id' => $segment->id,
+            Log::error("TTS failed for segment {$segment->id}", [
+                'driver' => $driverName,
                 'error' => $e->getMessage(),
             ]);
-            $ttsPath = null;
-        }
-
-        // Fallback driver
-        if (!$ttsPath || !file_exists($ttsPath)) {
-            try {
-                if ($ttsManager->hasDriver($fallbackDriverName)) {
-                    $ttsPath = $ttsManager->driver($fallbackDriverName)->synthesize(
-                        $processedText, $speaker, $segment, $options
-                    );
-                    $driverName = $fallbackDriverName;
-                }
-            } catch (\Throwable $e) {
-                Log::error("Fallback TTS also failed for segment {$segment->id}", [
-                    'error' => $e->getMessage(),
-                ]);
-                return null;
-            }
+            return null;
         }
 
         if (!$ttsPath || !file_exists($ttsPath)) {
             return null;
-        }
-
-        // Post-synthesis speed correction if audio exceeds slot
-        $ttsDuration = $this->getAudioDuration($ttsPath);
-        if ($ttsDuration > 0 && $targetDuration > 0 && $ttsDuration > $targetDuration * 1.1) {
-            $speedRatio = min($ttsDuration / $targetDuration, 1.5);
-            $adjustedPath = str_replace('.wav', '_adj.wav', $ttsPath);
-            $this->adjustTtsSpeed($ttsPath, $adjustedPath, $speedRatio);
-
-            if (file_exists($adjustedPath)) {
-                @unlink($ttsPath);
-                $ttsPath = $adjustedPath;
-            }
         }
 
         // Convert to relative path for DB storage
@@ -410,103 +348,10 @@ Output ONLY the numbered lines, no explanations.',
         Log::info('TTS generated', [
             'segment_id' => $segment->id,
             'driver' => $driverName,
-            'emotion' => $emotion,
-            'speed' => $speed,
             'path' => $relativePath,
         ]);
 
         return $relativePath;
-    }
-
-    private function detectSegmentEmotion(VideoSegment $segment, Speaker $speaker): string
-    {
-        // Priority 1: Per-segment emotion from WhisperX
-        if (!empty($segment->emotion) && $segment->emotion !== 'neutral') {
-            return $segment->emotion;
-        }
-
-        // Priority 2: Speaker-level emotion
-        if ($speaker->emotion && $speaker->emotion !== 'neutral'
-            && ($speaker->emotion_confidence ?? 0) > 0.5) {
-            return $speaker->emotion;
-        }
-
-        // Priority 3: Text-based heuristics
-        return $this->detectEmotionFromText($segment->text ?? '');
-    }
-
-    private function detectEmotionFromText(string $text): string
-    {
-        $t = mb_strtolower($text);
-
-        if (preg_match('/[!]{2,}|!!/', $text) ||
-            preg_match('/\b(angry|furious|mad|hate|damn|hell|stop|shut up|get out)\b/i', $t)) {
-            return 'angry';
-        }
-
-        if (preg_match('/[!]{1,}.*[!]|wow|yay|great|amazing|wonderful|fantastic|love|happy|glad|excited/i', $t)) {
-            return 'happy';
-        }
-
-        if (preg_match('/\?{2,}|what\?|really\?|seriously\?/i', $t)) {
-            return 'surprise';
-        }
-
-        if (preg_match('/\b(sad|sorry|miss|cry|tears|lost|gone|died|dead|unfortunately|regret)\b/i', $t)) {
-            return 'sad';
-        }
-
-        if (preg_match('/\b(afraid|scared|fear|danger|help|run|careful|watch out|oh no)\b/i', $t)) {
-            return 'fear';
-        }
-
-        if (substr_count($text, '!') >= 1) {
-            return 'excited';
-        }
-
-        return 'neutral';
-    }
-
-    private function calculateSpeed(string $text, float $slotDuration): float
-    {
-        if ($slotDuration <= 0) {
-            return 1.0;
-        }
-
-        $textLen = mb_strlen($text);
-        $estimatedDuration = $textLen / 7.0;
-
-        if ($estimatedDuration <= $slotDuration) {
-            return 1.0;
-        }
-
-        $speedupFactor = $estimatedDuration / $slotDuration;
-        return min(1.5, $speedupFactor);
-    }
-
-    private function adjustTtsSpeed(string $inputPath, string $outputPath, float $speedRatio): void
-    {
-        $atempo = min(max($speedRatio, 0.5), 2.0);
-
-        Process::timeout(30)->run([
-            'ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
-            '-i', $inputPath,
-            '-af', "atempo={$atempo}",
-            '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s16le',
-            $outputPath,
-        ]);
-    }
-
-    private function getAudioDuration(string $path): float
-    {
-        $result = Process::timeout(10)->run([
-            'ffprobe', '-v', 'error',
-            '-show_entries', 'format=duration',
-            '-of', 'default=noprint_wrappers=1:nokey=1',
-            $path,
-        ]);
-
-        return (float) trim($result->output());
     }
 
     /**
