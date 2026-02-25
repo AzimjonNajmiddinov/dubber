@@ -383,18 +383,13 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
         $lang = strtolower($video->target_language);
         $ttsDriver = config('dubber.tts.default', 'edge');
 
-        // Select voice pool based on active TTS driver
-        if ($ttsDriver === 'uzbekvoice' && isset(self::VOICES_UZBEKVOICE[$lang])) {
-            $voices = self::VOICES_UZBEKVOICE[$lang];
-        } else {
-            $voices = self::VOICES_EDGE[$lang] ?? self::VOICES_EDGE['en'];
-        }
-        $genderVoices = $voices[$gender] ?? $voices['male'];
+        // Alternate voices: SPEAKER_00→Sardor, SPEAKER_01→Madina, SPEAKER_02→Sardor, ...
+        $voices = self::VOICES_EDGE[$lang] ?? self::VOICES_EDGE['en'];
+        $allVoices = array_values(array_unique(array_merge($voices['male'] ?? [], $voices['female'] ?? [])));
 
-        $existingCount = Speaker::where('video_id', $video->id)->where('gender', $gender)->count();
-        $voice = $genderVoices[$existingCount % count($genderVoices)];
-        $pitch = self::PITCH_VARIATIONS[$existingCount % count(self::PITCH_VARIATIONS)];
-        $rate = self::RATE_VARIATIONS[$existingCount % count(self::RATE_VARIATIONS)];
+        $voice = $allVoices[$num % count($allVoices)];
+        $pitch = self::PITCH_VARIATIONS[$num % count(self::PITCH_VARIATIONS)];
+        $rate = self::RATE_VARIATIONS[$num % count(self::RATE_VARIATIONS)];
 
         try {
             return Speaker::firstOrCreate(
