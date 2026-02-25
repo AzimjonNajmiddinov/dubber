@@ -487,10 +487,10 @@ def _analyze_audio(audio_path: str, min_speakers: Optional[int] = None, max_spea
             traceback.print_exc()
 
     # 3) DIARIZE (optional - gracefully degrade if unavailable)
-    # In lite mode: skip diarization entirely for speed (chunks are short, usually 1 speaker)
+    # Always run diarization when enabled — lite mode only skips gender/emotion ML.
     diar_rows = []
     diarization_status = "disabled"  # Track what actually happened
-    if ENABLE_DIARIZATION and not lite:
+    if ENABLE_DIARIZATION:
         try:
             diarize = get_diarize_pipeline()
             if diarize is not None:

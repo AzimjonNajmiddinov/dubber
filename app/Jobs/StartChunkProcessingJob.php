@@ -449,6 +449,8 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
             $whisperxUrl = config('services.whisperx.url', 'http://whisperx:8000');
             $isRemote = str_contains($whisperxUrl, 'runpod.net') || str_contains($whisperxUrl, 'https://');
 
+            // lite=1 skips gender/emotion ML (not diarization) for speed on RunPod.
+            // Diarization always runs when enabled in WhisperX service.
             $extraParams = ['lite' => 1];
             if ($audioDuration > 60) {
                 $extraParams['min_speakers'] = 2;
