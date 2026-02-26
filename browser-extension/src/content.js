@@ -1,37 +1,50 @@
 /**
  * Dubber Browser Extension - Content Script
  *
- * Injects into web pages to detect videos, capture audio,
- * and play dubbed audio in sync with the video.
+ * Handles video detection, dubbed audio playback via Web Audio API,
+ * subtitle display, video sync (play/pause/seek), and Mode 2 audio capture.
  */
 
 class DubberController {
   constructor() {
     this.activeVideo = null;
     this.originalVolume = 1.0;
-    this.audioContext = null;
-    this.sourceNode = null;
-    this.dubbedAudioQueue = [];
     this.isEnabled = false;
+    this.sessionId = null;
+    this.mode = null;
+
+    // Audio playback
+    this.audioContext = null;
+    this.gainNode = null;
+    this.chunkAudioBuffers = new Map(); // index → AudioBuffer
+    this.scheduledSources = [];         // active AudioBufferSourceNodes
+    this.chunkMeta = new Map();         // index → { start_time, end_time, ... }
+
+    // Subtitles
+    this.subtitles = [];                // { text, startTime, endTime, speaker }
     this.overlay = null;
-    this.transcriptionElement = null;
+    this.subtitleElement = null;
+
+    // Capture mode
+    this.mediaRecorder = null;
+    this.captureChunkIndex = 0;
+    this.captureTimer = null;
+
+    // Memory management
+    this.maxBufferedChunks = 30;
 
     this.init();
   }
 
   init() {
-    // Listen for messages from background script
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       this.handleMessage(message);
       sendResponse({ received: true });
     });
 
-    // Observe DOM for new videos
     this.observeVideos();
 
-    // Add keyboard shortcut
     document.addEventListener('keydown', (e) => {
-      // Alt+D to toggle dubbing
       if (e.altKey && e.key === 'd') {
         this.toggleDubbing();
       }
@@ -40,41 +53,32 @@ class DubberController {
     console.log('Dubber content script loaded');
   }
 
-  observeVideos() {
-    // Find existing videos
-    document.querySelectorAll('video').forEach(video => {
-      this.attachToVideo(video);
-    });
+  // ─── Video Detection ───────────────────────────────────────
 
-    // Watch for new videos
+  observeVideos() {
+    document.querySelectorAll('video').forEach(v => this.attachToVideo(v));
+
     const observer = new MutationObserver((mutations) => {
-      mutations.forEach((mutation) => {
-        mutation.addedNodes.forEach((node) => {
+      for (const mutation of mutations) {
+        for (const node of mutation.addedNodes) {
           if (node.nodeName === 'VIDEO') {
             this.attachToVideo(node);
           } else if (node.querySelectorAll) {
-            node.querySelectorAll('video').forEach(video => {
-              this.attachToVideo(video);
-            });
+            node.querySelectorAll('video').forEach(v => this.attachToVideo(v));
           }
-        });
-      });
+        }
+      }
     });
 
-    observer.observe(document.body, {
-      childList: true,
-      subtree: true
-    });
+    observer.observe(document.body, { childList: true, subtree: true });
   }
 
   attachToVideo(video) {
     if (video.dataset.dubberAttached) return;
     video.dataset.dubberAttached = 'true';
 
-    // Add dubbing button overlay
     this.addDubButton(video);
 
-    // Track video events
     video.addEventListener('play', () => this.onVideoPlay(video));
     video.addEventListener('pause', () => this.onVideoPause(video));
     video.addEventListener('seeked', () => this.onVideoSeek(video));
@@ -101,7 +105,6 @@ class DubberController {
       this.toggleDubbing();
     });
 
-    // Position relative to video
     const wrapper = document.createElement('div');
     wrapper.className = 'dubber-button-wrapper';
     wrapper.appendChild(button);
@@ -109,7 +112,6 @@ class DubberController {
     container.style.position = 'relative';
     container.appendChild(wrapper);
 
-    // Inject styles
     this.injectStyles();
   }
 
@@ -127,12 +129,10 @@ class DubberController {
         opacity: 0;
         transition: opacity 0.3s;
       }
-
       video:hover + .dubber-button-wrapper,
       .dubber-button-wrapper:hover {
         opacity: 1;
       }
-
       .dubber-dub-button {
         display: flex;
         align-items: center;
@@ -149,16 +149,13 @@ class DubberController {
         box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
         transition: transform 0.2s, box-shadow 0.2s;
       }
-
       .dubber-dub-button:hover {
         transform: scale(1.05);
         box-shadow: 0 6px 20px rgba(102, 126, 234, 0.5);
       }
-
       .dubber-dub-button.active {
         background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
       }
-
       .dubber-overlay {
         position: absolute;
         bottom: 60px;
@@ -173,8 +170,7 @@ class DubberController {
         z-index: 999998;
         pointer-events: none;
       }
-
-      .dubber-transcription {
+      .dubber-subtitle {
         position: absolute;
         bottom: 10px;
         left: 10px;
@@ -189,29 +185,32 @@ class DubberController {
         z-index: 999997;
         pointer-events: none;
       }
-
       .dubber-speaker {
         color: #667eea;
         font-weight: 600;
         margin-right: 8px;
       }
     `;
-
     document.head.appendChild(styles);
+  }
+
+  // ─── Dubbing Control ───────────────────────────────────────
+
+  findMainVideo() {
+    const videos = document.querySelectorAll('video');
+    if (videos.length === 0) return null;
+    return Array.from(videos).reduce((a, b) =>
+      (a.offsetWidth * a.offsetHeight) > (b.offsetWidth * b.offsetHeight) ? a : b
+    );
   }
 
   async toggleDubbing() {
     if (!this.activeVideo) {
-      // Find the main video on the page
-      const videos = document.querySelectorAll('video');
-      if (videos.length === 0) {
+      this.activeVideo = this.findMainVideo();
+      if (!this.activeVideo) {
         this.showNotification('No video found on this page');
         return;
       }
-      // Use the largest/main video
-      this.activeVideo = Array.from(videos).reduce((a, b) =>
-        (a.offsetWidth * a.offsetHeight) > (b.offsetWidth * b.offsetHeight) ? a : b
-      );
     }
 
     if (this.isEnabled) {
@@ -231,27 +230,29 @@ class DubberController {
     const settings = await this.getSettings();
     this.activeVideo.volume = settings.volume?.original ?? 0.2;
 
-    // Update button state
+    // Update button
     const button = this.activeVideo.parentElement?.querySelector('.dubber-dub-button');
     if (button) {
       button.classList.add('active');
       button.querySelector('span').textContent = 'Stop';
     }
 
-    // Show overlay
     this.showOverlay('Initializing dubbing...');
 
-    // Create audio context for dubbed audio playback
+    // Create audio context
     this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    this.gainNode = this.audioContext.createGain();
+    this.gainNode.gain.value = settings.volume?.dubbed ?? 1.0;
+    this.gainNode.connect(this.audioContext.destination);
 
-    // Start dubbing session via background script
+    // Request dubbing from background
     const response = await chrome.runtime.sendMessage({
       action: 'startDubbing',
       data: {
         videoUrl: window.location.href,
         videoDuration: this.activeVideo.duration,
-        currentTime: this.activeVideo.currentTime
-      }
+        currentTime: this.activeVideo.currentTime,
+      },
     });
 
     if (response.error) {
@@ -260,65 +261,75 @@ class DubberController {
       return;
     }
 
-    // Start capturing and sending audio
-    this.startAudioCapture();
+    this.sessionId = response.sessionId;
+    this.mode = response.mode;
+
+    if (this.mode === 'server') {
+      this.showOverlay('Downloading audio...');
+    } else {
+      this.showOverlay('Capture mode — recording audio...');
+      this.startCapture();
+    }
   }
 
   async stopDubbing() {
     this.isEnabled = false;
 
-    // Restore original volume
+    // Restore volume
     if (this.activeVideo) {
       this.activeVideo.volume = this.originalVolume;
     }
 
-    // Update button state
+    // Update button
     const button = this.activeVideo?.parentElement?.querySelector('.dubber-dub-button');
     if (button) {
       button.classList.remove('active');
       button.querySelector('span').textContent = 'Dub';
     }
 
-    // Stop audio capture
-    this.stopAudioCapture();
+    // Stop capture if active
+    this.stopCapture();
 
-    // Hide overlay
+    // Cancel all scheduled audio
+    this.cancelAllScheduled();
+
+    // Clear buffers
+    this.chunkAudioBuffers.clear();
+    this.chunkMeta.clear();
+    this.subtitles = [];
+
     this.hideOverlay();
-    this.hideTranscription();
+    this.hideSubtitle();
 
-    // Notify background script
+    // Notify background
     await chrome.runtime.sendMessage({ action: 'stopDubbing' });
 
     // Close audio context
     if (this.audioContext) {
       this.audioContext.close();
       this.audioContext = null;
+      this.gainNode = null;
     }
+
+    this.sessionId = null;
+    this.mode = null;
   }
 
-  startAudioCapture() {
-    // For now, we'll rely on server-side audio extraction
-    // In a full implementation, we could use MediaRecorder to capture audio
-    this.showOverlay('Processing video audio...');
-  }
-
-  stopAudioCapture() {
-    // Stop any ongoing capture
-  }
+  // ─── Message Handling ──────────────────────────────────────
 
   handleMessage(message) {
     switch (message.action) {
-      case 'dubbingReady':
-        this.showOverlay('Dubbing active');
-        setTimeout(() => this.hideOverlay(), 2000);
+      case 'dubbingStarted':
+        this.sessionId = message.sessionId;
+        this.mode = message.mode;
         break;
 
-      case 'playDubbedSegment':
-        this.playDubbedSegment(message.segment);
+      case 'newChunkReady':
+        this.onNewChunk(message.chunk);
         break;
 
-      case 'showTranscription':
-        this.showTranscription(message.text, message.speaker);
+      case 'dubbingComplete':
+        this.showNotification('Dubbing complete');
         break;
 
       case 'dubbingError':
@@ -326,79 +337,309 @@ class DubberController {
         this.stopDubbing();
         break;
 
-      case 'dubbingComplete':
-        this.showNotification('Dubbing complete');
-        break;
-
       case 'restoreAudio':
         if (this.activeVideo) {
           this.activeVideo.volume = this.originalVolume;
         }
+        this.cancelAllScheduled();
+        break;
+
+      case 'startDubbingFromPopup':
+        this.toggleDubbing();
+        break;
+
+      case 'stopDubbing':
+        this.stopDubbing();
+        break;
+
+      case 'startCapture':
+        if (message.sessionId) this.sessionId = message.sessionId;
+        this.startCapture();
         break;
     }
   }
 
-  async playDubbedSegment(segment) {
+  // ─── Chunk Audio Playback ──────────────────────────────────
+
+  async onNewChunk(chunk) {
     if (!this.audioContext || !this.activeVideo) return;
 
-    try {
-      // Decode the audio data
-      const audioData = Uint8Array.from(atob(segment.audio), c => c.charCodeAt(0));
-      const audioBuffer = await this.audioContext.decodeAudioData(audioData.buffer);
+    const index = chunk.index;
 
-      // Schedule playback at the right time
-      const source = this.audioContext.createBufferSource();
-      source.buffer = audioBuffer;
-      source.connect(this.audioContext.destination);
+    // Store metadata for subtitles
+    this.chunkMeta.set(index, chunk);
 
-      // Calculate when to play based on video position
-      const videoTime = this.activeVideo.currentTime;
-      const segmentStart = segment.startTime;
+    // Add subtitle entry
+    if (chunk.has_speech && chunk.translated_text) {
+      this.subtitles.push({
+        text: chunk.translated_text,
+        startTime: chunk.start_time,
+        endTime: chunk.end_time,
+        speaker: chunk.speaker,
+      });
+    }
 
-      if (segmentStart > videoTime) {
-        // Schedule for future
-        const delay = segmentStart - videoTime;
-        source.start(this.audioContext.currentTime + delay);
-      } else if (segmentStart + segment.duration > videoTime) {
-        // Start immediately with offset
-        const offset = videoTime - segmentStart;
-        source.start(0, offset);
+    // Hide the "Downloading..." overlay on first chunk
+    if (index === 0) {
+      this.hideOverlay();
+    }
+
+    // Decode audio if present
+    if (chunk.has_speech && chunk.audio_base64) {
+      try {
+        const binaryStr = atob(chunk.audio_base64);
+        const bytes = new Uint8Array(binaryStr.length);
+        for (let i = 0; i < binaryStr.length; i++) {
+          bytes[i] = binaryStr.charCodeAt(i);
+        }
+
+        const audioBuffer = await this.audioContext.decodeAudioData(bytes.buffer.slice(0));
+        this.chunkAudioBuffers.set(index, audioBuffer);
+
+        // Schedule this chunk for playback
+        this.scheduleChunkPlayback(index);
+
+        // Memory management: evict old buffers
+        this.evictOldBuffers(index);
+      } catch (err) {
+        console.error('Failed to decode chunk audio:', index, err);
       }
-      // Otherwise segment already passed, skip it
-
-    } catch (error) {
-      console.error('Error playing dubbed segment:', error);
     }
   }
 
-  showTranscription(text, speaker) {
-    if (!this.activeVideo) return;
+  scheduleChunkPlayback(index) {
+    if (!this.audioContext || !this.activeVideo || this.activeVideo.paused) return;
 
+    const buffer = this.chunkAudioBuffers.get(index);
+    const meta = this.chunkMeta.get(index);
+    if (!buffer || !meta) return;
+
+    const videoTime = this.activeVideo.currentTime;
+    const chunkStart = meta.start_time;
+    const chunkEnd = meta.end_time;
+
+    // Skip if chunk already passed
+    if (chunkEnd <= videoTime) return;
+
+    const source = this.audioContext.createBufferSource();
+    source.buffer = buffer;
+    source.connect(this.gainNode);
+
+    if (chunkStart > videoTime) {
+      // Schedule for future
+      const delay = chunkStart - videoTime;
+      const when = this.audioContext.currentTime + delay;
+      source.start(when);
+    } else {
+      // Start immediately with offset into the buffer
+      const offset = videoTime - chunkStart;
+      if (offset < buffer.duration) {
+        source.start(0, offset);
+      } else {
+        return; // Already past this chunk's audio
+      }
+    }
+
+    source._chunkIndex = index;
+    this.scheduledSources.push(source);
+
+    source.onended = () => {
+      this.scheduledSources = this.scheduledSources.filter(s => s !== source);
+    };
+  }
+
+  rescheduleFromCurrentTime() {
+    this.cancelAllScheduled();
+
+    if (!this.audioContext || !this.activeVideo || this.activeVideo.paused) return;
+
+    // Re-schedule all buffered chunks
+    for (const index of this.chunkAudioBuffers.keys()) {
+      this.scheduleChunkPlayback(index);
+    }
+  }
+
+  cancelAllScheduled() {
+    for (const source of this.scheduledSources) {
+      try { source.stop(); } catch (e) { /* already stopped */ }
+    }
+    this.scheduledSources = [];
+  }
+
+  evictOldBuffers(currentIndex) {
+    if (this.chunkAudioBuffers.size <= this.maxBufferedChunks) return;
+
+    const keys = [...this.chunkAudioBuffers.keys()].sort((a, b) => a - b);
+    while (this.chunkAudioBuffers.size > this.maxBufferedChunks) {
+      const oldest = keys.shift();
+      if (oldest !== undefined && oldest < currentIndex - 5) {
+        this.chunkAudioBuffers.delete(oldest);
+      } else {
+        break;
+      }
+    }
+  }
+
+  // ─── Video Sync Events ────────────────────────────────────
+
+  onVideoPlay(video) {
+    if (!this.isEnabled || video !== this.activeVideo) return;
+
+    if (this.audioContext?.state === 'suspended') {
+      this.audioContext.resume();
+    }
+
+    this.rescheduleFromCurrentTime();
+  }
+
+  onVideoPause(video) {
+    if (!this.isEnabled || video !== this.activeVideo) return;
+
+    this.cancelAllScheduled();
+
+    if (this.audioContext?.state === 'running') {
+      this.audioContext.suspend();
+    }
+  }
+
+  onVideoSeek(video) {
+    if (!this.isEnabled || video !== this.activeVideo) return;
+    this.rescheduleFromCurrentTime();
+  }
+
+  onVideoTimeUpdate(video) {
+    if (!this.isEnabled || video !== this.activeVideo) return;
+    this.updateSubtitleDisplay(video.currentTime);
+  }
+
+  // ─── Mode 2: Audio Capture ────────────────────────────────
+
+  startCapture() {
+    if (!this.activeVideo || !this.sessionId) return;
+
+    const chunkDuration = 12000; // 12s in ms
+    this.captureChunkIndex = 0;
+
+    try {
+      const stream = this.activeVideo.captureStream();
+      const audioTracks = stream.getAudioTracks();
+
+      if (audioTracks.length === 0) {
+        this.showNotification('No audio track available for capture');
+        return;
+      }
+
+      // Create audio-only stream
+      const audioStream = new MediaStream(audioTracks);
+
+      const startRecording = () => {
+        if (!this.isEnabled) return;
+
+        this.mediaRecorder = new MediaRecorder(audioStream, {
+          mimeType: 'audio/webm;codecs=opus',
+        });
+
+        const chunks = [];
+
+        this.mediaRecorder.ondataavailable = (e) => {
+          if (e.data.size > 0) chunks.push(e.data);
+        };
+
+        this.mediaRecorder.onstop = async () => {
+          if (chunks.length === 0) return;
+
+          const blob = new Blob(chunks, { type: 'audio/webm' });
+          const reader = new FileReader();
+
+          reader.onloadend = () => {
+            const base64 = reader.result.split(',')[1];
+            const index = this.captureChunkIndex++;
+            const timestamp = index * (chunkDuration / 1000);
+
+            chrome.runtime.sendMessage({
+              action: 'sendCaptureChunk',
+              data: {
+                audioBase64: base64,
+                timestamp,
+                duration: chunkDuration / 1000,
+                index,
+              },
+            });
+          };
+
+          reader.readAsDataURL(blob);
+        };
+
+        this.mediaRecorder.start();
+
+        this.captureTimer = setTimeout(() => {
+          if (this.mediaRecorder?.state === 'recording') {
+            this.mediaRecorder.stop();
+          }
+          startRecording();
+        }, chunkDuration);
+      };
+
+      startRecording();
+
+    } catch (err) {
+      console.error('Capture failed:', err);
+      this.showNotification('Audio capture not available (CORS restriction)');
+    }
+  }
+
+  stopCapture() {
+    if (this.captureTimer) {
+      clearTimeout(this.captureTimer);
+      this.captureTimer = null;
+    }
+    if (this.mediaRecorder?.state === 'recording') {
+      try { this.mediaRecorder.stop(); } catch (e) { /* ignore */ }
+    }
+    this.mediaRecorder = null;
+  }
+
+  // ─── Subtitles ─────────────────────────────────────────────
+
+  updateSubtitleDisplay(currentTime) {
+    const active = this.subtitles.find(
+      s => currentTime >= s.startTime && currentTime <= s.endTime
+    );
+
+    if (active) {
+      this.showSubtitle(active.text, active.speaker);
+    } else {
+      this.hideSubtitle();
+    }
+  }
+
+  showSubtitle(text, speaker) {
+    if (!this.activeVideo) return;
     const container = this.activeVideo.parentElement;
     if (!container) return;
 
-    if (!this.transcriptionElement) {
-      this.transcriptionElement = document.createElement('div');
-      this.transcriptionElement.className = 'dubber-transcription';
-      container.appendChild(this.transcriptionElement);
+    if (!this.subtitleElement) {
+      this.subtitleElement = document.createElement('div');
+      this.subtitleElement.className = 'dubber-subtitle';
+      container.appendChild(this.subtitleElement);
     }
 
-    this.transcriptionElement.innerHTML = `
-      ${speaker ? `<span class="dubber-speaker">${speaker}:</span>` : ''}
-      ${text}
+    this.subtitleElement.innerHTML = `
+      ${speaker ? `<span class="dubber-speaker">${speaker}:</span>` : ''}${text}
     `;
   }
 
-  hideTranscription() {
-    if (this.transcriptionElement) {
-      this.transcriptionElement.remove();
-      this.transcriptionElement = null;
+  hideSubtitle() {
+    if (this.subtitleElement) {
+      this.subtitleElement.remove();
+      this.subtitleElement = null;
     }
   }
 
+  // ─── Overlay / Notifications ───────────────────────────────
+
   showOverlay(message) {
     if (!this.activeVideo) return;
-
     const container = this.activeVideo.parentElement;
     if (!container) return;
 
@@ -407,7 +648,6 @@ class DubberController {
       this.overlay.className = 'dubber-overlay';
       container.appendChild(this.overlay);
     }
-
     this.overlay.textContent = message;
   }
 
@@ -419,41 +659,12 @@ class DubberController {
   }
 
   showNotification(message) {
-    // Use overlay temporarily for notifications
     this.showOverlay(message);
     setTimeout(() => this.hideOverlay(), 3000);
   }
 
   async getSettings() {
-    const response = await chrome.runtime.sendMessage({ action: 'getSettings' });
-    return response;
-  }
-
-  onVideoPlay(video) {
-    if (this.isEnabled && video === this.activeVideo) {
-      // Resume audio context if suspended
-      if (this.audioContext?.state === 'suspended') {
-        this.audioContext.resume();
-      }
-    }
-  }
-
-  onVideoPause(video) {
-    if (this.isEnabled && video === this.activeVideo) {
-      // Pause dubbed audio playback
-      // In a full implementation, we'd pause scheduled audio
-    }
-  }
-
-  onVideoSeek(video) {
-    if (this.isEnabled && video === this.activeVideo) {
-      // Clear queued audio and request new segments from current position
-      this.dubbedAudioQueue = [];
-    }
-  }
-
-  onVideoTimeUpdate(video) {
-    // Track video progress for syncing
+    return await chrome.runtime.sendMessage({ action: 'getSettings' });
   }
 }
 

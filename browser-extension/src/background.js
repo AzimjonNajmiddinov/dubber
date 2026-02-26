@@ -1,15 +1,15 @@
 /**
  * Dubber Browser Extension - Background Service Worker
  *
- * Handles communication between content scripts and the Dubber backend
- * for real-time video dubbing.
+ * Handles progressive dubbing via HTTP polling.
+ * Mode 1 (server): sends URL → server downloads & processes → extension polls for chunks.
+ * Mode 2 (capture): content script captures audio → sends to server → polls for chunks.
  */
 
-// Default settings
 const DEFAULT_SETTINGS = {
   serverUrl: 'http://localhost:8080',
   targetLanguage: 'uz',
-  ttsDriver: 'xtts',
+  ttsDriver: 'edge',
   autoCloneVoices: true,
   enabled: true,
   volume: {
@@ -18,10 +18,9 @@ const DEFAULT_SETTINGS = {
   }
 };
 
-// Active dubbing sessions
+// Active dubbing sessions: tabId → { sessionId, mode, pollTimer, lastChunk, chunks[], status }
 const activeSessions = new Map();
 
-// Initialize settings on install
 chrome.runtime.onInstalled.addListener(async () => {
   const stored = await chrome.storage.sync.get('settings');
   if (!stored.settings) {
@@ -30,13 +29,13 @@ chrome.runtime.onInstalled.addListener(async () => {
   console.log('Dubber extension installed');
 });
 
-// Handle messages from content scripts and popup
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  handleMessage(message, sender).then(sendResponse);
-  return true; // Keep channel open for async response
+  const tabId = sender.tab?.id ?? message.tabId;
+  handleMessage(message, tabId).then(sendResponse);
+  return true;
 });
 
-async function handleMessage(message, sender) {
+async function handleMessage(message, tabId) {
   const { action, data } = message;
 
   switch (action) {
@@ -47,19 +46,19 @@ async function handleMessage(message, sender) {
       return saveSettings(data);
 
     case 'startDubbing':
-      return startDubbing(sender.tab.id, data);
+      return startDubbing(tabId, data);
 
     case 'stopDubbing':
-      return stopDubbing(sender.tab.id);
+      return stopDubbing(tabId);
 
     case 'getDubbingStatus':
-      return getDubbingStatus(sender.tab.id);
+      return getDubbingStatus(tabId ?? message.tabId);
 
-    case 'processAudioChunk':
-      return processAudioChunk(sender.tab.id, data);
+    case 'sendCaptureChunk':
+      return sendCaptureChunk(tabId, data);
 
     case 'getAvailableVoices':
-      return getAvailableVoices(data.language);
+      return getAvailableVoices(data?.language);
 
     default:
       return { error: `Unknown action: ${action}` };
@@ -83,71 +82,164 @@ async function startDubbing(tabId, data) {
     return { error: 'Dubbing is disabled' };
   }
 
-  // Create new dubbing session
-  const session = {
-    tabId,
-    videoUrl: data.videoUrl,
-    startTime: Date.now(),
-    status: 'initializing',
-    segments: [],
-    currentPosition: 0,
-    websocket: null
-  };
-
-  activeSessions.set(tabId, session);
+  // Stop existing session for this tab
+  if (activeSessions.has(tabId)) {
+    await stopDubbing(tabId);
+  }
 
   try {
-    // Connect to dubbing server via WebSocket for real-time processing
-    const wsUrl = settings.serverUrl.replace('http', 'ws') + '/ws/dub';
-    session.websocket = new WebSocket(wsUrl);
+    const response = await fetch(`${settings.serverUrl}/api/progressive/start`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url: data.videoUrl,
+        target_language: settings.targetLanguage,
+        tts_driver: settings.ttsDriver,
+      }),
+    });
 
-    session.websocket.onopen = () => {
-      session.status = 'connected';
-      session.websocket.send(JSON.stringify({
-        type: 'init',
-        videoUrl: data.videoUrl,
-        targetLanguage: settings.targetLanguage,
-        ttsDriver: settings.ttsDriver,
-        autoClone: settings.autoCloneVoices
-      }));
+    if (!response.ok) {
+      const err = await response.text();
+      throw new Error(`Server error ${response.status}: ${err}`);
+    }
+
+    const result = await response.json();
+
+    const session = {
+      sessionId: result.session_id,
+      tabId,
+      mode: result.mode,
+      status: 'started',
+      startTime: Date.now(),
+      lastChunkIndex: -1,
+      chunksReady: 0,
+      totalChunks: null,
+      pollTimer: null,
     };
 
-    session.websocket.onmessage = (event) => {
-      const msg = JSON.parse(event.data);
-      handleServerMessage(tabId, msg);
-    };
+    activeSessions.set(tabId, session);
 
-    session.websocket.onerror = (error) => {
-      console.error('WebSocket error:', error);
-      session.status = 'error';
-    };
+    // Notify content script
+    chrome.tabs.sendMessage(tabId, {
+      action: 'dubbingStarted',
+      mode: result.mode,
+      sessionId: result.session_id,
+    });
 
-    session.websocket.onclose = () => {
-      session.status = 'disconnected';
-    };
+    // Start polling for server mode, or start capture for capture mode
+    if (result.mode === 'server') {
+      startPolling(tabId);
+    }
+    // For capture mode, content script will start capturing and send chunks via sendCaptureChunk
 
-    return { success: true, sessionId: tabId };
+    // Set up alarm as heartbeat backup to keep service worker alive
+    chrome.alarms.create(`poll-${tabId}`, { periodInMinutes: 0.25 });
+
+    return { success: true, sessionId: result.session_id, mode: result.mode };
 
   } catch (error) {
-    activeSessions.delete(tabId);
+    console.error('startDubbing error:', error);
     return { error: error.message };
   }
+}
+
+function startPolling(tabId) {
+  const session = activeSessions.get(tabId);
+  if (!session) return;
+
+  // Poll every 2.5 seconds
+  session.pollTimer = setInterval(() => pollForChunks(tabId), 2500);
+  // Also poll immediately
+  pollForChunks(tabId);
+}
+
+async function pollForChunks(tabId) {
+  const session = activeSessions.get(tabId);
+  if (!session) return;
+
+  const settings = await getSettings();
+
+  try {
+    const url = `${settings.serverUrl}/api/progressive/${session.sessionId}/poll?after_chunk=${session.lastChunkIndex}`;
+    const response = await fetch(url);
+
+    if (!response.ok) {
+      if (response.status === 404) {
+        await stopDubbing(tabId);
+      }
+      return;
+    }
+
+    const data = await response.json();
+
+    session.status = data.status;
+    session.chunksReady = data.chunks_ready;
+    session.totalChunks = data.total_chunks;
+
+    // Forward new chunks to content script
+    if (data.chunks && data.chunks.length > 0) {
+      for (const chunk of data.chunks) {
+        session.lastChunkIndex = Math.max(session.lastChunkIndex, chunk.index);
+
+        chrome.tabs.sendMessage(tabId, {
+          action: 'newChunkReady',
+          chunk,
+        });
+      }
+    }
+
+    // Check if dubbing is complete
+    if (data.status === 'complete') {
+      chrome.tabs.sendMessage(tabId, { action: 'dubbingComplete' });
+      stopPolling(tabId);
+    } else if (data.status === 'error') {
+      chrome.tabs.sendMessage(tabId, {
+        action: 'dubbingError',
+        error: 'Server processing error',
+      });
+      stopPolling(tabId);
+    }
+
+  } catch (error) {
+    console.error('Poll error:', error);
+  }
+}
+
+function stopPolling(tabId) {
+  const session = activeSessions.get(tabId);
+  if (session?.pollTimer) {
+    clearInterval(session.pollTimer);
+    session.pollTimer = null;
+  }
+  chrome.alarms.clear(`poll-${tabId}`);
 }
 
 async function stopDubbing(tabId) {
   const session = activeSessions.get(tabId);
 
   if (session) {
-    if (session.websocket) {
-      session.websocket.close();
+    stopPolling(tabId);
+
+    const settings = await getSettings();
+
+    // Tell server to stop
+    try {
+      await fetch(`${settings.serverUrl}/api/progressive/${session.sessionId}/stop`, {
+        method: 'POST',
+      });
+    } catch (e) {
+      // Ignore — server may already be done
     }
+
     activeSessions.delete(tabId);
   }
 
-  // Notify content script to restore original audio
-  chrome.tabs.sendMessage(tabId, {
-    action: 'restoreAudio'
-  });
+  // Notify content script to restore audio
+  try {
+    chrome.tabs.sendMessage(tabId, { action: 'restoreAudio' });
+  } catch (e) {
+    // Tab may have been closed
+  }
 
   return { success: true };
 }
@@ -162,95 +254,81 @@ async function getDubbingStatus(tabId) {
   return {
     active: true,
     status: session.status,
+    mode: session.mode,
     duration: Date.now() - session.startTime,
-    segmentsProcessed: session.segments.length
+    chunksReady: session.chunksReady,
+    totalChunks: session.totalChunks,
   };
 }
 
-async function processAudioChunk(tabId, data) {
+async function sendCaptureChunk(tabId, data) {
   const session = activeSessions.get(tabId);
 
-  if (!session || !session.websocket || session.websocket.readyState !== WebSocket.OPEN) {
+  if (!session) {
     return { error: 'No active dubbing session' };
   }
 
-  // Send audio chunk to server for processing
-  session.websocket.send(JSON.stringify({
-    type: 'audio_chunk',
-    timestamp: data.timestamp,
-    duration: data.duration,
-    audio: data.audioBase64 // Base64 encoded audio
-  }));
+  const settings = await getSettings();
 
-  return { success: true };
+  try {
+    const response = await fetch(
+      `${settings.serverUrl}/api/progressive/${session.sessionId}/capture-chunk`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          audio: data.audioBase64,
+          timestamp: data.timestamp,
+          duration: data.duration,
+          index: data.index,
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error(`Capture chunk failed: ${response.status}`);
+    }
+
+    // Start polling if not already polling (first capture chunk triggers it)
+    if (!session.pollTimer) {
+      startPolling(tabId);
+    }
+
+    return { success: true };
+
+  } catch (error) {
+    console.error('sendCaptureChunk error:', error);
+    return { error: error.message };
+  }
 }
 
 async function getAvailableVoices(language) {
   const settings = await getSettings();
 
   try {
-    const response = await fetch(`${settings.serverUrl}/api/voices?language=${language}`);
-    if (!response.ok) {
-      throw new Error('Failed to fetch voices');
-    }
+    const response = await fetch(`${settings.serverUrl}/api/realtime/voices?language=${language || 'uz'}`);
+    if (!response.ok) throw new Error('Failed to fetch voices');
     return await response.json();
   } catch (error) {
     return { error: error.message };
   }
 }
 
-function handleServerMessage(tabId, message) {
-  const session = activeSessions.get(tabId);
-  if (!session) return;
-
-  switch (message.type) {
-    case 'ready':
-      session.status = 'ready';
-      chrome.tabs.sendMessage(tabId, { action: 'dubbingReady' });
-      break;
-
-    case 'segment':
-      // New dubbed audio segment ready
-      session.segments.push(message.segment);
-      chrome.tabs.sendMessage(tabId, {
-        action: 'playDubbedSegment',
-        segment: message.segment
-      });
-      break;
-
-    case 'transcription':
-      // Live transcription update
-      chrome.tabs.sendMessage(tabId, {
-        action: 'showTranscription',
-        text: message.text,
-        speaker: message.speaker
-      });
-      break;
-
-    case 'error':
-      session.status = 'error';
-      chrome.tabs.sendMessage(tabId, {
-        action: 'dubbingError',
-        error: message.error
-      });
-      break;
-
-    case 'complete':
-      session.status = 'complete';
-      chrome.tabs.sendMessage(tabId, {
-        action: 'dubbingComplete'
-      });
-      break;
+// Alarm handler as backup heartbeat for polling
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name.startsWith('poll-')) {
+    const tabId = parseInt(alarm.name.replace('poll-', ''), 10);
+    if (activeSessions.has(tabId)) {
+      pollForChunks(tabId);
+    } else {
+      chrome.alarms.clear(alarm.name);
+    }
   }
-}
+});
 
 // Clean up when tab is closed
 chrome.tabs.onRemoved.addListener((tabId) => {
   if (activeSessions.has(tabId)) {
-    const session = activeSessions.get(tabId);
-    if (session.websocket) {
-      session.websocket.close();
-    }
-    activeSessions.delete(tabId);
+    stopDubbing(tabId);
   }
 });

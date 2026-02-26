@@ -113,31 +113,58 @@ class PopupController {
     }
   }
 
+  startAutoRefresh() {
+    this.refreshTimer = setInterval(() => this.checkDubbingStatus(), 2000);
+  }
+
+  stopAutoRefresh() {
+    if (this.refreshTimer) {
+      clearInterval(this.refreshTimer);
+      this.refreshTimer = null;
+    }
+  }
+
   updateStatusUI(status) {
     const statusEl = document.getElementById('status');
     const button = document.getElementById('actionButton');
 
     if (status.active) {
-      statusEl.textContent = this.formatStatus(status.status);
+      const chunks = status.chunksReady ?? 0;
+      const total = status.totalChunks;
+      const mode = status.mode ?? '';
+      const modeLabel = mode === 'capture' ? 'capture' : 'server';
+
+      let statusText = this.formatStatus(status.status);
+      if (chunks > 0) {
+        statusText += total ? ` (${chunks}/${total} chunks)` : ` (${chunks} chunks)`;
+      }
+      statusText += ` [${modeLabel}]`;
+
+      statusEl.textContent = statusText;
       statusEl.className = 'status-value status-active';
       button.textContent = 'Stop Dubbing';
       button.classList.add('stop');
+
+      this.startAutoRefresh();
     } else {
       statusEl.textContent = 'Inactive';
       statusEl.className = 'status-value status-inactive';
       button.textContent = 'Start Dubbing';
       button.classList.remove('stop');
+
+      this.stopAutoRefresh();
     }
   }
 
   formatStatus(status) {
     const statusMap = {
       'initializing': 'Initializing...',
-      'connected': 'Connected',
-      'ready': 'Active',
+      'started': 'Starting...',
+      'downloading': 'Downloading...',
       'processing': 'Processing...',
+      'complete': 'Complete',
       'error': 'Error',
-      'complete': 'Complete'
+      'stopped': 'Stopped',
     };
     return statusMap[status] || status;
   }
@@ -148,26 +175,21 @@ class PopupController {
       if (!tab) return;
 
       if (this.isDubbing) {
-        // Stop dubbing
         await chrome.tabs.sendMessage(tab.id, { action: 'stopDubbing' });
         this.isDubbing = false;
       } else {
-        // Start dubbing via content script
         await chrome.tabs.sendMessage(tab.id, { action: 'startDubbingFromPopup' });
         this.isDubbing = true;
       }
 
-      // Refresh status
       setTimeout(() => this.checkDubbingStatus(), 500);
     } catch (error) {
       console.error('Error toggling dubbing:', error);
-      // Content script might not be loaded
       alert('Please navigate to a page with video content first.');
     }
   }
 }
 
-// Initialize when DOM is ready
 document.addEventListener('DOMContentLoaded', () => {
   new PopupController();
 });

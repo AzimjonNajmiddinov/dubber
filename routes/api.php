@@ -5,6 +5,7 @@ use App\Http\Controllers\StreamDubController;
 use App\Http\Controllers\RealtimeDubController;
 use App\Http\Controllers\SegmentPlayerController;
 use App\Http\Controllers\LiveDubController;
+use App\Http\Controllers\ProgressiveDubController;
 
 // URL-based video dubbing & streaming (no CSRF required)
 Route::prefix('stream')->group(function () {
@@ -43,4 +44,12 @@ Route::prefix('player')->group(function () {
 Route::prefix('live')->group(function () {
     Route::post('/start', [LiveDubController::class, 'start'])->name('api.live.start');
     Route::get('/{video}/status', [LiveDubController::class, 'status'])->name('api.live.status');
+});
+
+// Progressive dubbing API (browser extension)
+Route::prefix('progressive')->middleware('cors.extension')->group(function () {
+    Route::post('/start', [ProgressiveDubController::class, 'start'])->name('api.progressive.start');
+    Route::get('/{sessionId}/poll', [ProgressiveDubController::class, 'poll'])->name('api.progressive.poll');
+    Route::post('/{sessionId}/capture-chunk', [ProgressiveDubController::class, 'captureChunk'])->name('api.progressive.capture');
+    Route::post('/{sessionId}/stop', [ProgressiveDubController::class, 'stop'])->name('api.progressive.stop');
 });
