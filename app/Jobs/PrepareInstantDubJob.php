@@ -93,10 +93,25 @@ class PrepareInstantDubJob implements ShouldQueue
         $dispatched = 0;
         $allSpeakers = [];
 
-        $batches = array_chunk($segments, 10, true);
+        // Pass 1: Analyze characters from full dialogue (gender, age, relationships)
+        $characterContext = '';
+        if ($needsTranslation) {
+            $this->updateStatus('Analyzing characters...');
+            $characterContext = $this->analyzeCharacters($segments);
+        }
+
+        // Build full dialogue text for context in each batch
+        $fullDialogue = [];
+        foreach ($segments as $i => $seg) {
+            $fullDialogue[] = ($i + 1) . '. ' . $seg['text'];
+        }
+        $fullDialogueText = implode("\n", $fullDialogue);
+
+        // Pass 2: Translate in batches with full context
+        $batches = array_chunk($segments, 15, true);
         foreach ($batches as $batch) {
             if ($needsTranslation) {
-                $batch = $this->translateBatch($batch);
+                $batch = $this->translateBatch($batch, $characterContext, $fullDialogueText);
             }
 
             // Collect speakers and update voice map incrementally
@@ -129,7 +144,66 @@ class PrepareInstantDubJob implements ShouldQueue
         ]);
     }
 
-    private function translateBatch(array $batch): array
+    private function analyzeCharacters(array $segments): string
+    {
+        $apiKey = config('services.openai.key');
+        if (!$apiKey) return '';
+
+        $lines = [];
+        foreach ($segments as $i => $seg) {
+            $lines[] = ($i + 1) . '. ' . $seg['text'];
+        }
+
+        $prompt = <<<'PROMPT'
+Analyze this dialogue from a film/series. Identify ALL distinct speakers.
+
+For each speaker provide:
+- Tag: M1, M2 (male), F1, F2 (female), C1 (child)
+- Who they are (name if mentioned, or role like "old man", "young woman", "boy")
+- Approximate age category: child, young, adult, elderly
+- Their relationships to other speakers
+
+Then list which speaker says which line numbers.
+
+Format your response EXACTLY like this:
+CHARACTERS:
+M1: Akbar, elderly man, father
+F1: Nilufar, young woman, daughter of M1
+M2: Jasur, young man, friend
+C1: Ali, child, son of F1
+
+LINES:
+1-3,7,12: M1
+4-6,8-9: F1
+10-11: M2
+13-15: C1
+PROMPT;
+
+        try {
+            $response = Http::withToken($apiKey)
+                ->timeout(45)
+                ->post('https://api.openai.com/v1/chat/completions', [
+                    'model' => 'gpt-4o',
+                    'temperature' => 0.2,
+                    'messages' => [
+                        ['role' => 'system', 'content' => $prompt],
+                        ['role' => 'user', 'content' => implode("\n", $lines)],
+                    ],
+                ]);
+
+            if ($response->successful()) {
+                $result = trim($response->json('choices.0.message.content') ?? '');
+                Log::info('Character analysis', ['session' => $this->sessionId, 'result' => $result]);
+                return $result;
+            }
+        } catch (\Throwable $e) {
+            Log::warning('Character analysis failed', ['error' => $e->getMessage()]);
+        }
+
+        return '';
+    }
+
+    private function translateBatch(array $batch, string $characterContext, string $fullDialogue): array
     {
         $apiKey = config('services.openai.key');
         if (!$apiKey) return $batch;
@@ -144,35 +218,69 @@ class PrepareInstantDubJob implements ShouldQueue
         $lines = [];
         foreach ($batch as $i => $seg) {
             $duration = round($seg['end'] - $seg['start'], 1);
-            $maxChars = (int) round($duration * 12); // ~12 chars/sec for Uzbek TTS
+            $maxChars = (int) round($duration * 12);
             $lines[] = ($i + 1) . '. [' . $duration . 's, max ' . $maxChars . ' chars] ' . $seg['text'];
         }
 
-        $systemPrompt = "You are a professional film/series subtitle translator for voice dubbing. Translate every line to natural, fluent {$toLang}.\n\nCRITICAL: Each line has a time slot shown as [Ns, max M chars]. The translation MUST fit within that character limit because it will be spoken aloud by TTS. Use concise, natural phrasing. Shorten wordy constructions. Prefer shorter synonyms. Drop filler words. The meaning must be preserved but brevity is essential.\n\nAlso identify distinct speakers from dialogue context. Prefix each line with a speaker tag: [M1] for first male, [M2] second male, [F1] first female, etc.\n\nFormat: \"1. [M1] translated text\"\nDo not include the timing info in your output. Do not skip or merge lines. Keep the exact numbering.";
+        $uzbekRules = '';
+        if ($this->language === 'uz') {
+            $uzbekRules = <<<'UZ'
+
+UZBEK LANGUAGE RULES (CRITICAL):
+- Address forms based on speaker→listener relationship:
+  * Elderly/adult speaking to a child or much younger person → use "sen" (informal you), verb endings: -san, -ding, etc.
+  * Young person speaking to elderly/adult → use "Siz" (formal you), verb endings: -siz, -dingiz, etc.
+  * Peers of similar age → "sen" if close friends/family, "siz" if formal/strangers
+  * Child to parent → "siz" or affectionate forms
+- Use natural spoken Uzbek, not bookish/literary style
+- Contractions and colloquial forms are preferred (e.g. "qilyapman" not "qilayotirman")
+- Keep emotional tone: anger, tenderness, humor should come through in word choice
+- Names and proper nouns: keep original, don't translate
+UZ;
+        }
+
+        $systemPrompt = <<<PROMPT
+You are an expert film/series dubbing translator. Your translations will be spoken aloud by TTS voice actors, so they must sound like natural spoken {$toLang} dialogue — not written subtitles.
+
+CHARACTER ANALYSIS:
+{$characterContext}
+
+FULL DIALOGUE (for context — do NOT translate this, only use for understanding the scene):
+{$fullDialogue}
+{$uzbekRules}
+
+TRANSLATION RULES:
+1. Each line has [Ns, max M chars]. Translation MUST fit within that character limit — it will be spoken in that time slot.
+2. Translate meaning, not words. Rephrase freely to sound natural in {$toLang}.
+3. Keep the emotional register: if someone is angry, scared, joking — the translation must convey that.
+4. Use the character analysis above to assign the correct speaker tag [M1], [F1], etc. to each line.
+5. Preserve interruptions, hesitations, and conversational flow.
+
+Format: "1. [M1] translated text"
+Do not include timing info. Do not skip or merge lines. Keep exact numbering.
+PROMPT;
 
         try {
             $response = Http::withToken($apiKey)
-                ->timeout(30)
+                ->timeout(60)
                 ->post('https://api.openai.com/v1/chat/completions', [
-                    'model' => 'gpt-4o-mini',
+                    'model' => 'gpt-4o',
                     'temperature' => 0.3,
                     'messages' => [
                         ['role' => 'system', 'content' => $systemPrompt],
-                        ['role' => 'user', 'content' => implode("\n", $lines)],
+                        ['role' => 'user', 'content' => "Translate ONLY these lines:\n\n" . implode("\n", $lines)],
                     ],
                 ]);
 
             if ($response->successful()) {
                 $translated = trim($response->json('choices.0.message.content') ?? '');
                 foreach (preg_split('/\n+/', $translated) as $line) {
-                    // Try format with speaker tag: "1. [M1] translated text"
-                    if (preg_match('/^(\d+)\.\s*\[([MF]\d+)\]\s*(.+)/', $line, $lm)) {
+                    if (preg_match('/^(\d+)\.\s*\[([MFC]\d+)\]\s*(.+)/', $line, $lm)) {
                         $idx = (int) $lm[1] - 1;
                         if (isset($batch[$idx])) {
                             $batch[$idx]['speaker'] = $lm[2];
                             $batch[$idx]['text'] = trim($lm[3]);
                         }
-                    // Fallback: no speaker tag
                     } elseif (preg_match('/^(\d+)\.\s*(.+)/', $line, $lm)) {
                         $idx = (int) $lm[1] - 1;
                         if (isset($batch[$idx])) {
@@ -206,12 +314,22 @@ class PrepareInstantDubJob implements ShouldQueue
             ['voice' => 'uz-UZ-MadinaNeural', 'pitch' => '-12Hz', 'rate' => '-8%'],  // much deeper
         ];
 
+        // Child voices: higher pitch for younger sound
+        $childVariants = [
+            ['voice' => 'uz-UZ-MadinaNeural', 'pitch' => '+15Hz', 'rate' => '+10%'],  // high, fast
+            ['voice' => 'uz-UZ-SardorNeural',  'pitch' => '+12Hz', 'rate' => '+8%'],   // boy
+        ];
+
         $voiceMap = [];
         $maleIdx = 0;
         $femaleIdx = 0;
+        $childIdx = 0;
 
         foreach (array_keys($speakers) as $tag) {
-            if (str_starts_with($tag, 'M')) {
+            if (str_starts_with($tag, 'C')) {
+                $voiceMap[$tag] = $childVariants[$childIdx % count($childVariants)];
+                $childIdx++;
+            } elseif (str_starts_with($tag, 'M')) {
                 $voiceMap[$tag] = $maleVariants[$maleIdx % count($maleVariants)];
                 $maleIdx++;
             } else {
