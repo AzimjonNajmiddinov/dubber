@@ -60,22 +60,43 @@ class PrepareInstantDubJob implements ShouldQueue
         }
 
         // 2. Parse SRT
-        $segments = SrtParser::parse($srt);
+        $allSegments = SrtParser::parse($srt);
 
-        // Filter sound effects
-        $segments = array_values(array_filter($segments, function ($seg) {
+        if (empty($allSegments)) {
+            $this->updateStatus('error', 'No segments found');
+            return;
+        }
+
+        // Build full raw dialogue for GPT context — includes [music], [laughing], annotations, everything
+        $fullDialogue = [];
+        foreach ($allSegments as $i => $seg) {
+            $fullDialogue[] = ($i + 1) . '. ' . $seg['text'];
+        }
+        $fullDialogueText = implode("\n", $fullDialogue);
+
+        // 3. Translate and dispatch TTS per batch — first TTS starts while rest translates
+        // If subtitle language matches dub language (e.g. Uzbek→Uzbek), skip translation entirely
+        $needsTranslation = $this->translateFrom && $this->translateFrom !== $this->language;
+        $dispatched = 0;
+        $allSpeakers = [];
+
+        // Pass 1: Analyze characters from FULL unedited dialogue (gender, age, relationships)
+        $characterContext = '';
+        if ($needsTranslation) {
+            $this->updateStatus('Analyzing characters...');
+            $characterContext = $this->analyzeCharacters($allSegments);
+        }
+
+        // Now filter to speakable segments only — for TTS dispatch
+        $segments = array_values(array_filter($allSegments, function ($seg) {
             $clean = preg_replace('/\[[^\]]*\]/', '', $seg['text']);
             $clean = preg_replace('/[-♪\s]+/', '', $clean);
             return $clean !== '';
         }));
 
-        if (empty($segments)) {
-            $this->updateStatus('error', 'No speakable segments');
-            return;
-        }
-
-        // Clean bracket annotations
+        // Clean bracket annotations for TTS (GPT already saw the raw version)
         foreach ($segments as &$seg) {
+            $seg['raw_text'] = $seg['text']; // keep raw for GPT translation input
             $clean = preg_replace('/\[[^\]]*\]\s*/', '', $seg['text']);
             $clean = preg_replace('/^-\s*/', '', $clean);
             $clean = preg_replace('/\s+-\s+/', ' ', $clean);
@@ -86,26 +107,6 @@ class PrepareInstantDubJob implements ShouldQueue
 
         // Update total count so UI can show progress
         $this->updateSession(['total_segments' => count($segments), 'status' => 'processing']);
-
-        // 3. Translate and dispatch TTS per batch — first TTS starts while rest translates
-        // If subtitle language matches dub language (e.g. Uzbek→Uzbek), skip translation entirely
-        $needsTranslation = $this->translateFrom && $this->translateFrom !== $this->language;
-        $dispatched = 0;
-        $allSpeakers = [];
-
-        // Pass 1: Analyze characters from full dialogue (gender, age, relationships)
-        $characterContext = '';
-        if ($needsTranslation) {
-            $this->updateStatus('Analyzing characters...');
-            $characterContext = $this->analyzeCharacters($segments);
-        }
-
-        // Build full dialogue text for context in each batch
-        $fullDialogue = [];
-        foreach ($segments as $i => $seg) {
-            $fullDialogue[] = ($i + 1) . '. ' . $seg['text'];
-        }
-        $fullDialogueText = implode("\n", $fullDialogue);
 
         // Pass 2: Translate in batches with full context
         $batches = array_chunk($segments, 15, true);
@@ -251,7 +252,9 @@ PROMPT;
         foreach ($batch as $i => $seg) {
             $duration = round($seg['end'] - $seg['start'], 1);
             $maxChars = (int) round($duration * 12);
-            $lines[] = ($i + 1) . '. [' . $duration . 's, max ' . $maxChars . ' chars] ' . $seg['text'];
+            // Send raw text (with annotations) so GPT sees full context
+            $rawText = $seg['raw_text'] ?? $seg['text'];
+            $lines[] = ($i + 1) . '. [' . $duration . 's, max ' . $maxChars . ' chars] ' . $rawText;
         }
 
         $uzbekRules = '';
@@ -302,10 +305,11 @@ FULL DIALOGUE (for context — do NOT translate this, only use for understanding
 
 TRANSLATION RULES:
 1. Each line has [Ns, max M chars]. Translation MUST fit within that character limit — it will be spoken in that time slot.
-2. Translate meaning, not words. Rephrase freely to sound natural in {$toLang}.
-3. Keep the emotional register: if someone is angry, scared, joking — the translation must convey that.
-4. Use the character analysis above to assign the correct speaker tag [M1], [F1], etc. to each line.
-5. Preserve interruptions, hesitations, and conversational flow.
+2. Lines may contain annotations like [music], [laughing], [whispering], [door opens] etc. — use these to understand the scene mood and context, but translate ONLY the spoken dialogue part. Do not include the annotations in your translation.
+3. Translate meaning, not words. Rephrase freely to sound natural in {$toLang}.
+4. Keep the emotional register: if someone is angry, scared, joking, whispering — the translation must convey that.
+5. Use the character analysis above to assign the correct speaker tag [M1], [F1], etc. to each line.
+6. Preserve interruptions, hesitations, and conversational flow.
 
 Format: "1. [M1] translated text"
 Do not include timing info. Do not skip or merge lines. Keep exact numbering.
