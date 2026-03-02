@@ -7,7 +7,6 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
-use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Facades\Redis;
@@ -46,22 +45,12 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         try {
             $slotDuration = $this->endTime - $this->startTime;
 
-            // 1. Generate TTS audio
+            // 1. Generate TTS audio via edge-tts with per-speaker voice/pitch/rate
             $tmpDir = '/tmp/instant-dub-' . $this->sessionId;
             @mkdir($tmpDir, 0755, true);
 
             $rawMp3 = "{$tmpDir}/seg_{$this->index}.mp3";
-
-            // Try UzbekVoice API for Uzbek language
-            $usedUzbekVoice = false;
-            if ($this->language === 'uz') {
-                $usedUzbekVoice = $this->generateWithUzbekVoice($rawMp3, $tmpDir);
-            }
-
-            // Fallback to edge-tts
-            if (!$usedUzbekVoice) {
-                $this->generateWithEdgeTts($rawMp3, $tmpDir);
-            }
+            $this->generateWithEdgeTts($rawMp3, $tmpDir);
 
             // 2. Check duration and speed up if needed
             $ttsDuration = $this->getAudioDuration($rawMp3);
@@ -110,7 +99,6 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                 'speaker' => $this->speaker,
                 'text' => Str::limit($this->text, 60),
                 'duration' => round($ttsDuration, 2),
-                'uzbekvoice' => $usedUzbekVoice,
             ]);
 
         } catch (\Throwable $e) {
@@ -137,140 +125,37 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         }
     }
 
-    private function generateWithUzbekVoice(string $outputMp3, string $tmpDir): bool
+    private function generateWithEdgeTts(string $outputMp3, string $tmpDir): void
     {
-        $apiUrl = config('services.uzbekvoice.url', 'https://uzbekvoice.ai/api/v1');
-        $apiKey = config('services.uzbekvoice.api_key', '');
-
-        if (!$apiKey) {
-            return false;
-        }
-
-        // Load voice map from Redis
+        // Load per-speaker voice settings from Redis voice map
         $voiceKey = "instant-dub:{$this->sessionId}:voices";
         $voiceMapJson = Redis::get($voiceKey);
         $voiceMap = $voiceMapJson ? json_decode($voiceMapJson, true) : [];
-        $voiceEntry = $voiceMap[$this->speaker] ?? ['model' => 'lola', 'pitch' => 0];
-        $model = $voiceEntry['model'] ?? 'lola';
-        $pitchShift = (float) ($voiceEntry['pitch'] ?? 0);
+        $speakerEntry = $voiceMap[$this->speaker] ?? null;
 
-        $maxRetries = 3;
-
-        for ($attempt = 1; $attempt <= $maxRetries; $attempt++) {
-            try {
-                $response = Http::timeout(60)
-                    ->withHeaders([
-                        'Authorization' => "Bearer {$apiKey}",
-                        'Accept' => 'application/json',
-                    ])
-                    ->post("{$apiUrl}/tts", [
-                        'text' => $this->text,
-                        'model' => $model,
-                        'blocking' => 'true',
-                    ]);
-
-                // Rate limit or server error — backoff and retry
-                if (in_array($response->status(), [400, 429, 500, 502, 503])) {
-                    $body = $response->body();
-                    $isRateLimit = str_contains($body, 'Too many') || str_contains($body, 'active requests');
-
-                    if ($attempt < $maxRetries && ($isRateLimit || $response->status() >= 500)) {
-                        $delay = $isRateLimit ? $attempt * 5 : $attempt * 3;
-                        Log::info("InstantDub UzbekVoice: retry {$attempt}/{$maxRetries} in {$delay}s", [
-                            'index' => $this->index,
-                            'status' => $response->status(),
-                        ]);
-                        sleep($delay);
-                        continue;
-                    }
-                    Log::warning('InstantDub UzbekVoice: API error, falling back', [
-                        'index' => $this->index,
-                        'status' => $response->status(),
-                    ]);
-                    return false;
-                }
-
-                if ($response->failed()) {
-                    return false;
-                }
-
-                $data = $response->json();
-
-                if (($data['status'] ?? '') !== 'SUCCESS' || empty($data['result']['url'])) {
-                    if ($attempt < $maxRetries) {
-                        sleep($attempt * 2);
-                        continue;
-                    }
-                    return false;
-                }
-
-                // Download the WAV from CDN
-                $audioResponse = Http::timeout(30)->get($data['result']['url']);
-                if ($audioResponse->failed() || strlen($audioResponse->body()) < 1000) {
-                    return false;
-                }
-
-                // Write WAV, convert to MP3 with optional pitch shift
-                $tmpWav = "{$tmpDir}/seg_{$this->index}_uv.wav";
-                file_put_contents($tmpWav, $audioResponse->body());
-
-                $filterParts = [];
-                if (abs($pitchShift) > 0.1) {
-                    $factor = round(2 ** ($pitchShift / 12), 6);
-                    $filterParts[] = "asetrate=44100*{$factor},aresample=44100";
-                }
-                $filterParts[] = 'aformat=sample_fmts=fltp';
-
-                $ffmpegCmd = [
-                    'ffmpeg', '-y', '-i', $tmpWav,
-                    '-af', implode(',', $filterParts),
-                    '-codec:a', 'libmp3lame', '-b:a', '128k',
-                    $outputMp3,
-                ];
-
-                $convertResult = Process::timeout(15)->run($ffmpegCmd);
-
-                @unlink($tmpWav);
-
-                if ($convertResult->successful() && file_exists($outputMp3) && filesize($outputMp3) > 200) {
-                    Log::info('InstantDub UzbekVoice: success', [
-                        'index' => $this->index,
-                        'speaker' => $this->speaker,
-                        'model' => $model,
-                        'pitch' => $pitchShift,
-                    ]);
-                    return true;
-                }
-
-                return false;
-
-            } catch (\Throwable $e) {
-                Log::warning('InstantDub UzbekVoice: exception', [
-                    'index' => $this->index,
-                    'attempt' => $attempt,
-                    'error' => $e->getMessage(),
-                ]);
-                if ($attempt < $maxRetries) {
-                    sleep($attempt * 2);
-                    continue;
-                }
-                return false;
-            }
+        if ($speakerEntry && !empty($speakerEntry['voice'])) {
+            $voice = $speakerEntry['voice'];
+            $pitch = $speakerEntry['pitch'] ?? '+0Hz';
+            $rate = $speakerEntry['rate'] ?? '+0%';
+        } else {
+            // Fallback: default voice per language
+            $voice = $this->getDefaultEdgeVoice();
+            $pitch = '+0Hz';
+            $rate = '+0%';
         }
-
-        return false;
-    }
-
-    private function generateWithEdgeTts(string $outputMp3, string $tmpDir): void
-    {
-        $voice = $this->getEdgeVoice();
 
         $tmpTxt = "{$tmpDir}/text_{$this->index}.txt";
         file_put_contents($tmpTxt, $this->text);
 
-        $result = Process::timeout(30)->run([
-            'edge-tts', '-f', $tmpTxt, '--voice', $voice, '--write-media', $outputMp3,
-        ]);
+        $cmd = [
+            'edge-tts', '-f', $tmpTxt,
+            '--voice', $voice,
+            '--pitch', $pitch,
+            '--rate', $rate,
+            '--write-media', $outputMp3,
+        ];
+
+        $result = Process::timeout(30)->run($cmd);
 
         @unlink($tmpTxt);
 
@@ -279,7 +164,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         }
     }
 
-    private function getEdgeVoice(): string
+    private function getDefaultEdgeVoice(): string
     {
         $voices = [
             'uz' => 'uz-UZ-SardorNeural',

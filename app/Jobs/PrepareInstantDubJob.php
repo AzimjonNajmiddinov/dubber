@@ -182,10 +182,21 @@ class PrepareInstantDubJob implements ShouldQueue
             $speakers[$tag] = true;
         }
 
-        // Only lola and shoira are confirmed working on UzbekVoice API.
-        // Differentiate speakers via voice + pitch shift (semitones).
-        $voicePool = ['lola', 'shoira'];
-        $pitchRounds = [0, -3.0, 3.0, -5.0, 5.0];
+        // Edge-tts voices with pitch variants for speaker differentiation.
+        // SardorNeural = male base, MadinaNeural = female base.
+        // Pitch: edge-tts --pitch=+/-NHz shifts vocal tone.
+        $maleVariants = [
+            ['voice' => 'uz-UZ-SardorNeural', 'pitch' => '+0Hz',  'rate' => '+0%'],
+            ['voice' => 'uz-UZ-SardorNeural', 'pitch' => '-8Hz',  'rate' => '-5%'],  // deeper, slower
+            ['voice' => 'uz-UZ-SardorNeural', 'pitch' => '+6Hz',  'rate' => '+5%'],  // higher, faster
+            ['voice' => 'uz-UZ-SardorNeural', 'pitch' => '-15Hz', 'rate' => '-8%'],  // much deeper
+        ];
+        $femaleVariants = [
+            ['voice' => 'uz-UZ-MadinaNeural', 'pitch' => '+0Hz',  'rate' => '+0%'],
+            ['voice' => 'uz-UZ-MadinaNeural', 'pitch' => '-6Hz',  'rate' => '-5%'],  // deeper
+            ['voice' => 'uz-UZ-MadinaNeural', 'pitch' => '+8Hz',  'rate' => '+5%'],  // higher
+            ['voice' => 'uz-UZ-MadinaNeural', 'pitch' => '-12Hz', 'rate' => '-8%'],  // much deeper
+        ];
 
         $voiceMap = [];
         $maleIdx = 0;
@@ -193,18 +204,10 @@ class PrepareInstantDubJob implements ShouldQueue
 
         foreach (array_keys($speakers) as $tag) {
             if (str_starts_with($tag, 'M')) {
-                $voice = $voicePool[$maleIdx % count($voicePool)];
-                $round = intdiv($maleIdx, count($voicePool));
-                $pitch = $pitchRounds[min($round, count($pitchRounds) - 1)];
-                // Males get negative pitch shift to sound deeper
-                if ($pitch == 0 && $maleIdx == 0) $pitch = -4.0;
-                $voiceMap[$tag] = ['model' => $voice, 'pitch' => $pitch];
+                $voiceMap[$tag] = $maleVariants[$maleIdx % count($maleVariants)];
                 $maleIdx++;
             } else {
-                $voice = $voicePool[$femaleIdx % count($voicePool)];
-                $round = intdiv($femaleIdx, count($voicePool));
-                $pitch = $pitchRounds[min($round, count($pitchRounds) - 1)];
-                $voiceMap[$tag] = ['model' => $voice, 'pitch' => $pitch];
+                $voiceMap[$tag] = $femaleVariants[$femaleIdx % count($femaleVariants)];
                 $femaleIdx++;
             }
         }
