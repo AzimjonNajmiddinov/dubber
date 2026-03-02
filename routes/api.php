@@ -58,7 +58,6 @@ Route::prefix('progressive')->middleware('cors.extension')->group(function () {
 // Instant dub API (SRT → TTS → play over video)
 Route::prefix('instant-dub')->group(function () {
     Route::post('/start', [InstantDubController::class, 'start'])->name('api.instant-dub.start');
-    Route::post('/fetch-subs', [InstantDubController::class, 'fetchSubs'])->name('api.instant-dub.fetch-subs');
     Route::get('/{sessionId}/poll', [InstantDubController::class, 'poll'])->name('api.instant-dub.poll');
     Route::post('/{sessionId}/stop', [InstantDubController::class, 'stop'])->name('api.instant-dub.stop');
 });

@@ -247,9 +247,9 @@
             if (!resp.ok) throw new Error(data.error || 'Failed to start');
 
             sessionId = data.session_id;
-            totalSegments = data.total_segments;
+            totalSegments = 0;
             lastChunkIndex = -1;
-            chunks = new Array(totalSegments).fill(null);
+            chunks = [];
 
             statusText.textContent = `0 / ${totalSegments} segments ready`;
             updateSegmentList();
@@ -294,6 +294,26 @@
 
             const ready = data.segments_ready || 0;
             const total = data.total_segments || totalSegments;
+
+            if (data.status === 'error') {
+                stopPolling();
+                statusText.textContent = 'Error: ' + (data.error || 'Unknown error');
+                btnStart.disabled = false; btnStop.disabled = true;
+                return;
+            }
+
+            if (data.status === 'preparing') {
+                statusText.textContent = 'Fetching subtitles & translating...';
+                return;
+            }
+
+            // Update total when server reports it
+            if (total > 0 && total !== totalSegments) {
+                totalSegments = total;
+                chunks = new Array(total).fill(null);
+                updateSegmentList();
+            }
+
             statusText.textContent = `${ready} / ${total} segments ready`;
             progressFill.style.width = (total > 0 ? Math.round((ready / total) * 100) : 0) + '%';
 
