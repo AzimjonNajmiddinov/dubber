@@ -33,8 +33,17 @@ class InstantDubController extends Controller
         $translateFrom = $request->input('translate_from');
 
         // Translate segments if source language specified
+        Log::info('Instant dub start params', [
+            'translate_from' => $translateFrom,
+            'language' => $language,
+            'will_translate' => $translateFrom && $translateFrom !== $language,
+            'segments_count' => count($segments),
+            'first_text' => $segments[0]['text'] ?? '',
+        ]);
+
         if ($translateFrom && $translateFrom !== $language) {
             $segments = $this->translateSegments($segments, $translateFrom, $language);
+            Log::info('Translation done', ['first_text_after' => $segments[0]['text'] ?? '']);
         }
 
         // Store session in Redis (14h TTL)
