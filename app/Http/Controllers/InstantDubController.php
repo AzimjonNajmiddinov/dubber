@@ -309,6 +309,10 @@ class InstantDubController extends Controller
 
                 if ($response->successful()) {
                     $translated = trim($response->json('choices.0.message.content') ?? '');
+                    Log::info('GPT translation response', [
+                        'raw' => Str::limit($translated, 500),
+                        'batch_keys' => array_keys($batch),
+                    ]);
                     $translatedLines = preg_split('/\n+/', $translated);
 
                     foreach ($translatedLines as $line) {
@@ -319,6 +323,11 @@ class InstantDubController extends Controller
                             }
                         }
                     }
+                } else {
+                    Log::error('GPT translation failed', [
+                        'status' => $response->status(),
+                        'body' => Str::limit($response->body(), 300),
+                    ]);
                 }
             } catch (\Throwable $e) {
                 Log::warning('Batch translation failed', ['error' => $e->getMessage()]);
