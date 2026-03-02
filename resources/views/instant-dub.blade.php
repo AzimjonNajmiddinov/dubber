@@ -236,7 +236,7 @@
             video.src = url;
         }
 
-        video.volume = 0.2;
+        video.volume = 0.4;
     }
 
     btnLoadVideo.addEventListener('click', () => {

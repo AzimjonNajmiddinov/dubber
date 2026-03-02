@@ -28,22 +28,26 @@ class InstantDubController extends Controller
             return response()->json(['error' => 'No valid SRT segments found'], 422);
         }
 
+        // Filter out sound-effect-only segments (e.g. [glass shatters], ♪ ♪)
+        $segments = array_values(array_filter($segments, function ($seg) {
+            $text = trim($seg['text']);
+            // Remove all bracket annotations
+            $clean = preg_replace('/\[[^\]]*\]/', '', $text);
+            // Remove dashes, music symbols, whitespace
+            $clean = preg_replace('/[-♪\s]+/', '', $clean);
+            return $clean !== '';
+        }));
+
+        if (empty($segments)) {
+            return response()->json(['error' => 'No speakable segments found (all are sound effects)'], 422);
+        }
+
         $sessionId = Str::uuid()->toString();
         $language = $request->input('language', 'uz');
         $translateFrom = $request->input('translate_from');
 
-        // Translate segments if source language specified
-        Log::info('Instant dub start params', [
-            'translate_from' => $translateFrom,
-            'language' => $language,
-            'will_translate' => $translateFrom && $translateFrom !== $language,
-            'segments_count' => count($segments),
-            'first_text' => $segments[0]['text'] ?? '',
-        ]);
-
         if ($translateFrom && $translateFrom !== $language) {
             $segments = $this->translateSegments($segments, $translateFrom, $language);
-            Log::info('Translation done', ['first_text_after' => $segments[0]['text'] ?? '']);
         }
 
         // Store session in Redis (14h TTL)
@@ -59,12 +63,17 @@ class InstantDubController extends Controller
 
         Redis::setex("instant-dub:{$sessionId}", 50400, json_encode($session));
 
-        // Dispatch all segments in parallel
+        // Dispatch all segments in parallel (strip any remaining bracket annotations)
         foreach ($segments as $i => $seg) {
+            $text = preg_replace('/\[[^\]]*\]\s*/', '', $seg['text']);
+            $text = preg_replace('/^-\s+/', '', trim($text));
+            $text = trim($text);
+            if ($text === '') continue;
+
             ProcessInstantDubSegmentJob::dispatch(
                 $sessionId,
                 $i,
-                $seg['text'],
+                $text,
                 $seg['start'],
                 $seg['end'],
                 $language,
