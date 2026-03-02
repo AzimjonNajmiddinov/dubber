@@ -266,74 +266,77 @@ class InstantDubController extends Controller
 
     private function translateSegments(array $segments, string $from, string $to): array
     {
-        $apiKey = config('services.openai.key');
-        if (!$apiKey) {
-            return $segments;
-        }
+        $translated = 0;
+        $failed = 0;
 
-        $langNames = [
-            'uz' => 'Uzbek', 'ru' => 'Russian', 'en' => 'English', 'tr' => 'Turkish',
-            'es' => 'Spanish', 'fr' => 'French', 'de' => 'German', 'ar' => 'Arabic',
-            'zh' => 'Chinese', 'ja' => 'Japanese', 'ko' => 'Korean',
-        ];
+        foreach ($segments as $i => &$seg) {
+            $text = $seg['text'];
 
-        $toLang = $langNames[$to] ?? $to;
-
-        // Batch translate in groups of 20 for efficiency
-        $batches = array_chunk($segments, 20, true);
-
-        foreach ($batches as $batchIndices => $batch) {
-            $lines = [];
-            $indexMap = [];
-            foreach ($batch as $i => $seg) {
-                $lines[] = ($i + 1) . '. ' . $seg['text'];
-                $indexMap[] = $i;
+            // Skip pure sound effects
+            if (preg_match('/^\[.*\]$/', trim($text))) {
+                continue;
             }
 
-            $prompt = implode("\n", $lines);
+            // Strip bracket annotations like [laughs], [woman], etc.
+            $cleanText = preg_replace('/\[[^\]]*\]\s*/', '', $text);
+            $cleanText = preg_replace('/^-\s*$/', '', $cleanText);
+            $cleanText = trim($cleanText);
+            if ($cleanText === '') {
+                continue;
+            }
 
             try {
-                $response = Http::withToken($apiKey)
-                    ->timeout(30)
-                    ->post('https://api.openai.com/v1/chat/completions', [
-                        'model' => 'gpt-4o-mini',
-                        'temperature' => 0.3,
-                        'messages' => [
-                            [
-                                'role' => 'system',
-                                'content' => "Translate the following numbered lines to {$toLang}. Keep the numbering. Output ONLY the translated numbered lines, nothing else. Keep it natural for spoken dialogue. Remove sound effect descriptions in brackets like [laughs], [screams], etc.",
-                            ],
-                            ['role' => 'user', 'content' => $prompt],
-                        ],
-                    ]);
-
-                if ($response->successful()) {
-                    $translated = trim($response->json('choices.0.message.content') ?? '');
-                    Log::info('GPT translation response', [
-                        'raw' => Str::limit($translated, 500),
-                        'batch_keys' => array_keys($batch),
-                    ]);
-                    $translatedLines = preg_split('/\n+/', $translated);
-
-                    foreach ($translatedLines as $line) {
-                        if (preg_match('/^(\d+)\.\s*(.+)/', $line, $lm)) {
-                            $lineIdx = (int) $lm[1] - 1;
-                            if (isset($segments[$lineIdx])) {
-                                $segments[$lineIdx]['text'] = trim($lm[2]);
-                            }
-                        }
-                    }
+                $result = $this->googleTranslate($cleanText, $from, $to);
+                if ($result && $result !== $cleanText) {
+                    $seg['text'] = $result;
+                    $translated++;
                 } else {
-                    Log::error('GPT translation failed', [
-                        'status' => $response->status(),
-                        'body' => Str::limit($response->body(), 300),
-                    ]);
+                    $failed++;
                 }
             } catch (\Throwable $e) {
-                Log::warning('Batch translation failed', ['error' => $e->getMessage()]);
+                $failed++;
+                Log::warning('Segment translation failed', ['index' => $i, 'error' => $e->getMessage()]);
+            }
+        }
+        unset($seg);
+
+        Log::info('Translation complete', ['translated' => $translated, 'failed' => $failed, 'total' => count($segments)]);
+
+        return $segments;
+    }
+
+    private function googleTranslate(string $text, string $from, string $to): ?string
+    {
+        $url = 'https://translate.googleapis.com/translate_a/single?' . http_build_query([
+            'client' => 'gtx',
+            'sl' => $from,
+            'tl' => $to,
+            'dt' => 't',
+            'q' => $text,
+        ]);
+
+        $response = Http::timeout(10)
+            ->withHeaders(['User-Agent' => 'Mozilla/5.0'])
+            ->get($url);
+
+        if ($response->failed()) {
+            return null;
+        }
+
+        $data = $response->json();
+
+        if (!is_array($data) || !isset($data[0])) {
+            return null;
+        }
+
+        // Response format: [[["translated","original",null,null,N]], ...]
+        $result = '';
+        foreach ($data[0] as $part) {
+            if (is_array($part) && isset($part[0])) {
+                $result .= $part[0];
             }
         }
 
-        return $segments;
+        return trim($result) ?: null;
     }
 }
