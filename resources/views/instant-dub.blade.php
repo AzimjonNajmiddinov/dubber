@@ -188,26 +188,31 @@
         toggleSrt.textContent = srtSection.classList.contains('open') ? 'Hide SRT' : 'Paste SRT manually';
     });
 
-    // HLS Video Loading
+    // HLS Video Loading — returns a promise that resolves when video is ready to play
     function loadVideo(url) {
-        if (!url) return;
-        if (hlsInstance) { hlsInstance.destroy(); hlsInstance = null; }
+        return new Promise((resolve, reject) => {
+            if (!url) { reject('No URL'); return; }
+            if (hlsInstance) { hlsInstance.destroy(); hlsInstance = null; }
 
-        if (url.includes('.m3u8')) {
-            if (video.canPlayType('application/vnd.apple.mpegurl')) {
-                video.src = url;
-            } else if (typeof Hls !== 'undefined' && Hls.isSupported()) {
-                hlsInstance = new Hls();
-                hlsInstance.loadSource(url);
-                hlsInstance.attachMedia(video);
+            if (url.includes('.m3u8')) {
+                if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                    video.src = url;
+                    video.addEventListener('loadedmetadata', () => resolve(), { once: true });
+                } else if (typeof Hls !== 'undefined' && Hls.isSupported()) {
+                    hlsInstance = new Hls();
+                    hlsInstance.loadSource(url);
+                    hlsInstance.attachMedia(video);
+                    hlsInstance.on(Hls.Events.MANIFEST_PARSED, () => resolve());
+                    hlsInstance.on(Hls.Events.ERROR, (_, d) => { if (d.fatal) reject(d.type); });
+                } else {
+                    reject('HLS not supported'); return;
+                }
             } else {
-                alert('HLS not supported in this browser');
-                return;
+                video.src = url;
+                video.addEventListener('loadedmetadata', () => resolve(), { once: true });
             }
-        } else {
-            video.src = url;
-        }
-        video.volume = 0.4;
+            video.volume = 0.4;
+        });
     }
 
     // Start Dubbing — one button does everything
@@ -215,14 +220,20 @@
         const url = videoUrl.value.trim();
         if (!url) { alert('Enter a video URL'); return; }
 
-        // Load video
-        loadVideo(url);
-
         btnStart.disabled = true;
         btnStop.disabled = false;
         statusBar.classList.add('active');
-        statusText.textContent = 'Fetching subtitles & translating...';
+        statusText.textContent = 'Loading video...';
         progressFill.style.width = '0%';
+
+        // Load video and start playback inside user gesture context (click)
+        try {
+            await loadVideo(url);
+            await video.play();
+        } catch (e) {
+            console.warn('Video play failed:', e);
+        }
+        statusText.textContent = 'Fetching subtitles & translating...';
 
         try {
             const body = {
@@ -326,11 +337,6 @@
                     chunks[chunk.index] = chunk;
                 }
                 updateSegmentList();
-
-                // Auto-play video once first chunks arrive
-                if (video.paused && chunks.some(c => c && c._audioBuffer)) {
-                    try { await video.play(); } catch (e) { console.warn('Autoplay blocked:', e); }
-                }
                 if (!video.paused) scheduleAudio();
             }
 
