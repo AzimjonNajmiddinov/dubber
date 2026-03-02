@@ -80,6 +80,7 @@ class PrepareInstantDubJob implements ShouldQueue
         // 3. Translate + dispatch TTS in batches of 10 (so first TTS starts while rest translates)
         $needsTranslation = $this->translateFrom && $this->translateFrom !== $this->language;
         $dispatched = 0;
+        $allSegments = [];
 
         $batches = array_chunk($segments, 10, true);
         foreach ($batches as $batch) {
@@ -91,12 +92,22 @@ class PrepareInstantDubJob implements ShouldQueue
                 $text = trim($seg['text']);
                 if ($text === '') continue;
 
-                ProcessInstantDubSegmentJob::dispatch(
-                    $this->sessionId, $i, $text,
-                    $seg['start'], $seg['end'], $this->language,
-                )->onQueue('segment-generation');
-                $dispatched++;
+                $seg['text'] = $text;
+                $allSegments[$i] = $seg;
             }
+        }
+
+        // 4. Build voice map from detected speakers and store in Redis
+        $this->buildVoiceMap($allSegments);
+
+        // 5. Dispatch TTS jobs with speaker tags
+        foreach ($allSegments as $i => $seg) {
+            ProcessInstantDubSegmentJob::dispatch(
+                $this->sessionId, $i, $seg['text'],
+                $seg['start'], $seg['end'], $this->language,
+                $seg['speaker'] ?? 'M1',
+            )->onQueue('segment-generation');
+            $dispatched++;
         }
 
         Log::info('Instant dub prepared', [
@@ -123,6 +134,8 @@ class PrepareInstantDubJob implements ShouldQueue
             $lines[] = ($i + 1) . '. ' . $seg['text'];
         }
 
+        $systemPrompt = "You are a professional film/series subtitle translator. Translate every line to natural, fluent {$toLang}. This is dialogue from a movie — preserve the tone, emotion and full meaning of each phrase. Do not skip or merge lines. Keep the exact same numbering.\n\nAlso identify distinct speakers from dialogue context (voice, style, who is addressed). Prefix each line with a speaker tag: [M1] for first male speaker, [M2] for second male, [F1] for first female, [F2] for second female, etc.\n\nFormat each line exactly as: \"1. [M1] translated text here\"";
+
         try {
             $response = Http::withToken($apiKey)
                 ->timeout(30)
@@ -130,10 +143,7 @@ class PrepareInstantDubJob implements ShouldQueue
                     'model' => 'gpt-4o-mini',
                     'temperature' => 0.3,
                     'messages' => [
-                        [
-                            'role' => 'system',
-                            'content' => "You are a professional film/series subtitle translator. Translate every line to natural, fluent {$toLang}. This is dialogue from a movie — preserve the tone, emotion and full meaning of each phrase. Do not skip or merge lines. Do not add anything extra. Keep the exact same numbering. One translated line per number.",
-                        ],
+                        ['role' => 'system', 'content' => $systemPrompt],
                         ['role' => 'user', 'content' => implode("\n", $lines)],
                     ],
                 ]);
@@ -141,7 +151,15 @@ class PrepareInstantDubJob implements ShouldQueue
             if ($response->successful()) {
                 $translated = trim($response->json('choices.0.message.content') ?? '');
                 foreach (preg_split('/\n+/', $translated) as $line) {
-                    if (preg_match('/^(\d+)\.\s*(.+)/', $line, $lm)) {
+                    // Try format with speaker tag: "1. [M1] translated text"
+                    if (preg_match('/^(\d+)\.\s*\[([MF]\d+)\]\s*(.+)/', $line, $lm)) {
+                        $idx = (int) $lm[1] - 1;
+                        if (isset($batch[$idx])) {
+                            $batch[$idx]['speaker'] = $lm[2];
+                            $batch[$idx]['text'] = trim($lm[3]);
+                        }
+                    // Fallback: no speaker tag
+                    } elseif (preg_match('/^(\d+)\.\s*(.+)/', $line, $lm)) {
                         $idx = (int) $lm[1] - 1;
                         if (isset($batch[$idx])) {
                             $batch[$idx]['text'] = trim($lm[2]);
@@ -154,6 +172,41 @@ class PrepareInstantDubJob implements ShouldQueue
         }
 
         return $batch;
+    }
+
+    private function buildVoiceMap(array $segments): void
+    {
+        $speakers = [];
+        foreach ($segments as $seg) {
+            $tag = $seg['speaker'] ?? 'M1';
+            $speakers[$tag] = true;
+        }
+
+        $maleVoices = ['davron', 'jahongir'];
+        $femaleVoices = ['dilfuza', 'fotima', 'lola', 'shoira'];
+
+        $voiceMap = [];
+        $maleIdx = 0;
+        $femaleIdx = 0;
+
+        foreach (array_keys($speakers) as $tag) {
+            if (str_starts_with($tag, 'M')) {
+                $voiceMap[$tag] = $maleVoices[$maleIdx % count($maleVoices)];
+                $maleIdx++;
+            } else {
+                $voiceMap[$tag] = $femaleVoices[$femaleIdx % count($femaleVoices)];
+                $femaleIdx++;
+            }
+        }
+
+        $voiceKey = "instant-dub:{$this->sessionId}:voices";
+        Redis::setex($voiceKey, 50400, json_encode($voiceMap));
+
+        Log::info('Voice map built', [
+            'session' => $this->sessionId,
+            'speakers' => array_keys($speakers),
+            'map' => $voiceMap,
+        ]);
     }
 
     private function fetchSubsFromHls(string $url): ?string

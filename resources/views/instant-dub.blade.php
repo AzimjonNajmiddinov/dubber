@@ -369,16 +369,26 @@
         scheduledSources = [];
     }
 
-    // Subtitle display
+    // Speaker color map
+    const speakerColors = {
+        'M1': '#fff', 'M2': '#7dd3fc', 'M3': '#86efac', 'M4': '#fde68a',
+        'F1': '#fca5a5', 'F2': '#c4b5fd', 'F3': '#f9a8d4', 'F4': '#fdba74',
+    };
+
+    // Subtitle display with per-speaker color
     function updateSubtitle() {
         const t = video.currentTime;
         let found = '';
+        let speaker = '';
         for (let i = 0; i < chunks.length; i++) {
             const c = chunks[i];
-            if (c && t >= c.start_time && t <= c.end_time) { found = c.text; break; }
+            if (c && t >= c.start_time && t <= c.end_time) { found = c.text; speaker = c.speaker || ''; break; }
         }
         const span = subtitleOverlay.querySelector('span');
-        if (span.textContent !== found) span.textContent = found;
+        if (span.textContent !== found) {
+            span.textContent = found;
+            span.style.color = speakerColors[speaker] || '#fff';
+        }
     }
 
     video.addEventListener('play', () => { if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume(); scheduleAudio(); });
