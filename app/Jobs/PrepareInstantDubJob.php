@@ -35,18 +35,28 @@ class PrepareInstantDubJob implements ShouldQueue
         // 1. Get subtitles — from SRT or fetch from HLS
         $srt = $this->srt;
 
+        $detectedLang = null;
+
         if (trim($srt) === '' && str_contains($this->videoUrl, '.m3u8')) {
             $this->updateStatus('Fetching subtitles...');
-            $srt = $this->fetchSubsFromHls($this->videoUrl);
-            if (!$srt) {
+            $hlsResult = $this->fetchSubsFromHls($this->videoUrl);
+            if (!$hlsResult) {
                 $this->updateStatus('error', 'No subtitles found in HLS');
                 return;
             }
+            $srt = $hlsResult['srt'];
+            $detectedLang = $hlsResult['language'];
         }
 
         if (trim($srt) === '') {
             $this->updateStatus('error', 'No subtitles available');
             return;
+        }
+
+        // Override translateFrom with auto-detected language when set to 'auto'
+        if ($detectedLang && ($this->translateFrom === 'auto' || $this->translateFrom === '')) {
+            $this->translateFrom = $detectedLang;
+            Log::info('Auto-detected subtitle language', ['language' => $detectedLang, 'session' => $this->sessionId]);
         }
 
         // 2. Parse SRT
@@ -78,6 +88,7 @@ class PrepareInstantDubJob implements ShouldQueue
         $this->updateSession(['total_segments' => count($segments), 'status' => 'processing']);
 
         // 3. Translate and dispatch TTS per batch — first TTS starts while rest translates
+        // If subtitle language matches dub language (e.g. Uzbek→Uzbek), skip translation entirely
         $needsTranslation = $this->translateFrom && $this->translateFrom !== $this->language;
         $dispatched = 0;
         $allSpeakers = [];
@@ -112,7 +123,9 @@ class PrepareInstantDubJob implements ShouldQueue
         Log::info('Instant dub prepared', [
             'session' => $this->sessionId,
             'segments' => $dispatched,
-            'translated' => $needsTranslation,
+            'needsTranslation' => $needsTranslation,
+            'translateFrom' => $this->translateFrom,
+            'detectedLang' => $detectedLang,
         ]);
     }
 
@@ -217,7 +230,7 @@ class PrepareInstantDubJob implements ShouldQueue
         ]);
     }
 
-    private function fetchSubsFromHls(string $url): ?string
+    private function fetchSubsFromHls(string $url): ?array
     {
         try {
             $masterResp = Http::timeout(10)->get($url);
@@ -226,7 +239,50 @@ class PrepareInstantDubJob implements ShouldQueue
             $master = $masterResp->body();
             $baseUrl = preg_replace('#/[^/]+$#', '/', $url);
 
-            if (!preg_match('/TYPE=SUBTITLES.*?URI="([^"]+)"/', $master, $m)) return null;
+            // Parse all subtitle tracks: find each EXT-X-MEDIA line with TYPE=SUBTITLES
+            preg_match_all('/^#EXT-X-MEDIA:.*TYPE=SUBTITLES.*$/m', $master, $subLines);
+            $tracks = [];
+            foreach ($subLines[0] ?? [] as $line) {
+                $lang = preg_match('/LANGUAGE="([^"]*)"/', $line, $lm) ? $lm[1] : 'unknown';
+                $uri = preg_match('/URI="([^"]+)"/', $line, $um) ? $um[1] : null;
+                if ($uri) $tracks[] = ['lang' => $lang, 'uri' => $uri];
+            }
+
+            if (empty($tracks)) {
+                // Fallback: try simpler match for any subtitle URI
+                if (!preg_match('/TYPE=SUBTITLES.*?URI="([^"]+)"/', $master, $m)) return null;
+                $tracks = [['lang' => 'unknown', 'uri' => $m[1]]];
+            }
+
+            // Priority: uz > ru > first track
+            $selectedUri = $tracks[0]['uri'];
+            $detectedLang = 'unknown';
+
+            foreach ($tracks as $track) {
+                $lang = strtolower($track['lang']);
+                if (str_contains($lang, 'uz')) {
+                    $selectedUri = $track['uri'];
+                    $detectedLang = 'uz';
+                    break;
+                }
+            }
+
+            if ($detectedLang === 'unknown') {
+                foreach ($tracks as $track) {
+                    $lang = strtolower($track['lang']);
+                    if (str_contains($lang, 'ru')) {
+                        $selectedUri = $track['uri'];
+                        $detectedLang = 'ru';
+                        break;
+                    }
+                }
+            }
+
+            Log::info('Subtitle track selected', [
+                'language' => $detectedLang,
+                'uri' => $selectedUri,
+                'available' => array_map(fn($t) => $t['lang'], $tracks),
+            ]);
 
             $query = parse_url($url, PHP_URL_QUERY);
             $resolve = function ($base, $rel) use ($url, $query) {
@@ -235,12 +291,12 @@ class PrepareInstantDubJob implements ShouldQueue
                 return $query ? "{$r}?{$query}" : $r;
             };
 
-            $subsUrl = $resolve($baseUrl, $m[1]);
+            $subsUrl = $resolve($baseUrl, $selectedUri);
             $subsResp = Http::timeout(10)->get($subsUrl);
             if ($subsResp->failed()) return null;
 
             $subsBase = preg_replace('#/[^/]+$#', '/', $subsUrl);
-            preg_match_all('/^(seg-\S+\.vtt)$/m', $subsResp->body(), $vttFiles);
+            preg_match_all('/^(\S+\.vtt)$/m', $subsResp->body(), $vttFiles);
             if (empty($vttFiles[1])) return null;
 
             // Fetch VTT segments concurrently via pool
@@ -276,7 +332,7 @@ class PrepareInstantDubJob implements ShouldQueue
                 $srt .= "{$num}\n" . str_replace('.', ',', $m[2]) . ' --> ' . str_replace('.', ',', $m[3]) . "\n{$text}\n\n";
             }
 
-            return $srt ?: null;
+            return $srt ? ['srt' => $srt, 'language' => $detectedLang] : null;
         } catch (\Throwable $e) {
             Log::error('HLS sub fetch failed', ['error' => $e->getMessage()]);
             return null;

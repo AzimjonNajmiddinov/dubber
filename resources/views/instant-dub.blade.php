@@ -92,7 +92,8 @@
                 <div class="field">
                     <label>Subtitle language</label>
                     <select id="translateFrom">
-                        <option value="en" selected>English</option>
+                        <option value="auto" selected>Auto-detect (HLS)</option>
+                        <option value="en">English</option>
                         <option value="ru">Russian</option>
                         <option value="uz">Uzbek</option>
                         <option value="tr">Turkish</option>
