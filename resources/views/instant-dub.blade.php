@@ -44,9 +44,19 @@
 
         .actions { display: flex; gap: 10px; margin-top: 8px; flex-wrap: wrap; }
 
+        .video-wrap { position: relative; border-radius: 8px; overflow: hidden; background: #000; }
         video {
-            width: 100%; border-radius: 8px; background: #000;
+            width: 100%; display: block; background: #000;
             max-height: 500px;
+        }
+        .subtitle-overlay {
+            position: absolute; bottom: 40px; left: 0; right: 0;
+            text-align: center; pointer-events: none; padding: 0 16px;
+        }
+        .subtitle-overlay span {
+            display: inline-block; padding: 4px 14px; border-radius: 4px;
+            background: rgba(0,0,0,0.75); color: #fff; font-size: 1.1rem;
+            line-height: 1.4; max-width: 90%;
         }
 
         .status-bar {
@@ -148,9 +158,12 @@
         </div>
 
         <div class="panel">
-            <video id="videoPlayer" controls crossorigin="anonymous">
-                Your browser does not support the video element.
-            </video>
+            <div class="video-wrap">
+                <video id="videoPlayer" controls crossorigin="anonymous">
+                    Your browser does not support the video element.
+                </video>
+                <div class="subtitle-overlay" id="subtitleOverlay"><span></span></div>
+            </div>
 
             <div class="status-bar" id="statusBar">
                 <span id="statusText">Ready</span>
@@ -184,6 +197,7 @@
     const statusText = document.getElementById('statusText');
     const progressFill = document.getElementById('progressFill');
     const segmentList = document.getElementById('segmentList');
+    const subtitleOverlay = document.getElementById('subtitleOverlay');
 
     // State
     let sessionId = null;
@@ -475,13 +489,32 @@
         scheduledSources = [];
     }
 
-    // Video events — reschedule on play/pause/seek
+    // ---- Subtitle Display ----
+    function updateSubtitle() {
+        const t = video.currentTime;
+        let found = '';
+        for (let i = 0; i < chunks.length; i++) {
+            const c = chunks[i];
+            if (!c) continue;
+            if (t >= c.start_time && t <= c.end_time) {
+                found = c.text;
+                break;
+            }
+        }
+        const span = subtitleOverlay.querySelector('span');
+        if (span.textContent !== found) {
+            span.textContent = found;
+        }
+    }
+
+    // Video events — reschedule on play/pause/seek + subtitle sync
     video.addEventListener('play', () => {
         if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
         scheduleAudio();
     });
     video.addEventListener('pause', () => cancelAllAudio());
     video.addEventListener('seeked', () => { if (!video.paused) scheduleAudio(); });
+    video.addEventListener('timeupdate', updateSubtitle);
 
     // ---- Segment List ----
     function updateSegmentList() {
