@@ -137,7 +137,7 @@
 
         <div class="panel">
             <div class="video-wrap">
-                <video id="videoPlayer" controls crossorigin="anonymous">
+                <video id="videoPlayer" controls>
                     Your browser does not support the video element.
                 </video>
                 <div class="subtitle-overlay" id="subtitleOverlay"><span></span></div>
@@ -200,7 +200,7 @@
                     video.src = url;
                     video.addEventListener('loadedmetadata', () => resolve(), { once: true });
                 } else if (typeof Hls !== 'undefined' && Hls.isSupported()) {
-                    hlsInstance = new Hls();
+                    hlsInstance = new Hls({ enableWorker: false });
                     hlsInstance.loadSource(url);
                     hlsInstance.attachMedia(video);
                     hlsInstance.on(Hls.Events.MANIFEST_PARSED, () => resolve());
@@ -220,6 +220,12 @@
     btnStart.addEventListener('click', async () => {
         const url = videoUrl.value.trim();
         if (!url) { alert('Enter a video URL'); return; }
+
+        // Create AudioContext immediately in click handler — Chrome requires user gesture
+        if (!audioCtx) {
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        }
+        if (audioCtx.state === 'suspended') audioCtx.resume();
 
         btnStart.disabled = true;
         btnStop.disabled = false;
@@ -265,11 +271,6 @@
 
             statusText.textContent = `0 / ${totalSegments} segments ready`;
             updateSegmentList();
-
-            if (!audioCtx) {
-                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-            }
-            if (audioCtx.state === 'suspended') await audioCtx.resume();
 
             startPolling();
 
