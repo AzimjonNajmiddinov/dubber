@@ -77,10 +77,10 @@ class PrepareInstantDubJob implements ShouldQueue
         // Update total count so UI can show progress
         $this->updateSession(['total_segments' => count($segments), 'status' => 'processing']);
 
-        // 3. Translate + dispatch TTS in batches of 10 (so first TTS starts while rest translates)
+        // 3. Translate and dispatch TTS per batch — first TTS starts while rest translates
         $needsTranslation = $this->translateFrom && $this->translateFrom !== $this->language;
         $dispatched = 0;
-        $allSegments = [];
+        $allSpeakers = [];
 
         $batches = array_chunk($segments, 10, true);
         foreach ($batches as $batch) {
@@ -88,26 +88,25 @@ class PrepareInstantDubJob implements ShouldQueue
                 $batch = $this->translateBatch($batch);
             }
 
+            // Collect speakers and update voice map incrementally
+            foreach ($batch as $seg) {
+                $tag = $seg['speaker'] ?? 'M1';
+                $allSpeakers[$tag] = true;
+            }
+            $this->buildVoiceMap($allSpeakers);
+
+            // Dispatch TTS immediately for this batch
             foreach ($batch as $i => $seg) {
                 $text = trim($seg['text']);
                 if ($text === '') continue;
 
-                $seg['text'] = $text;
-                $allSegments[$i] = $seg;
+                ProcessInstantDubSegmentJob::dispatch(
+                    $this->sessionId, $i, $text,
+                    $seg['start'], $seg['end'], $this->language,
+                    $seg['speaker'] ?? 'M1',
+                )->onQueue('segment-generation');
+                $dispatched++;
             }
-        }
-
-        // 4. Build voice map from detected speakers and store in Redis
-        $this->buildVoiceMap($allSegments);
-
-        // 5. Dispatch TTS jobs with speaker tags
-        foreach ($allSegments as $i => $seg) {
-            ProcessInstantDubSegmentJob::dispatch(
-                $this->sessionId, $i, $seg['text'],
-                $seg['start'], $seg['end'], $this->language,
-                $seg['speaker'] ?? 'M1',
-            )->onQueue('segment-generation');
-            $dispatched++;
         }
 
         Log::info('Instant dub prepared', [
@@ -176,14 +175,8 @@ class PrepareInstantDubJob implements ShouldQueue
         return $batch;
     }
 
-    private function buildVoiceMap(array $segments): void
+    private function buildVoiceMap(array $speakers): void
     {
-        $speakers = [];
-        foreach ($segments as $seg) {
-            $tag = $seg['speaker'] ?? 'M1';
-            $speakers[$tag] = true;
-        }
-
         // Edge-tts voices with pitch variants for speaker differentiation.
         // SardorNeural = male base, MadinaNeural = female base.
         // Pitch: edge-tts --pitch=+/-NHz shifts vocal tone.
