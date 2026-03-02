@@ -326,6 +326,11 @@
                     chunks[chunk.index] = chunk;
                 }
                 updateSegmentList();
+
+                // Auto-play video once first chunks arrive
+                if (video.paused && chunks.some(c => c && c._audioBuffer)) {
+                    try { await video.play(); } catch (e) { console.warn('Autoplay blocked:', e); }
+                }
                 if (!video.paused) scheduleAudio();
             }
 

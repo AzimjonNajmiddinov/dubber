@@ -147,11 +147,13 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         $tmpTxt = "{$tmpDir}/text_{$this->index}.txt";
         file_put_contents($tmpTxt, $this->text);
 
+        // Use --pitch=VALUE format (not --pitch VALUE) because negative
+        // values like -8Hz get misinterpreted as flags in separate args.
         $cmd = [
             'edge-tts', '-f', $tmpTxt,
             '--voice', $voice,
-            '--pitch', $pitch,
-            '--rate', $rate,
+            "--pitch={$pitch}",
+            "--rate={$rate}",
             '--write-media', $outputMp3,
         ];
 
