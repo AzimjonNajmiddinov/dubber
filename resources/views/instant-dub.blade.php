@@ -95,9 +95,9 @@
                 <label>Video / HLS URL</label>
                 <div style="display:flex; gap:8px;">
                     <input type="text" id="videoUrl" placeholder="https://...master.m3u8 or .mp4" style="flex:1;">
-                    <button class="btn btn-secondary btn-sm" id="btnLoadVideo">Load</button>
+                    <button class="btn btn-primary btn-sm" id="btnLoad">Load</button>
                 </div>
-                <div class="hint">Supports .mp4 direct URLs and .m3u8 HLS playlists</div>
+                <div class="hint">Loads video + fetches subtitles automatically for HLS</div>
             </div>
 
             <div class="inline-row">
@@ -120,10 +120,7 @@
             </div>
 
             <div class="row">
-                <div style="display:flex; justify-content:space-between; align-items:end; margin-bottom:4px;">
-                    <label style="margin:0;">SRT Subtitles</label>
-                    <button class="btn btn-secondary btn-sm" id="btnFetchSubs">Fetch from HLS</button>
-                </div>
+                <label>SRT Subtitles</label>
                 <textarea id="srtText" rows="12" placeholder="Paste SRT here, or click 'Fetch from HLS' to extract from video URL..."></textarea>
                 <div class="hint" id="subsInfo"></div>
             </div>
@@ -187,8 +184,7 @@
     const srtText = document.getElementById('srtText');
     const btnStart = document.getElementById('btnStart');
     const btnStop = document.getElementById('btnStop');
-    const btnLoadVideo = document.getElementById('btnLoadVideo');
-    const btnFetchSubs = document.getElementById('btnFetchSubs');
+    const btnLoad = document.getElementById('btnLoad');
     const autoTranslate = document.getElementById('autoTranslate');
     const translateFrom = document.getElementById('translateFrom');
     const subsInfo = document.getElementById('subsInfo');
@@ -239,48 +235,41 @@
         video.volume = 0.4;
     }
 
-    btnLoadVideo.addEventListener('click', () => {
-        loadVideo(videoUrl.value.trim());
-    });
-
-    // ---- Fetch Subtitles from HLS ----
-    btnFetchSubs.addEventListener('click', async () => {
+    // ---- Load: play video + fetch subs if HLS ----
+    btnLoad.addEventListener('click', async () => {
         const url = videoUrl.value.trim();
-        if (!url) {
-            alert('Enter a video URL first');
-            return;
-        }
+        if (!url) { alert('Enter a video URL first'); return; }
 
-        btnFetchSubs.disabled = true;
-        btnFetchSubs.textContent = 'Fetching...';
-        subsInfo.textContent = '';
+        loadVideo(url);
 
-        try {
-            const resp = await fetch('/api/instant-dub/fetch-subs', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-                body: JSON.stringify({ url }),
-            });
+        // If HLS, also fetch subtitles
+        if (url.includes('.m3u8')) {
+            btnLoad.disabled = true;
+            btnLoad.textContent = 'Loading...';
+            subsInfo.textContent = 'Fetching subtitles...';
 
-            const data = await resp.json();
+            try {
+                const resp = await fetch('/api/instant-dub/fetch-subs', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                    body: JSON.stringify({ url }),
+                });
+                const data = await resp.json();
 
-            if (!resp.ok) {
-                throw new Error(data.error || 'Failed to fetch subtitles');
+                if (!resp.ok) throw new Error(data.error || 'Failed to fetch subtitles');
+
+                srtText.value = data.srt;
+                subsInfo.textContent = `Found ${data.segments_count} cues (${data.subtitle_language})`;
+
+                if (data.subtitle_language) {
+                    translateFrom.value = data.subtitle_language.substring(0, 2);
+                }
+            } catch (err) {
+                subsInfo.textContent = 'No subtitles found — paste SRT manually';
+            } finally {
+                btnLoad.disabled = false;
+                btnLoad.textContent = 'Load';
             }
-
-            srtText.value = data.srt;
-            subsInfo.textContent = `Found ${data.segments_count} subtitle cues (language: ${data.subtitle_language})`;
-
-            // Auto-set source language
-            if (data.subtitle_language) {
-                const langCode = data.subtitle_language.substring(0, 2);
-                translateFrom.value = langCode;
-            }
-        } catch (err) {
-            subsInfo.textContent = 'Error: ' + err.message;
-        } finally {
-            btnFetchSubs.disabled = false;
-            btnFetchSubs.textContent = 'Fetch from HLS';
         }
     });
 

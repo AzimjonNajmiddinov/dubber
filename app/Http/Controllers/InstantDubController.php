@@ -314,7 +314,7 @@ class InstantDubController extends Controller
                         'messages' => [
                             [
                                 'role' => 'system',
-                                'content' => "Translate to {$toLang}. Keep numbering. One line per number. Correct meaning only, no repetition between lines.",
+                                'content' => "You are a professional film/series subtitle translator. Translate every line to natural, fluent {$toLang}. This is dialogue from a movie — preserve the tone, emotion and full meaning of each phrase. Do not skip or merge lines. Do not add anything extra. Keep the exact same numbering. One translated line per number.",
                             ],
                             ['role' => 'user', 'content' => implode("\n", $lines)],
                         ],
