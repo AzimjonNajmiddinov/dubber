@@ -16,13 +16,32 @@ class InstantDubController extends Controller
     public function start(Request $request): JsonResponse
     {
         $request->validate([
-            'srt' => 'required|string|min:10',
+            'srt' => 'nullable|string',
             'language' => 'required|string|max:10',
             'video_url' => 'nullable|string',
             'translate_from' => 'nullable|string|max:10',
         ]);
 
-        $segments = SrtParser::parse($request->input('srt'));
+        $srt = $request->input('srt', '');
+        $videoUrl = $request->input('video_url', '');
+
+        // If no SRT provided, try to fetch from HLS URL
+        if (trim($srt) === '' && $videoUrl && str_contains($videoUrl, '.m3u8')) {
+            $fetchResult = $this->fetchSubsFromHls($videoUrl);
+            if ($fetchResult) {
+                $srt = $fetchResult['srt'];
+                // Auto-detect subtitle source language
+                if (!$request->input('translate_from') && !empty($fetchResult['language'])) {
+                    $request->merge(['translate_from' => $fetchResult['language']]);
+                }
+            }
+        }
+
+        if (trim($srt) === '') {
+            return response()->json(['error' => 'No subtitles provided and could not fetch from URL'], 422);
+        }
+
+        $segments = SrtParser::parse($srt);
 
         if (empty($segments)) {
             return response()->json(['error' => 'No valid SRT segments found'], 422);
@@ -142,52 +161,45 @@ class InstantDubController extends Controller
         return response()->json(['status' => 'stopped']);
     }
 
-    /**
-     * Fetch subtitles from an HLS master playlist URL.
-     */
     public function fetchSubs(Request $request): JsonResponse
     {
-        $request->validate([
-            'url' => 'required|string',
+        $request->validate(['url' => 'required|string']);
+
+        $result = $this->fetchSubsFromHls($request->input('url'));
+
+        if (!$result) {
+            return response()->json(['error' => 'No subtitles found in HLS playlist'], 404);
+        }
+
+        return response()->json([
+            'srt' => $result['srt'],
+            'subtitle_language' => $result['language'],
+            'segments_count' => substr_count($result['srt'], ' --> '),
         ]);
+    }
 
-        $url = $request->input('url');
-
+    private function fetchSubsFromHls(string $url): ?array
+    {
         try {
-            // 1. Fetch master playlist
             $masterResp = Http::timeout(10)->get($url);
-            if ($masterResp->failed()) {
-                return response()->json(['error' => 'Failed to fetch master playlist'], 400);
-            }
+            if ($masterResp->failed()) return null;
 
             $master = $masterResp->body();
             $baseUrl = preg_replace('#/[^/]+$#', '/', $url);
 
-            // 2. Find subtitle playlist URI
-            if (!preg_match('/TYPE=SUBTITLES.*?URI="([^"]+)"/', $master, $m)) {
-                return response()->json(['error' => 'No subtitle track found in HLS playlist'], 404);
-            }
+            if (!preg_match('/TYPE=SUBTITLES.*?URI="([^"]+)"/', $master, $m)) return null;
 
             $subsPlaylistUrl = $this->resolveUrl($baseUrl, $m[1], $url);
-
-            // 3. Fetch subtitle playlist
             $subsResp = Http::timeout(10)->get($subsPlaylistUrl);
-            if ($subsResp->failed()) {
-                return response()->json(['error' => 'Failed to fetch subtitle playlist'], 400);
-            }
+            if ($subsResp->failed()) return null;
 
             $subsPlaylist = $subsResp->body();
             $subsBaseUrl = preg_replace('#/[^/]+$#', '/', $subsPlaylistUrl);
 
-            // 4. Extract VTT segment filenames
             preg_match_all('/^(seg-\S+\.vtt)$/m', $subsPlaylist, $vttFiles);
             $vttFiles = $vttFiles[1] ?? [];
+            if (empty($vttFiles)) return null;
 
-            if (empty($vttFiles)) {
-                return response()->json(['error' => 'No VTT segments found'], 404);
-            }
-
-            // 5. Fetch all VTT segments and merge
             $allVtt = '';
             foreach ($vttFiles as $vttFile) {
                 $vttUrl = $this->resolveUrl($subsBaseUrl, $vttFile, $subsPlaylistUrl);
@@ -197,24 +209,16 @@ class InstantDubController extends Controller
                 }
             }
 
-            // 6. Parse VTT → deduplicated SRT
             $srt = $this->vttToSrt($allVtt);
-
-            // Detect subtitle language from master playlist
             $subLang = 'en';
             if (preg_match('/TYPE=SUBTITLES.*?LANGUAGE="([^"]+)"/', $master, $langMatch)) {
                 $subLang = $langMatch[1];
             }
 
-            return response()->json([
-                'srt' => $srt,
-                'subtitle_language' => $subLang,
-                'segments_count' => substr_count($srt, ' --> '),
-            ]);
-
+            return ['srt' => $srt, 'language' => $subLang];
         } catch (\Throwable $e) {
             Log::error('HLS subtitle fetch failed', ['url' => $url, 'error' => $e->getMessage()]);
-            return response()->json(['error' => 'Failed to extract subtitles: ' . $e->getMessage()], 500);
+            return null;
         }
     }
 
