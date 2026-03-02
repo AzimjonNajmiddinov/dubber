@@ -154,29 +154,61 @@ class PrepareInstantDubJob implements ShouldQueue
             $lines[] = ($i + 1) . '. ' . $seg['text'];
         }
 
-        $prompt = <<<'PROMPT'
-Analyze this dialogue from a film/series. Identify ALL distinct speakers.
+        $sourceLangRules = '';
+        if ($this->translateFrom === 'ru') {
+            $sourceLangRules = <<<'RULES'
 
-For each speaker provide:
-- Tag: M1, M2 (male), F1, F2 (female), C1 (child)
-- Who they are (name if mentioned, or role like "old man", "young woman", "boy")
-- Approximate age category: child, young, adult, elderly
-- Their relationships to other speakers
+RUSSIAN GENDER DETECTION — use these clues to determine speaker gender:
+- Past tense verb endings: -л (male: сказал, пошёл, знал), -ла (female: сказала, пошла, знала)
+- Short adjective forms: рад/готов/должен (male), рада/готова/должна (female)
+- Self-references: "я сам" (male), "я сама" (female)
+- Russian names: masculine (Андрей, Сергей, Дмитрий, Алексей), feminine (Мария, Анна, Елена, Наталья)
+- Patronymics: -ович/-евич (addressing male), -овна/-евна (addressing female)
+- Diminutives: -ка, -очка, -енька often for females; -ик, -чик often for males
 
-Then list which speaker says which line numbers.
+RUSSIAN FORMALITY DETECTION — maps to Uzbek sen/siz:
+- "ты" forms (говоришь, идёшь, -ешь/-ишь endings) = informal → the listener is younger or close
+- "Вы" forms (говорите, идёте, -ете/-ите endings) = formal → the listener is older or respected
+- This tells you the RELATIONSHIP: if speaker uses "ты", they are senior to or close peers with the listener
+RULES;
+        } elseif ($this->translateFrom === 'en') {
+            $sourceLangRules = <<<'RULES'
+
+ENGLISH GENDER DETECTION — use these clues:
+- Pronouns used about the speaker by others: "he/him/his" (male), "she/her" (female)
+- Names: gendered names (John=male, Mary=female)
+- Terms of address: "sir/mister/Mr." (male), "ma'am/miss/Mrs./Ms." (female)
+- Family roles: "father/son/brother/husband" (male), "mother/daughter/sister/wife" (female)
+- Vocal descriptions in stage directions: "he said", "she whispered"
+RULES;
+        }
+
+        $prompt = <<<PROMPT
+You are analyzing a film/series dialogue to identify speakers. This is CRITICAL for voice dubbing — wrong gender = wrong voice actor.
+
+{$sourceLangRules}
+
+TASK: Analyze every line carefully. Determine:
+1. How many distinct speakers are in this dialogue
+2. Each speaker's GENDER (from grammatical clues, names, context — see rules above)
+3. Each speaker's approximate AGE (child, young ~15-25, adult ~25-50, elderly ~50+)
+4. Relationships between speakers (parent-child, friends, spouses, boss-employee, etc.)
+5. Which lines each speaker says
+
+IMPORTANT:
+- Do NOT guess gender randomly. If a line has "-ла" ending (Russian), it's FEMALE. If "-л" ending, it's MALE.
+- Look at consecutive lines — dialogues alternate between speakers. If line 1 asks a question and line 2 answers, they are usually different speakers.
+- A dash "-" at the start of a line often indicates a different speaker from the previous line.
+- If someone is addressed by name, that person is the LISTENER, not the speaker.
 
 Format your response EXACTLY like this:
 CHARACTERS:
-M1: Akbar, elderly man, father
-F1: Nilufar, young woman, daughter of M1
-M2: Jasur, young man, friend
-C1: Ali, child, son of F1
+M1: [name/role], [age category], [relationship to others]
+F1: [name/role], [age category], [relationship to others]
 
 LINES:
 1-3,7,12: M1
 4-6,8-9: F1
-10-11: M2
-13-15: C1
 PROMPT;
 
         try {
@@ -184,7 +216,7 @@ PROMPT;
                 ->timeout(45)
                 ->post('https://api.openai.com/v1/chat/completions', [
                     'model' => 'gpt-4o',
-                    'temperature' => 0.2,
+                    'temperature' => 0.1,
                     'messages' => [
                         ['role' => 'system', 'content' => $prompt],
                         ['role' => 'user', 'content' => implode("\n", $lines)],
@@ -223,19 +255,38 @@ PROMPT;
         }
 
         $uzbekRules = '';
+        $fromLangHint = '';
         if ($this->language === 'uz') {
-            $uzbekRules = <<<'UZ'
+            if ($this->translateFrom === 'ru') {
+                $fromLangHint = <<<'HINT'
+
+RUSSIAN→UZBEK MAPPING:
+- Russian "ты" (informal) → Uzbek "sen": speaker is older/senior or they are close friends
+- Russian "Вы" (formal) → Uzbek "Siz": speaker is younger or it's a formal setting
+- Keep this consistent: if character A uses "ты" to B in Russian, A must use "sen" to B in Uzbek throughout
+HINT;
+            }
+
+            $uzbekRules = <<<UZ
 
 UZBEK LANGUAGE RULES (CRITICAL):
-- Address forms based on speaker→listener relationship:
-  * Elderly/adult speaking to a child or much younger person → use "sen" (informal you), verb endings: -san, -ding, etc.
-  * Young person speaking to elderly/adult → use "Siz" (formal you), verb endings: -siz, -dingiz, etc.
-  * Peers of similar age → "sen" if close friends/family, "siz" if formal/strangers
-  * Child to parent → "siz" or affectionate forms
-- Use natural spoken Uzbek, not bookish/literary style
-- Contractions and colloquial forms are preferred (e.g. "qilyapman" not "qilayotirman")
-- Keep emotional tone: anger, tenderness, humor should come through in word choice
+- SEN/SIZ — this is the #1 priority, getting it wrong ruins the dub:
+  * Look at CHARACTER ANALYSIS above for age and relationships
+  * Elderly/parent → child/young person: always "sen" (-san, -ding, -yapsanmi)
+  * Young person → elderly/parent: always "Siz" (-siz, -dingiz, -yapsizmi)
+  * Same-age close friends: "sen"
+  * Same-age strangers/formal: "Siz"
+  * Child → parent: "Siz" (respectful)
+  * Husband ↔ wife: usually "sen" (intimate)
+  * Boss → employee: can be "sen"; employee → boss: "Siz"
+{$fromLangHint}
+- STYLE — spoken Uzbek, like real people talk:
+  * Use colloquial forms: "qilyapman" not "qilayotirman", "ketyapman" not "ketayotirman"
+  * Use "bor" not "mavjud", "yo'q" not "mavjud emas"
+  * Contractions: "nimaga" not "nima uchun" (when casual)
+  * Emotional words: "voy!" (surprise), "ey!" (calling), "qo'ying!" (stop it!)
 - Names and proper nouns: keep original, don't translate
+- Keep emotional register: anger, love, fear, humor must come through
 UZ;
         }
 
