@@ -182,8 +182,10 @@ class PrepareInstantDubJob implements ShouldQueue
             $speakers[$tag] = true;
         }
 
-        $maleVoices = ['davron', 'jahongir'];
-        $femaleVoices = ['dilfuza', 'fotima', 'lola', 'shoira'];
+        // Only lola and shoira are confirmed working on UzbekVoice API.
+        // Differentiate speakers via voice + pitch shift (semitones).
+        $voicePool = ['lola', 'shoira'];
+        $pitchRounds = [0, -3.0, 3.0, -5.0, 5.0];
 
         $voiceMap = [];
         $maleIdx = 0;
@@ -191,10 +193,18 @@ class PrepareInstantDubJob implements ShouldQueue
 
         foreach (array_keys($speakers) as $tag) {
             if (str_starts_with($tag, 'M')) {
-                $voiceMap[$tag] = $maleVoices[$maleIdx % count($maleVoices)];
+                $voice = $voicePool[$maleIdx % count($voicePool)];
+                $round = intdiv($maleIdx, count($voicePool));
+                $pitch = $pitchRounds[min($round, count($pitchRounds) - 1)];
+                // Males get negative pitch shift to sound deeper
+                if ($pitch == 0 && $maleIdx == 0) $pitch = -4.0;
+                $voiceMap[$tag] = ['model' => $voice, 'pitch' => $pitch];
                 $maleIdx++;
             } else {
-                $voiceMap[$tag] = $femaleVoices[$femaleIdx % count($femaleVoices)];
+                $voice = $voicePool[$femaleIdx % count($voicePool)];
+                $round = intdiv($femaleIdx, count($voicePool));
+                $pitch = $pitchRounds[min($round, count($pitchRounds) - 1)];
+                $voiceMap[$tag] = ['model' => $voice, 'pitch' => $pitch];
                 $femaleIdx++;
             }
         }

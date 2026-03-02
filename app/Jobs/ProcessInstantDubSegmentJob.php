@@ -150,7 +150,9 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         $voiceKey = "instant-dub:{$this->sessionId}:voices";
         $voiceMapJson = Redis::get($voiceKey);
         $voiceMap = $voiceMapJson ? json_decode($voiceMapJson, true) : [];
-        $model = $voiceMap[$this->speaker] ?? 'davron';
+        $voiceEntry = $voiceMap[$this->speaker] ?? ['model' => 'lola', 'pitch' => 0];
+        $model = $voiceEntry['model'] ?? 'lola';
+        $pitchShift = (float) ($voiceEntry['pitch'] ?? 0);
 
         $maxRetries = 3;
 
@@ -208,15 +210,25 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                     return false;
                 }
 
-                // Write WAV, convert to MP3
+                // Write WAV, convert to MP3 with optional pitch shift
                 $tmpWav = "{$tmpDir}/seg_{$this->index}_uv.wav";
                 file_put_contents($tmpWav, $audioResponse->body());
 
-                $convertResult = Process::timeout(15)->run([
+                $filterParts = [];
+                if (abs($pitchShift) > 0.1) {
+                    $factor = round(2 ** ($pitchShift / 12), 6);
+                    $filterParts[] = "asetrate=44100*{$factor},aresample=44100";
+                }
+                $filterParts[] = 'aformat=sample_fmts=fltp';
+
+                $ffmpegCmd = [
                     'ffmpeg', '-y', '-i', $tmpWav,
+                    '-af', implode(',', $filterParts),
                     '-codec:a', 'libmp3lame', '-b:a', '128k',
                     $outputMp3,
-                ]);
+                ];
+
+                $convertResult = Process::timeout(15)->run($ffmpegCmd);
 
                 @unlink($tmpWav);
 
@@ -225,6 +237,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                         'index' => $this->index,
                         'speaker' => $this->speaker,
                         'model' => $model,
+                        'pitch' => $pitchShift,
                     ]);
                     return true;
                 }
