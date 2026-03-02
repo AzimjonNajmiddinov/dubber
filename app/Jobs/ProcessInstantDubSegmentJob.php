@@ -56,9 +56,10 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             $ttsDuration = $this->getAudioDuration($rawMp3);
             $finalMp3 = $rawMp3;
 
-            if ($ttsDuration > $slotDuration && $slotDuration > 0.5) {
+            if ($ttsDuration > $slotDuration * 1.05 && $slotDuration > 0.5) {
                 $ratio = $ttsDuration / $slotDuration;
-                $tempo = min($ratio, 1.5);
+                // Gentle speed-up only — cap at 1.15x to avoid robotic sound
+                $tempo = min($ratio, 1.15);
 
                 $speedMp3 = "{$tmpDir}/seg_{$this->index}_fast.mp3";
                 $speedResult = Process::timeout(15)->run([

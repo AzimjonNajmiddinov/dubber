@@ -131,10 +131,12 @@ class PrepareInstantDubJob implements ShouldQueue
 
         $lines = [];
         foreach ($batch as $i => $seg) {
-            $lines[] = ($i + 1) . '. ' . $seg['text'];
+            $duration = round($seg['end'] - $seg['start'], 1);
+            $maxChars = (int) round($duration * 12); // ~12 chars/sec for Uzbek TTS
+            $lines[] = ($i + 1) . '. [' . $duration . 's, max ' . $maxChars . ' chars] ' . $seg['text'];
         }
 
-        $systemPrompt = "You are a professional film/series subtitle translator. Translate every line to natural, fluent {$toLang}. This is dialogue from a movie — preserve the tone, emotion and full meaning of each phrase. Do not skip or merge lines. Keep the exact same numbering.\n\nAlso identify distinct speakers from dialogue context (voice, style, who is addressed). Prefix each line with a speaker tag: [M1] for first male speaker, [M2] for second male, [F1] for first female, [F2] for second female, etc.\n\nFormat each line exactly as: \"1. [M1] translated text here\"";
+        $systemPrompt = "You are a professional film/series subtitle translator for voice dubbing. Translate every line to natural, fluent {$toLang}.\n\nCRITICAL: Each line has a time slot shown as [Ns, max M chars]. The translation MUST fit within that character limit because it will be spoken aloud by TTS. Use concise, natural phrasing. Shorten wordy constructions. Prefer shorter synonyms. Drop filler words. The meaning must be preserved but brevity is essential.\n\nAlso identify distinct speakers from dialogue context. Prefix each line with a speaker tag: [M1] for first male, [M2] second male, [F1] first female, etc.\n\nFormat: \"1. [M1] translated text\"\nDo not include the timing info in your output. Do not skip or merge lines. Keep the exact numbering.";
 
         try {
             $response = Http::withToken($apiKey)
