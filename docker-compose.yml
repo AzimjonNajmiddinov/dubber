@@ -12,10 +12,6 @@ services:
         condition: service_started
       mysql:
         condition: service_healthy
-      whisperx:
-        condition: service_started
-      demucs:
-        condition: service_healthy
     dns:
       - 1.1.1.1
       - 8.8.8.8
@@ -37,10 +33,6 @@ services:
         condition: service_started
       mysql:
         condition: service_healthy
-      whisperx:
-        condition: service_started
-      demucs:
-        condition: service_healthy
     dns:
       - 1.1.1.1
       - 8.8.8.8
@@ -50,7 +42,6 @@ services:
           - queue
     restart: unless-stopped
 
-  # Additional queue workers for parallel chunk processing
   queue2:
     build:
       context: .
@@ -63,10 +54,6 @@ services:
       redis:
         condition: service_started
       mysql:
-        condition: service_healthy
-      whisperx:
-        condition: service_started
-      demucs:
         condition: service_healthy
     dns:
       - 1.1.1.1
@@ -97,28 +84,6 @@ services:
       dubber:
         aliases:
           - queue3
-    restart: unless-stopped
-
-  queue4:
-    build:
-      context: .
-      dockerfile: docker/php/Dockerfile
-    container_name: movie_dubber_queue4
-    command: php -d memory_limit=512M artisan queue:work --queue=chunks,default --sleep=3 --tries=2 --timeout=600
-    volumes:
-      - .:/var/www
-    depends_on:
-      redis:
-        condition: service_started
-      mysql:
-        condition: service_healthy
-    dns:
-      - 1.1.1.1
-      - 8.8.8.8
-    networks:
-      dubber:
-        aliases:
-          - queue4
     restart: unless-stopped
 
   nginx:
@@ -172,137 +137,9 @@ services:
       timeout: 5s
       retries: 10
 
-  whisperx:
-    build: ./whisperx-service
-    container_name: movie_whisperx_service
-    ports:
-      - "8001:8000"
-    volumes:
-      - ./storage/app:/var/www/storage/app
-      - whisperx_hf_cache:/root/.cache/huggingface
-      - whisperx_torch_cache:/root/.cache/torch
-    environment:
-      HF_TOKEN: ${HF_TOKEN}
-      OMP_NUM_THREADS: "1"
-      MKL_NUM_THREADS: "1"
-      OPENBLAS_NUM_THREADS: "1"
-      NUMEXPR_NUM_THREADS: "1"
-      HF_HUB_DISABLE_PROGRESS_BARS: "1"
-      TORCH_HOME: /root/.cache/torch
-    mem_limit: 8g
-    restart: unless-stopped
-    dns:
-      - 1.1.1.1
-      - 8.8.8.8
-    healthcheck:
-      test: [ "CMD-SHELL", "curl -fsS http://127.0.0.1:8000/health >/dev/null" ]
-      interval: 3s
-      timeout: 2s
-      retries: 20
-      start_period: 5s
-    networks:
-      dubber:
-        aliases:
-          - whisperx
-          - whisperx-service
-  lipsync:
-    build: ./lipsync-service
-    container_name: movie_dubber_lipsync
-    platform: linux/amd64
-    volumes:
-      - ./storage/app:/var/www/storage/app
-      - lipsync_cache:/root/.cache
-    ports:
-      - "8003:8000"
-    environment:
-      OMP_NUM_THREADS: 1
-      MKL_NUM_THREADS: 1
-      OPENBLAS_NUM_THREADS: 1
-      NUMEXPR_NUM_THREADS: 1
-    restart: unless-stopped
-    dns:
-      - 1.1.1.1
-      - 8.8.8.8
-    networks:
-      dubber:
-        aliases:
-          - lipsync
-          - lipsync-service
-
-  demucs:
-    build: ./demucs-service
-    container_name: movie_dubber_demucs
-    ports:
-      - "8002:8000"
-    volumes:
-      - ./storage/app:/var/www/storage/app
-      - demucs_cache:/root/.cache
-    environment:
-      # Limit to 1 thread to reduce CPU usage
-      OMP_NUM_THREADS: "1"
-      MKL_NUM_THREADS: "1"
-      OPENBLAS_NUM_THREADS: "1"
-      NUMEXPR_NUM_THREADS: "1"
-    mem_limit: 4g
-    cpus: 1.5
-    restart: unless-stopped
-    dns:
-      - 1.1.1.1
-      - 8.8.8.8
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/health >/dev/null"]
-      interval: 20s
-      timeout: 10s
-      retries: 10
-      start_period: 30s
-    networks:
-      dubber:
-        aliases:
-          - demucs
-          - demucs-service
-
-  xtts:
-    build: ./xtts-service
-    container_name: movie_dubber_xtts
-    ports:
-      - "8004:8000"
-    volumes:
-      - ./storage/app:/var/www/storage/app
-      - xtts_voices:/app/voices
-      - xtts_cache:/root/.cache
-    environment:
-      STORAGE_PATH: /var/www/storage/app
-      VOICES_PATH: /app/voices
-      OMP_NUM_THREADS: "2"
-      MKL_NUM_THREADS: "2"
-      COQUI_TOS_AGREED: "1"
-    mem_limit: 8g
-    cpus: 2
-    restart: unless-stopped
-    dns:
-      - 1.1.1.1
-      - 8.8.8.8
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/health >/dev/null"]
-      interval: 30s
-      timeout: 10s
-      retries: 10
-      start_period: 60s
-    networks:
-      dubber:
-        aliases:
-          - xtts
-          - xtts-service
-
 networks:
   dubber:
     name: dubber
 
 volumes:
   mysql_data:
-  whisperx_hf_cache:
-  whisperx_torch_cache:
-  demucs_cache:
-  lipsync_cache:
-  xtts_voices:
-  xtts_cache:
