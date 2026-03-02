@@ -6,6 +6,7 @@ use App\Http\Controllers\RealtimeDubController;
 use App\Http\Controllers\SegmentPlayerController;
 use App\Http\Controllers\LiveDubController;
 use App\Http\Controllers\ProgressiveDubController;
+use App\Http\Controllers\InstantDubController;
 
 // URL-based video dubbing & streaming (no CSRF required)
 Route::prefix('stream')->group(function () {
@@ -52,4 +53,12 @@ Route::prefix('progressive')->middleware('cors.extension')->group(function () {
     Route::get('/{sessionId}/poll', [ProgressiveDubController::class, 'poll'])->name('api.progressive.poll');
     Route::post('/{sessionId}/capture-chunk', [ProgressiveDubController::class, 'captureChunk'])->name('api.progressive.capture');
     Route::post('/{sessionId}/stop', [ProgressiveDubController::class, 'stop'])->name('api.progressive.stop');
+});
+
+// Instant dub API (SRT → TTS → play over video)
+Route::prefix('instant-dub')->group(function () {
+    Route::post('/start', [InstantDubController::class, 'start'])->name('api.instant-dub.start');
+    Route::post('/fetch-subs', [InstantDubController::class, 'fetchSubs'])->name('api.instant-dub.fetch-subs');
+    Route::get('/{sessionId}/poll', [InstantDubController::class, 'poll'])->name('api.instant-dub.poll');
+    Route::post('/{sessionId}/stop', [InstantDubController::class, 'stop'])->name('api.instant-dub.stop');
 });

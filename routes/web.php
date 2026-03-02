@@ -44,6 +44,9 @@ Route::post('/dub/chunk', [OnlineDubController::class, 'uploadChunk'])->name('du
 Route::post('/dub/complete', [OnlineDubController::class, 'uploadComplete'])->name('dub.complete');
 Route::get('/dub/{video}', [OnlineDubController::class, 'progress'])->name('dub.progress');
 
+// Instant dub (SRT → TTS over video)
+Route::get('/instant-dub', fn() => view('instant-dub'))->name('instant-dub');
+
 // Admin panel (password protected)
 Route::middleware('admin.password')->group(function () {
     Route::get('/admin/queue', [QueueMonitorController::class, 'index'])->name('admin.queue');
