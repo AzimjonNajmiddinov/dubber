@@ -159,6 +159,8 @@ class PrepareInstantDubJob implements ShouldQueue
             // Dispatch TTS immediately for this batch
             foreach ($batch as $i => $seg) {
                 $text = trim($seg['text']);
+                // Strip bracket annotations GPT may have kept (e.g. [narrator], [music])
+                $text = trim(preg_replace('/\[[^\]]*\]\s*/', '', $text));
                 if ($text === '') continue;
 
                 ProcessInstantDubSegmentJob::dispatch(
