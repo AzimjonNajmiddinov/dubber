@@ -80,23 +80,16 @@ class PrepareInstantDubJob implements ShouldQueue
         $dispatched = 0;
         $allSpeakers = [];
 
-        // Pass 1: Analyze characters from FULL unedited dialogue (gender, age, relationships)
-        $characterContext = '';
-        if ($needsTranslation) {
-            $this->updateStatus('Analyzing characters...');
-            $characterContext = $this->analyzeCharacters($allSegments);
-        }
-
-        // Now filter to speakable segments only — for TTS dispatch
+        // Filter to speakable segments for TTS dispatch
         $segments = array_values(array_filter($allSegments, function ($seg) {
             $clean = preg_replace('/\[[^\]]*\]/', '', $seg['text']);
             $clean = preg_replace('/[-♪\s]+/', '', $clean);
             return $clean !== '';
         }));
 
-        // Clean bracket annotations for TTS (GPT already saw the raw version)
+        // Clean bracket annotations for TTS (GPT sees the raw version)
         foreach ($segments as &$seg) {
-            $seg['raw_text'] = $seg['text']; // keep raw for GPT translation input
+            $seg['raw_text'] = $seg['text'];
             $clean = preg_replace('/\[[^\]]*\]\s*/', '', $seg['text']);
             $clean = preg_replace('/^-\s*/', '', $clean);
             $clean = preg_replace('/\s+-\s+/', ' ', $clean);
@@ -108,10 +101,51 @@ class PrepareInstantDubJob implements ShouldQueue
         // Update total count so UI can show progress
         $this->updateSession(['total_segments' => count($segments), 'status' => 'processing']);
 
-        // Pass 2: Translate in batches with full context
         $batches = array_chunk($segments, 15, true);
-        foreach ($batches as $batch) {
-            if ($needsTranslation) {
+        $characterContext = '';
+
+        foreach ($batches as $batchIdx => $batch) {
+            if (!$needsTranslation) {
+                // No translation — dispatch TTS directly
+            } elseif ($batchIdx === 0) {
+                // FIRST BATCH: translate + analyze characters IN PARALLEL
+                // Translate batch 1 without character context (faster start)
+                // Character analysis runs simultaneously for batches 2+
+                $this->updateStatus('Translating...');
+
+                $apiKey = config('services.openai.key');
+                if ($apiKey) {
+                    $analysisPrompt = $this->buildAnalysisPrompt($allSegments);
+                    $translationMessages = $this->buildTranslationMessages($batch, '', $fullDialogueText);
+
+                    $pool = Http::pool(function ($pool) use ($apiKey, $analysisPrompt, $translationMessages) {
+                        $pool->as('analysis')->withToken($apiKey)->timeout(45)
+                            ->post('https://api.openai.com/v1/chat/completions', [
+                                'model' => 'gpt-4o',
+                                'temperature' => 0.1,
+                                'messages' => $analysisPrompt,
+                            ]);
+                        $pool->as('translation')->withToken($apiKey)->timeout(60)
+                            ->post('https://api.openai.com/v1/chat/completions', [
+                                'model' => 'gpt-4o',
+                                'temperature' => 0.3,
+                                'messages' => $translationMessages,
+                            ]);
+                    });
+
+                    // Process character analysis result
+                    if (isset($pool['analysis']) && $pool['analysis'] instanceof \Illuminate\Http\Client\Response && $pool['analysis']->successful()) {
+                        $characterContext = trim($pool['analysis']->json('choices.0.message.content') ?? '');
+                        Log::info('Character analysis', ['session' => $this->sessionId, 'result' => $characterContext]);
+                    }
+
+                    // Process translation result
+                    if (isset($pool['translation']) && $pool['translation'] instanceof \Illuminate\Http\Client\Response && $pool['translation']->successful()) {
+                        $batch = $this->parseTranslationResponse($batch, $pool['translation']->json('choices.0.message.content') ?? '');
+                    }
+                }
+            } else {
+                // BATCHES 2+: translate with character context
                 $batch = $this->translateBatch($batch, $characterContext, $fullDialogueText);
             }
 
@@ -145,11 +179,8 @@ class PrepareInstantDubJob implements ShouldQueue
         ]);
     }
 
-    private function analyzeCharacters(array $segments): string
+    private function buildAnalysisPrompt(array $segments): array
     {
-        $apiKey = config('services.openai.key');
-        if (!$apiKey) return '';
-
         $lines = [];
         foreach ($segments as $i => $seg) {
             $lines[] = ($i + 1) . '. ' . $seg['text'];
@@ -212,35 +243,14 @@ LINES:
 4-6,8-9: F1
 PROMPT;
 
-        try {
-            $response = Http::withToken($apiKey)
-                ->timeout(45)
-                ->post('https://api.openai.com/v1/chat/completions', [
-                    'model' => 'gpt-4o',
-                    'temperature' => 0.1,
-                    'messages' => [
-                        ['role' => 'system', 'content' => $prompt],
-                        ['role' => 'user', 'content' => implode("\n", $lines)],
-                    ],
-                ]);
-
-            if ($response->successful()) {
-                $result = trim($response->json('choices.0.message.content') ?? '');
-                Log::info('Character analysis', ['session' => $this->sessionId, 'result' => $result]);
-                return $result;
-            }
-        } catch (\Throwable $e) {
-            Log::warning('Character analysis failed', ['error' => $e->getMessage()]);
-        }
-
-        return '';
+        return [
+            ['role' => 'system', 'content' => $prompt],
+            ['role' => 'user', 'content' => implode("\n", $lines)],
+        ];
     }
 
-    private function translateBatch(array $batch, string $characterContext, string $fullDialogue): array
+    private function buildTranslationMessages(array $batch, string $characterContext, string $fullDialogue): array
     {
-        $apiKey = config('services.openai.key');
-        if (!$apiKey) return $batch;
-
         $langNames = [
             'uz' => 'Uzbek', 'ru' => 'Russian', 'en' => 'English', 'tr' => 'Turkish',
             'es' => 'Spanish', 'fr' => 'French', 'de' => 'German', 'ar' => 'Arabic',
@@ -252,7 +262,6 @@ PROMPT;
         foreach ($batch as $i => $seg) {
             $duration = round($seg['end'] - $seg['start'], 1);
             $maxChars = (int) round($duration * 12);
-            // Send raw text (with annotations) so GPT sees full context
             $rawText = $seg['raw_text'] ?? $seg['text'];
             $lines[] = ($i + 1) . '. [' . $duration . 's, max ' . $maxChars . ' chars] ' . $rawText;
         }
@@ -315,34 +324,49 @@ Format: "1. [M1] translated text"
 Do not include timing info. Do not skip or merge lines. Keep exact numbering.
 PROMPT;
 
+        return [
+            ['role' => 'system', 'content' => $systemPrompt],
+            ['role' => 'user', 'content' => "Translate ONLY these lines:\n\n" . implode("\n", $lines)],
+        ];
+    }
+
+    private function parseTranslationResponse(array $batch, string $content): array
+    {
+        $translated = trim($content);
+        foreach (preg_split('/\n+/', $translated) as $line) {
+            if (preg_match('/^(\d+)\.\s*\[([MFC]\d+)\]\s*(.+)/', $line, $lm)) {
+                $idx = (int) $lm[1] - 1;
+                if (isset($batch[$idx])) {
+                    $batch[$idx]['speaker'] = $lm[2];
+                    $batch[$idx]['text'] = trim($lm[3]);
+                }
+            } elseif (preg_match('/^(\d+)\.\s*(.+)/', $line, $lm)) {
+                $idx = (int) $lm[1] - 1;
+                if (isset($batch[$idx])) {
+                    $batch[$idx]['text'] = trim($lm[2]);
+                }
+            }
+        }
+        return $batch;
+    }
+
+    private function translateBatch(array $batch, string $characterContext, string $fullDialogue): array
+    {
+        $apiKey = config('services.openai.key');
+        if (!$apiKey) return $batch;
+
         try {
+            $messages = $this->buildTranslationMessages($batch, $characterContext, $fullDialogue);
             $response = Http::withToken($apiKey)
                 ->timeout(60)
                 ->post('https://api.openai.com/v1/chat/completions', [
                     'model' => 'gpt-4o',
                     'temperature' => 0.3,
-                    'messages' => [
-                        ['role' => 'system', 'content' => $systemPrompt],
-                        ['role' => 'user', 'content' => "Translate ONLY these lines:\n\n" . implode("\n", $lines)],
-                    ],
+                    'messages' => $messages,
                 ]);
 
             if ($response->successful()) {
-                $translated = trim($response->json('choices.0.message.content') ?? '');
-                foreach (preg_split('/\n+/', $translated) as $line) {
-                    if (preg_match('/^(\d+)\.\s*\[([MFC]\d+)\]\s*(.+)/', $line, $lm)) {
-                        $idx = (int) $lm[1] - 1;
-                        if (isset($batch[$idx])) {
-                            $batch[$idx]['speaker'] = $lm[2];
-                            $batch[$idx]['text'] = trim($lm[3]);
-                        }
-                    } elseif (preg_match('/^(\d+)\.\s*(.+)/', $line, $lm)) {
-                        $idx = (int) $lm[1] - 1;
-                        if (isset($batch[$idx])) {
-                            $batch[$idx]['text'] = trim($lm[2]);
-                        }
-                    }
-                }
+                return $this->parseTranslationResponse($batch, $response->json('choices.0.message.content') ?? '');
             }
         } catch (\Throwable $e) {
             Log::warning('Batch translation failed', ['error' => $e->getMessage()]);
