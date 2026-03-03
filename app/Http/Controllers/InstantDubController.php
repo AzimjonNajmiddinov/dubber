@@ -133,24 +133,49 @@ class InstantDubController extends Controller
         $dubName = $langNames[$lang] ?? ucfirst($lang) . ' dub';
 
         $lines = explode("\n", $master);
+
+        // First pass: find existing audio group ID
+        $existingGroupId = null;
+        foreach ($lines as $line) {
+            $trimmed = trim($line);
+            if (str_starts_with($trimmed, '#EXT-X-MEDIA') && str_contains($trimmed, 'TYPE=AUDIO')) {
+                if (preg_match('/GROUP-ID="([^"]+)"/', $trimmed, $m)) {
+                    $existingGroupId = $m[1];
+                    break;
+                }
+            }
+        }
+
+        // Use existing group or create "audio" group
+        $groupId = $existingGroupId ?? 'audio';
+
         $output = [];
         $injected = false;
 
         foreach ($lines as $line) {
             $trimmed = trim($line);
 
-            // Inject dub audio EXT-X-MEDIA before the first STREAM-INF
+            // Inject dub audio tracks before the first STREAM-INF
             if (!$injected && str_starts_with($trimmed, '#EXT-X-STREAM-INF')) {
-                $output[] = "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"dub\",NAME=\"{$dubName}\",LANGUAGE=\"{$lang}\",URI=\"dub-audio.m3u8\",DEFAULT=NO,AUTOSELECT=YES";
+                // If no existing audio group, add an "Original" track for muxed audio
+                // (no URI = audio comes from muxed video segments)
+                if (!$existingGroupId) {
+                    $output[] = "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"{$groupId}\",NAME=\"Original\",DEFAULT=YES,AUTOSELECT=YES";
+                }
+                // Add dub audio track to the same group
+                $output[] = "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"{$groupId}\",NAME=\"{$dubName}\",LANGUAGE=\"{$lang}\",URI=\"dub-audio.m3u8\",DEFAULT=NO,AUTOSELECT=NO";
                 $injected = true;
             }
 
-            // Add AUDIO="dub" to STREAM-INF lines
+            // Ensure STREAM-INF lines reference our audio group
             if (str_starts_with($trimmed, '#EXT-X-STREAM-INF')) {
                 if (str_contains($trimmed, 'AUDIO=')) {
-                    $line = preg_replace('/AUDIO="[^"]*"/', 'AUDIO="dub"', $line);
+                    // Keep existing group reference (we added dub to that group)
+                    if (!$existingGroupId) {
+                        $line = preg_replace('/AUDIO="[^"]*"/', 'AUDIO="' . $groupId . '"', $line);
+                    }
                 } else {
-                    $line = rtrim($line) . ',AUDIO="dub"';
+                    $line = rtrim($line) . ',AUDIO="' . $groupId . '"';
                 }
             }
 
@@ -158,6 +183,10 @@ class InstantDubController extends Controller
             if (str_starts_with($trimmed, '#EXT-X-MEDIA') && str_contains($trimmed, 'URI="')) {
                 $line = preg_replace_callback('/URI="([^"]+)"/', function ($m) use ($proxyBase) {
                     $uri = $m[1];
+                    // Don't proxy our own dub-audio.m3u8
+                    if (str_contains($uri, 'dub-audio.m3u8')) {
+                        return $m[0];
+                    }
                     if (str_starts_with($uri, 'http')) {
                         return 'URI="' . $proxyBase . ltrim(parse_url($uri, PHP_URL_PATH) ?? $uri, '/') . '"';
                     }
@@ -347,21 +376,22 @@ class InstantDubController extends Controller
                     '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
                 ]);
             } elseif ($gap > 0.01) {
-                // Prepend silence gap, then convert MP3 → AAC
+                // Prepend silence gap, then convert MP3 → AAC (44100Hz mono for consistency)
                 file_put_contents($mp3File, base64_decode($audioBase64));
                 Process::timeout(15)->run([
                     'ffmpeg', '-y',
                     '-f', 'lavfi', '-t', (string) round($gap, 3),
                     '-i', 'anullsrc=r=44100:cl=mono',
                     '-i', $mp3File,
-                    '-filter_complex', '[0:a][1:a]concat=n=2:v=0:a=1',
-                    '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
+                    '-filter_complex', '[1:a]aresample=44100[r];[0:a][r]concat=n=2:v=0:a=1',
+                    '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
                 ]);
             } else {
-                // No gap — just convert MP3 → AAC
+                // No gap — convert MP3 → AAC (44100Hz mono for consistency)
                 file_put_contents($mp3File, base64_decode($audioBase64));
                 Process::timeout(15)->run([
                     'ffmpeg', '-y', '-i', $mp3File,
+                    '-ar', '44100', '-ac', '1',
                     '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
                 ]);
             }
