@@ -148,10 +148,13 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         $tmpTxt = "{$tmpDir}/text_{$this->index}.txt";
         file_put_contents($tmpTxt, $this->text);
 
+        // Resolve edge-tts binary — may live in ~/.local/bin on cPanel
+        $edgeTts = $this->resolveEdgeTts();
+
         // Use --pitch=VALUE format (not --pitch VALUE) because negative
         // values like -8Hz get misinterpreted as flags in separate args.
         $cmd = [
-            'edge-tts', '-f', $tmpTxt,
+            $edgeTts, '-f', $tmpTxt,
             '--voice', $voice,
             "--pitch={$pitch}",
             "--rate={$rate}",
@@ -163,8 +166,38 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         @unlink($tmpTxt);
 
         if (!$result->successful() || !file_exists($outputMp3) || filesize($outputMp3) < 500) {
-            throw new \RuntimeException('Edge TTS failed: ' . Str::limit($result->errorOutput(), 200));
+            throw new \RuntimeException(
+                'Edge TTS failed (bin=' . $edgeTts . '): '
+                . Str::limit($result->errorOutput() ?: $result->output(), 300)
+            );
         }
+    }
+
+    private function resolveEdgeTts(): string
+    {
+        // Check standard PATH first
+        $which = trim(shell_exec('which edge-tts 2>/dev/null') ?? '');
+        if ($which !== '' && is_executable($which)) {
+            return $which;
+        }
+
+        // Check common user-install locations (pip install --user, pipx)
+        $home = getenv('HOME') ?: (getenv('USERPROFILE') ?: '/root');
+        $candidates = [
+            "{$home}/.local/bin/edge-tts",
+            "{$home}/bin/edge-tts",
+            '/usr/local/bin/edge-tts',
+            '/opt/pipx/bin/edge-tts',
+        ];
+
+        foreach ($candidates as $path) {
+            if (file_exists($path) && is_executable($path)) {
+                return $path;
+            }
+        }
+
+        // Fallback — let the OS try to find it (will fail with clear error)
+        return 'edge-tts';
     }
 
     private function getDefaultEdgeVoice(): string

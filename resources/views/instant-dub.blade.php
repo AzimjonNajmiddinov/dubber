@@ -66,6 +66,7 @@
         }
         .segment-list div { padding: 2px 0; }
         .segment-list .ready { color: #4ade80; }
+        .segment-list .error { color: #f87171; }
         .segment-list .pending { color: #555; }
 
         .toggle-link { font-size: 0.8rem; color: #666; cursor: pointer; margin-top: 8px; display: inline-block; }
@@ -179,10 +180,13 @@
     let pollTimer = null;
     let lastChunkIndex = -1;
     let audioCtx = null;
-    let scheduledSources = [];
     let chunks = [];
     let hlsInstance = null;
     let firstChunksPlayed = false;
+    let currentDubIndex = -1;
+    let currentSource = null;
+    let decodeSuccessCount = 0;
+    let decodeFailCount = 0;
 
     // Toggle SRT textarea
     toggleSrt.addEventListener('click', () => {
@@ -287,7 +291,7 @@
     // Stop
     btnStop.addEventListener('click', async () => {
         stopPolling();
-        cancelAllAudio();
+        stopCurrentAudio();
         if (sessionId) {
             try { await fetch(`/api/instant-dub/${sessionId}/stop`, { method: 'POST' }); } catch (e) {}
         }
@@ -330,15 +334,32 @@
                 updateSegmentList();
             }
 
-            statusText.textContent = `${ready} / ${total} segments ready`;
+            const errorCount = chunks.filter(c => c && c.error).length;
+            let statusStr = `${ready} / ${total} segments ready`;
+            if (decodeSuccessCount > 0) statusStr += ` | ${decodeSuccessCount} audio OK`;
+            if (decodeFailCount > 0) statusStr += ` | ${decodeFailCount} decode fail`;
+            if (errorCount > 0) statusStr += ` | ${errorCount} TTS errors`;
+            if (audioCtx) statusStr += ` | ctx:${audioCtx.state}`;
+            statusText.textContent = statusStr;
             progressFill.style.width = (total > 0 ? Math.round((ready / total) * 100) : 0) + '%';
 
             if (data.chunks && data.chunks.length > 0) {
                 for (const chunk of data.chunks) {
                     if (chunk.index > lastChunkIndex) lastChunkIndex = chunk.index;
-                    if (chunk.audio_base64) {
-                        try { chunk._audioBuffer = await audioCtx.decodeAudioData(base64ToArrayBuffer(chunk.audio_base64)); } catch (e) { console.warn('Audio decode failed for chunk', chunk.index, e); }
+                    if (chunk.error) {
+                        console.error('TTS error chunk', chunk.index, chunk.error);
                     }
+                    if (chunk.audio_base64) {
+                        try {
+                            chunk._audioBuffer = await audioCtx.decodeAudioData(base64ToArrayBuffer(chunk.audio_base64));
+                            decodeSuccessCount++;
+                        } catch (e) {
+                            decodeFailCount++;
+                            console.warn('Audio decode failed for chunk', chunk.index, e);
+                        }
+                    }
+                    // Free base64 string from memory after decoding
+                    delete chunk.audio_base64;
                     chunks[chunk.index] = chunk;
                 }
                 updateSegmentList();
@@ -348,50 +369,75 @@
                     firstChunksPlayed = true;
                     video.currentTime = 0;
                     try { await video.play(); } catch (e) { console.warn('Auto-play failed:', e); }
-                    scheduleAudio();
-                } else if (!video.paused) {
-                    scheduleAudio();
                 }
             }
 
             if (data.status === 'complete') {
                 stopPolling();
-                statusText.textContent = `Done! ${total} / ${total} segments`;
+                statusText.textContent = `Done! ${total} / ${total} segments | ${decodeSuccessCount} audio OK`;
+                if (decodeFailCount > 0) statusText.textContent += ` | ${decodeFailCount} decode fail`;
+                if (errorCount > 0) statusText.textContent += ` | ${errorCount} TTS errors`;
                 progressFill.style.width = '100%';
             }
         } catch (err) { console.error('Poll error:', err); }
     }
 
-    // Web Audio Scheduling
-    function scheduleAudio() {
-        cancelAllAudio();
+    // Dub audio playback — plays one chunk at a time, driven by timeupdate
+    function updateDubAudio() {
         if (!audioCtx || !video || video.paused) return;
-        const currentTime = video.currentTime;
-        const ctxNow = audioCtx.currentTime;
+        if (audioCtx.state === 'suspended') audioCtx.resume();
 
+        const t = video.currentTime;
+
+        // Find which chunk should be playing at time t
+        let targetIndex = -1;
         for (let i = 0; i < chunks.length; i++) {
-            const chunk = chunks[i];
-            if (!chunk || !chunk._audioBuffer) continue;
-            const segEnd = chunk.start_time + chunk._audioBuffer.duration;
-            if (segEnd <= currentTime) continue;
+            const c = chunks[i];
+            if (!c || !c._audioBuffer) continue;
+            const end = c.start_time + c._audioBuffer.duration;
+            if (t >= c.start_time && t < end) {
+                targetIndex = i;
+                break;
+            }
+        }
 
-            const delay = chunk.start_time - currentTime;
-            let offset = 0, playAt = ctxNow + delay;
-            if (delay < 0) { offset = -delay; playAt = ctxNow; if (offset >= chunk._audioBuffer.duration) continue; }
+        // Same chunk already playing — nothing to do
+        if (targetIndex === currentDubIndex) return;
 
-            const source = audioCtx.createBufferSource();
-            source.buffer = chunk._audioBuffer;
-            const gain = audioCtx.createGain();
-            gain.gain.value = 1.0;
-            source.connect(gain).connect(audioCtx.destination);
-            source.start(playAt, offset);
-            scheduledSources.push({ source, gain });
+        // Stop current source
+        stopCurrentAudio();
+        currentDubIndex = targetIndex;
+
+        // Start new chunk
+        if (targetIndex >= 0) {
+            const chunk = chunks[targetIndex];
+            const offset = Math.max(0, t - chunk.start_time);
+            if (offset < chunk._audioBuffer.duration) {
+                try {
+                    const source = audioCtx.createBufferSource();
+                    source.buffer = chunk._audioBuffer;
+                    source.connect(audioCtx.destination);
+                    source.start(0, offset);
+                    source.onended = () => {
+                        if (currentDubIndex === targetIndex) {
+                            currentSource = null;
+                            currentDubIndex = -1;
+                        }
+                    };
+                    currentSource = source;
+                } catch (e) {
+                    console.error('Failed to play chunk', targetIndex, e);
+                }
+            }
         }
     }
 
-    function cancelAllAudio() {
-        for (const s of scheduledSources) { try { s.source.stop(); } catch (e) {} }
-        scheduledSources = [];
+    function stopCurrentAudio() {
+        if (currentSource) {
+            try { currentSource.stop(); } catch (e) {}
+            currentSource = null;
+        }
+        currentDubIndex = -1;
     }
 
     // Speaker color map — distinct colors per speaker
@@ -423,22 +469,24 @@
         }
     }
 
-    video.addEventListener('play', () => { if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume(); scheduleAudio(); });
-    video.addEventListener('pause', () => cancelAllAudio());
-    video.addEventListener('seeked', () => { if (!video.paused) scheduleAudio(); });
-    video.addEventListener('timeupdate', updateSubtitle);
+    video.addEventListener('play', () => { if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume(); });
+    video.addEventListener('pause', () => stopCurrentAudio());
+    video.addEventListener('seeked', () => stopCurrentAudio());
+    video.addEventListener('timeupdate', () => { updateSubtitle(); updateDubAudio(); });
 
     // Segment list
     function updateSegmentList() {
         let html = '';
         for (let i = 0; i < chunks.length; i++) {
             const c = chunks[i];
-            const cls = c ? 'ready' : 'pending';
+            const cls = c ? (c.error ? 'error' : 'ready') : 'pending';
             const timeStr = c ? formatTime(c.start_time) : '--:--';
             const txt = c ? truncate(c.text, 50) : '...';
             const spk = c ? (c.speaker || '') : '';
             const color = speakerColors[spk] || '#888';
-            html += `<div class="${cls}" style="color:${c ? color : ''}">[${timeStr}] <b>${spk}</b> ${txt}</div>`;
+            const errHint = c && c.error ? ` [ERR: ${truncate(c.error, 40)}]` : '';
+            const hasAudio = c && c._audioBuffer ? '' : (c && !c.error ? ' [no audio]' : '');
+            html += `<div class="${cls}" style="color:${c ? (c.error ? '' : color) : ''}">[${timeStr}] <b>${spk}</b> ${txt}${errHint}${hasAudio}</div>`;
         }
         segmentList.innerHTML = html;
     }

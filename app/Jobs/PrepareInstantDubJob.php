@@ -151,6 +151,10 @@ class PrepareInstantDubJob implements ShouldQueue
                 }
             } else {
                 // BATCHES 2+: translate with character context
+                // Brief pause between batches to avoid OpenAI rate limits
+                if ($batchIdx > 1) {
+                    usleep(500_000); // 0.5s
+                }
                 $batch = $this->translateBatch($batch, $characterContext, $fullDialogueText);
             }
 
@@ -366,8 +370,8 @@ PROMPT;
 
         $messages = $this->buildTranslationMessages($batch, $characterContext, $fullDialogue);
 
-        // Try up to 2 times on failure
-        for ($attempt = 1; $attempt <= 2; $attempt++) {
+        // Try up to 4 times with exponential backoff for rate limits
+        for ($attempt = 1; $attempt <= 4; $attempt++) {
             try {
                 $response = Http::withToken($apiKey)
                     ->timeout(90)
@@ -387,6 +391,13 @@ PROMPT;
                     'status' => $response->status(),
                     'body' => Str::limit($response->body(), 200),
                 ]);
+
+                // Exponential backoff on rate limit (429)
+                if ($response->status() === 429) {
+                    $wait = min(2 ** $attempt, 15);
+                    sleep($wait);
+                    continue;
+                }
             } catch (\Throwable $e) {
                 Log::warning('Batch translation failed', [
                     'session' => $this->sessionId,
@@ -395,7 +406,7 @@ PROMPT;
                 ]);
             }
 
-            if ($attempt < 2) {
+            if ($attempt < 4) {
                 sleep(2);
             }
         }
