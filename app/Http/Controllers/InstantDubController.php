@@ -224,6 +224,8 @@ class InstantDubController extends Controller
         $status = $session['status'] ?? 'preparing';
 
         // Collect ready segments in order — stop at first missing chunk
+        // Each segment covers exactly prevEnd → end_time in the video timeline
+        // so audio stays perfectly synced with video
         $segments = [];
         $prevEnd = 0.0;
         $maxDuration = 3;
@@ -233,9 +235,8 @@ class InstantDubController extends Controller
             if (!$chunkJson) break;
 
             $chunk = json_decode($chunkJson, true);
-            $gap = max(0, ($chunk['start_time'] ?? 0) - $prevEnd);
-            $audioDuration = (float) ($chunk['audio_duration'] ?? ($chunk['end_time'] - $chunk['start_time']));
-            $segDuration = $gap + $audioDuration;
+            $endTime = (float) ($chunk['end_time'] ?? 0);
+            $segDuration = max(0.1, $endTime - $prevEnd);
 
             $segments[] = [
                 'index' => $i,
@@ -243,7 +244,7 @@ class InstantDubController extends Controller
             ];
 
             $maxDuration = max($maxDuration, (int) ceil($segDuration));
-            $prevEnd = (float) ($chunk['end_time'] ?? 0);
+            $prevEnd = $endTime;
         }
 
         $m3u8 = "#EXTM3U\n";
@@ -354,7 +355,7 @@ class InstantDubController extends Controller
         $aacFile = "{$tmpDir}/seg_{$index}.aac";
 
         try {
-            // Calculate silence gap from previous segment's end
+            // Calculate the exact time slot this segment must cover
             $prevEnd = 0.0;
             if ($index > 0) {
                 $prevJson = Redis::get("instant-dub:{$sessionId}:chunk:" . ($index - 1));
@@ -364,35 +365,38 @@ class InstantDubController extends Controller
                 }
             }
             $gap = max(0, ($chunk['start_time'] ?? 0) - $prevEnd);
+            $endTime = (float) ($chunk['end_time'] ?? 0);
+            $slotDuration = round(max(0.1, $endTime - $prevEnd), 3);
 
             $audioBase64 = $chunk['audio_base64'] ?? null;
 
             if (!$audioBase64) {
                 // Error chunk — generate silence for the full slot
-                $duration = max(0.1, ($chunk['end_time'] ?? 0) - $prevEnd);
                 Process::timeout(15)->run([
-                    'ffmpeg', '-y', '-f', 'lavfi', '-t', (string) round($duration, 3),
+                    'ffmpeg', '-y', '-f', 'lavfi', '-t', (string) $slotDuration,
                     '-i', 'anullsrc=r=44100:cl=mono',
                     '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
                 ]);
             } elseif ($gap > 0.01) {
-                // Prepend silence gap, then convert MP3 → AAC (44100Hz mono for consistency)
+                // Silence gap + TTS audio, padded/trimmed to exact slot duration
                 file_put_contents($mp3File, base64_decode($audioBase64));
                 Process::timeout(15)->run([
                     'ffmpeg', '-y',
                     '-f', 'lavfi', '-t', (string) round($gap, 3),
                     '-i', 'anullsrc=r=44100:cl=mono',
                     '-i', $mp3File,
-                    '-filter_complex', '[1:a]aresample=44100[r];[0:a][r]concat=n=2:v=0:a=1',
+                    '-filter_complex', '[1:a]aresample=44100[r];[0:a][r]concat=n=2:v=0:a=1,apad=whole_dur=' . $slotDuration,
+                    '-t', (string) $slotDuration,
                     '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
                 ]);
             } else {
-                // No gap — convert MP3 → AAC (44100Hz mono for consistency)
+                // No gap — TTS audio padded/trimmed to exact slot duration
                 file_put_contents($mp3File, base64_decode($audioBase64));
                 Process::timeout(15)->run([
                     'ffmpeg', '-y', '-i', $mp3File,
-                    '-ar', '44100', '-ac', '1',
-                    '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
+                    '-af', 'aresample=44100,apad=whole_dur=' . $slotDuration,
+                    '-t', (string) $slotDuration,
+                    '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
                 ]);
             }
 
