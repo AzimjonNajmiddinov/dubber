@@ -17,7 +17,7 @@ class PrepareInstantDubJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public int $timeout = 120;
+    public int $timeout = 600;
     public int $tries = 1;
 
     public function __construct(
@@ -142,6 +142,11 @@ class PrepareInstantDubJob implements ShouldQueue
                     // Process translation result
                     if (isset($pool['translation']) && $pool['translation'] instanceof \Illuminate\Http\Client\Response && $pool['translation']->successful()) {
                         $batch = $this->parseTranslationResponse($batch, $pool['translation']->json('choices.0.message.content') ?? '');
+                    } else {
+                        Log::warning('Batch 0 translation failed', [
+                            'session' => $this->sessionId,
+                            'status' => isset($pool['translation']) && $pool['translation'] instanceof \Illuminate\Http\Client\Response ? $pool['translation']->status() : 'no response',
+                        ]);
                     }
                 }
             } else {
@@ -359,21 +364,40 @@ PROMPT;
         $apiKey = config('services.openai.key');
         if (!$apiKey) return $batch;
 
-        try {
-            $messages = $this->buildTranslationMessages($batch, $characterContext, $fullDialogue);
-            $response = Http::withToken($apiKey)
-                ->timeout(60)
-                ->post('https://api.openai.com/v1/chat/completions', [
-                    'model' => 'gpt-4o',
-                    'temperature' => 0.3,
-                    'messages' => $messages,
-                ]);
+        $messages = $this->buildTranslationMessages($batch, $characterContext, $fullDialogue);
 
-            if ($response->successful()) {
-                return $this->parseTranslationResponse($batch, $response->json('choices.0.message.content') ?? '');
+        // Try up to 2 times on failure
+        for ($attempt = 1; $attempt <= 2; $attempt++) {
+            try {
+                $response = Http::withToken($apiKey)
+                    ->timeout(90)
+                    ->post('https://api.openai.com/v1/chat/completions', [
+                        'model' => 'gpt-4o',
+                        'temperature' => 0.3,
+                        'messages' => $messages,
+                    ]);
+
+                if ($response->successful()) {
+                    return $this->parseTranslationResponse($batch, $response->json('choices.0.message.content') ?? '');
+                }
+
+                Log::warning('Batch translation API error', [
+                    'session' => $this->sessionId,
+                    'attempt' => $attempt,
+                    'status' => $response->status(),
+                    'body' => Str::limit($response->body(), 200),
+                ]);
+            } catch (\Throwable $e) {
+                Log::warning('Batch translation failed', [
+                    'session' => $this->sessionId,
+                    'attempt' => $attempt,
+                    'error' => $e->getMessage(),
+                ]);
             }
-        } catch (\Throwable $e) {
-            Log::warning('Batch translation failed', ['error' => $e->getMessage()]);
+
+            if ($attempt < 2) {
+                sleep(2);
+            }
         }
 
         return $batch;
