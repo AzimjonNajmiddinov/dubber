@@ -73,13 +73,8 @@ class EdgeTtsDriver implements TtsDriverInterface
         @unlink($rawMp3);
         @unlink($outputWav);
 
-        // Normalize text (numbers to words, punctuation cleanup)
+        // Normalize text (numbers to words, abbreviations, Uzbek oʻ/gʻ fix)
         $text = TextNormalizer::normalize($text, $language);
-
-        // Uzbek pronunciation fix: Edge TTS needs U+02BB for correct oʻ/gʻ
-        if ($language === 'uz' || str_contains($language, 'uzbek')) {
-            $text = $this->fixUzbekPronunciation($text);
-        }
 
         // Plain text → edge-tts → MP3. No SSML, no prosody, no pitch/rate changes.
         $tmpFile = "/tmp/tts_{$videoId}_{$segmentId}_" . Str::random(8) . '.txt';
@@ -166,15 +161,7 @@ class EdgeTtsDriver implements TtsDriverInterface
 
     /**
      * Fix Uzbek pronunciation for Edge TTS.
-     *
-     * Edge TTS's Uzbek voice ignores U+02BB and all Latin apostrophe variants —
-     * "oʻzbekiston" sounds identical to "ozbekiston". But Cyrillic Uzbek
-     * characters ARE pronounced correctly:
-     * - oʻ → ў (U+045E, Cyrillic Short U) — correct Uzbek /ɵ/ sound
-     * - gʻ → ғ (U+0493, Cyrillic Gha)    — correct Uzbek /ʁ/ sound
-     *
-     * Tested: plain "ozbekiston" = 14400 bytes, "ўzbekiston" = 13968 bytes (different).
-     * Tested: plain "galaba" = 9216 bytes, "ғalaba" = 8928 bytes (different).
+     * Normalizes all apostrophe variants to U+02BB via TextNormalizer.
      */
     protected function fixUzbekPronunciation(string $text): string
     {
@@ -182,29 +169,11 @@ class EdgeTtsDriver implements TtsDriverInterface
     }
 
     /**
-     * Replace Uzbek oʻ/gʻ with Cyrillic ў/ғ for correct Edge TTS pronunciation.
-     * Static so it can be called from ProcessInstantDubSegmentJob too.
+     * Normalize Uzbek oʻ/gʻ apostrophes to U+02BB for correct Edge TTS pronunciation.
+     * Delegates to TextNormalizer::normalize() which handles all TTS text prep.
      */
     public static function fixUzbekOGPronunciation(string $text): string
     {
-        // All apostrophe variants found in Uzbek text (GPT output, web text, etc.)
-        $apostrophes = [
-            "'",               // U+0027 ASCII apostrophe
-            "\xE2\x80\x99",   // U+2019 Right single quotation mark (')
-            "\xCA\xBC",       // U+02BC Modifier letter apostrophe (ʼ)
-            "\xCA\xBB",       // U+02BB Modifier letter turned comma (ʻ)
-            "`",               // U+0060 Grave accent (backtick)
-        ];
-
-        // Replace o'/O' → ў/Ў (Cyrillic) and g'/G' → ғ/Ғ (Cyrillic)
-        foreach ($apostrophes as $a) {
-            $text = str_replace(
-                ["o{$a}", "O{$a}", "g{$a}", "G{$a}"],
-                ["\xD1\x9E", "\xD0\x8E", "\xD2\x93", "\xD2\x92"],
-                $text
-            );
-        }
-
-        return $text;
+        return \App\Services\TextNormalizer::normalize($text, 'uz');
     }
 }
