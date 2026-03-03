@@ -2,7 +2,6 @@
 
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\VideoController;
-use App\Http\Controllers\RealtimeDubController;
 use App\Http\Controllers\StreamDubController;
 use App\Http\Controllers\SegmentPlayerController;
 use App\Http\Controllers\LiveDubController;
