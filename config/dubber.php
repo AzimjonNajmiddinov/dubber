@@ -90,10 +90,4 @@ return [
         'pitch_max' => 35,
     ],
 
-    // Lip-sync settings (Wav2Lip)
-    // NOTE: Disabled by default - CPU too slow, needs GPU or cloud service
-    'lipsync' => [
-        // Enable lip-sync processing after dubbing
-        'enabled' => env('LIPSYNC_ENABLED', false),
-    ],
 ];

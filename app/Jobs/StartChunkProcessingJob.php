@@ -351,7 +351,6 @@ class StartChunkProcessingJob implements ShouldQueue, ShouldBeUnique
 
     /**
      * Get or create a Speaker for this video.
-     * Replicates logic from ProcessVideoChunkJob::getOrCreateSpeaker().
      */
     private function getOrCreateSpeaker(Video $video, string $speakerKey, array $whisperxMeta = []): Speaker
     {

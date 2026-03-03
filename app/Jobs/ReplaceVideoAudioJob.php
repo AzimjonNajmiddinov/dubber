@@ -289,12 +289,6 @@ class ReplaceVideoAudioJob implements ShouldQueue, ShouldBeUnique
                 'status' => 'dubbed_complete',
             ]);
 
-            // Dispatch lip-sync job if enabled
-            if (config('dubber.lipsync.enabled', false)) {
-                Log::info('Dispatching lipsync job', ['video_id' => $video->id]);
-                LipSyncMainFaceJob::dispatch($video->id);
-            }
-
             // Auto-delete original video and intermediate files to save storage
             if (config('dubber.cleanup.delete_after_dubbing', true)) {
                 $this->cleanupOriginalFiles($video, $origMp4Abs, $finalWavAbs);
