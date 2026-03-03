@@ -161,6 +161,8 @@ class PrepareInstantDubJob implements ShouldQueue
                 $text = trim($seg['text']);
                 // Strip bracket annotations GPT may have kept (e.g. [narrator], [music])
                 $text = trim(preg_replace('/\[[^\]]*\]\s*/', '', $text));
+                // Normalize backtick → apostrophe (GPT sometimes uses ` in Uzbek words like o`zbek)
+                $text = str_replace('`', '\'', $text);
                 if ($text === '') continue;
 
                 ProcessInstantDubSegmentJob::dispatch(
