@@ -427,26 +427,42 @@ PROMPT;
                 $tracks = [['lang' => 'unknown', 'uri' => $m[1]]];
             }
 
-            // Priority: uz > ru > first track
+            // Priority: ru > uz > en/tr > first track
+            // Russian→Uzbek translation is highest quality, prefer it over raw Uzbek subs
+            $langPriority = ['ru', 'uz', 'en', 'tr'];
+            $langPatterns = [
+                'ru' => ['ru', 'rus', 'russian'],
+                'uz' => ['uz', 'uzb', 'uzbek'],
+                'en' => ['en', 'eng', 'english'],
+                'tr' => ['tr', 'tur', 'turkish'],
+            ];
+
             $selectedUri = $tracks[0]['uri'];
             $detectedLang = 'unknown';
 
-            foreach ($tracks as $track) {
-                $lang = strtolower($track['lang']);
-                if (str_contains($lang, 'uz')) {
-                    $selectedUri = $track['uri'];
-                    $detectedLang = 'uz';
-                    break;
+            // Try to detect language of first track as fallback
+            $firstLang = strtolower($tracks[0]['lang']);
+            foreach ($langPatterns as $code => $patterns) {
+                foreach ($patterns as $p) {
+                    if (str_contains($firstLang, $p)) {
+                        $detectedLang = $code;
+                        break 2;
+                    }
                 }
             }
 
-            if ($detectedLang === 'unknown') {
+            // Now pick best track by priority
+            foreach ($langPriority as $preferred) {
                 foreach ($tracks as $track) {
                     $lang = strtolower($track['lang']);
-                    if (str_contains($lang, 'ru')) {
+                    $matched = false;
+                    foreach ($langPatterns[$preferred] as $p) {
+                        if (str_contains($lang, $p)) { $matched = true; break; }
+                    }
+                    if ($matched) {
                         $selectedUri = $track['uri'];
-                        $detectedLang = 'ru';
-                        break;
+                        $detectedLang = $preferred;
+                        break 2;
                     }
                 }
             }
