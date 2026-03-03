@@ -182,6 +182,7 @@
     let scheduledSources = [];
     let chunks = [];
     let hlsInstance = null;
+    let firstChunksPlayed = false;
 
     // Toggle SRT textarea
     toggleSrt.addEventListener('click', () => {
@@ -233,14 +234,15 @@
         statusText.textContent = 'Loading video...';
         progressFill.style.width = '0%';
 
-        // Load video and start playback inside user gesture context (click)
+        // Load video but DON'T auto-play — wait for first audio chunks
         try {
             await loadVideo(url);
-            await video.play();
+            video.pause();
+            video.currentTime = 0;
         } catch (e) {
-            console.warn('Video play failed:', e);
+            console.warn('Video load failed:', e);
         }
-        statusText.textContent = 'Fetching subtitles & translating...';
+        statusText.textContent = 'Fetching subtitles & translating — video will start when ready...';
 
         try {
             const body = {
@@ -268,6 +270,7 @@
             totalSegments = 0;
             lastChunkIndex = -1;
             chunks = [];
+            firstChunksPlayed = false;
 
             statusText.textContent = `0 / ${totalSegments} segments ready`;
             updateSegmentList();
@@ -334,12 +337,21 @@
                 for (const chunk of data.chunks) {
                     if (chunk.index > lastChunkIndex) lastChunkIndex = chunk.index;
                     if (chunk.audio_base64) {
-                        try { chunk._audioBuffer = await audioCtx.decodeAudioData(base64ToArrayBuffer(chunk.audio_base64)); } catch (e) {}
+                        try { chunk._audioBuffer = await audioCtx.decodeAudioData(base64ToArrayBuffer(chunk.audio_base64)); } catch (e) { console.warn('Audio decode failed for chunk', chunk.index, e); }
                     }
                     chunks[chunk.index] = chunk;
                 }
                 updateSegmentList();
-                if (!video.paused) scheduleAudio();
+
+                // Auto-play video when first audio chunks are ready
+                if (!firstChunksPlayed) {
+                    firstChunksPlayed = true;
+                    video.currentTime = 0;
+                    try { await video.play(); } catch (e) { console.warn('Auto-play failed:', e); }
+                    scheduleAudio();
+                } else if (!video.paused) {
+                    scheduleAudio();
+                }
             }
 
             if (data.status === 'complete') {
@@ -382,13 +394,15 @@
         scheduledSources = [];
     }
 
-    // Speaker color map
+    // Speaker color map — distinct colors per speaker
     const speakerColors = {
-        'M1': '#fff', 'M2': '#7dd3fc', 'M3': '#86efac', 'M4': '#fde68a',
+        'M1': '#60a5fa', 'M2': '#7dd3fc', 'M3': '#86efac', 'M4': '#fde68a',
         'F1': '#fca5a5', 'F2': '#c4b5fd', 'F3': '#f9a8d4', 'F4': '#fdba74',
+        'C1': '#fbbf24', 'C2': '#a3e635',
     };
 
     // Subtitle display with per-speaker color
+    let lastSubKey = '';
     function updateSubtitle() {
         const t = video.currentTime;
         let found = '';
@@ -397,10 +411,15 @@
             const c = chunks[i];
             if (c && t >= c.start_time && t <= c.end_time) { found = c.text; speaker = c.speaker || ''; break; }
         }
+        const subKey = speaker + ':' + found;
+        if (subKey === lastSubKey) return;
+        lastSubKey = subKey;
         const span = subtitleOverlay.querySelector('span');
-        if (span.textContent !== found) {
-            span.textContent = found;
-            span.style.color = speakerColors[speaker] || '#fff';
+        const color = speakerColors[speaker] || '#fff';
+        if (found) {
+            span.innerHTML = `<b style="color:${color};font-size:0.75em;opacity:0.7">[${speaker}]</b> <span style="color:${color}">${found}</span>`;
+        } else {
+            span.innerHTML = '';
         }
     }
 
@@ -417,7 +436,9 @@
             const cls = c ? 'ready' : 'pending';
             const timeStr = c ? formatTime(c.start_time) : '--:--';
             const txt = c ? truncate(c.text, 50) : '...';
-            html += `<div class="${cls}">[${timeStr}] ${txt}</div>`;
+            const spk = c ? (c.speaker || '') : '';
+            const color = speakerColors[spk] || '#888';
+            html += `<div class="${cls}" style="color:${c ? color : ''}">[${timeStr}] <b>${spk}</b> ${txt}</div>`;
         }
         segmentList.innerHTML = html;
     }
