@@ -7,6 +7,7 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use App\Services\Tts\Drivers\EdgeTtsDriver;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Facades\Redis;
@@ -145,8 +146,13 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             $rate = '+0%';
         }
 
+        // Fix Uzbek oʻ/gʻ pronunciation before sending to Edge TTS
+        $text = $this->language === 'uz'
+            ? EdgeTtsDriver::fixUzbekOGPronunciation($this->text)
+            : $this->text;
+
         $tmpTxt = "{$tmpDir}/text_{$this->index}.txt";
-        file_put_contents($tmpTxt, $this->text);
+        file_put_contents($tmpTxt, $text);
 
         // Resolve edge-tts binary — may live in ~/.local/bin on cPanel
         $edgeTts = $this->resolveEdgeTts();

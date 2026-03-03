@@ -167,38 +167,43 @@ class EdgeTtsDriver implements TtsDriverInterface
     /**
      * Fix Uzbek pronunciation for Edge TTS.
      *
-     * Edge TTS's Uzbek voice doesn't correctly pronounce o' and g' characters.
-     * These are distinct phonemes in Uzbek:
-     * - o' (oʻ) = rounded front vowel, like German/Turkish "ö"
-     * - g' (gʻ) = voiced velar/uvular fricative, like Turkish "ğ" or Arabic "غ"
+     * Edge TTS's Uzbek voice ignores U+02BB and all Latin apostrophe variants —
+     * "oʻzbekiston" sounds identical to "ozbekiston". But Cyrillic Uzbek
+     * characters ARE pronounced correctly:
+     * - oʻ → ў (U+045E, Cyrillic Short U) — correct Uzbek /ɵ/ sound
+     * - gʻ → ғ (U+0493, Cyrillic Gha)    — correct Uzbek /ʁ/ sound
      *
-     * We substitute these with phonetically similar Turkish characters
-     * since Edge TTS handles Turkish phonemes better.
-     *
-     * @param string $text Uzbek text with o' and g' characters
-     * @return string Text with substituted characters for better pronunciation
+     * Tested: plain "ozbekiston" = 14400 bytes, "ўzbekiston" = 13968 bytes (different).
+     * Tested: plain "galaba" = 9216 bytes, "ғalaba" = 8928 bytes (different).
      */
     protected function fixUzbekPronunciation(string $text): string
     {
-        // Normalize all apostrophe variants to Unicode modifier letter turned comma (ʻ U+02BB)
-        // This is the standard Uzbek Latin alphabet character that Edge TTS handles correctly
-        //
-        // Common apostrophe variants in Uzbek text:
-        // - ' (U+0027) ASCII apostrophe
-        // - ' (U+2019) Right single quotation mark
-        // - ʼ (U+02BC) Modifier letter apostrophe
-        // - ` (U+0060) Grave accent (backtick)
-        //
-        // Target: ʻ (U+02BB) Modifier letter turned comma - best pronunciation in Edge TTS
+        return self::fixUzbekOGPronunciation($text);
+    }
 
-        $apostropheVariants = [
-            "'",   // U+0027 ASCII apostrophe
-            "'",   // U+2019 Right single quotation mark
-            "ʼ",   // U+02BC Modifier letter apostrophe
-            "`",   // U+0060 Grave accent (backtick)
+    /**
+     * Replace Uzbek oʻ/gʻ with Cyrillic ў/ғ for correct Edge TTS pronunciation.
+     * Static so it can be called from ProcessInstantDubSegmentJob too.
+     */
+    public static function fixUzbekOGPronunciation(string $text): string
+    {
+        // All apostrophe variants found in Uzbek text (GPT output, web text, etc.)
+        $apostrophes = [
+            "'",               // U+0027 ASCII apostrophe
+            "\xE2\x80\x99",   // U+2019 Right single quotation mark (')
+            "\xCA\xBC",       // U+02BC Modifier letter apostrophe (ʼ)
+            "\xCA\xBB",       // U+02BB Modifier letter turned comma (ʻ)
+            "`",               // U+0060 Grave accent (backtick)
         ];
 
-        $text = str_replace($apostropheVariants, "ʻ", $text);
+        // Replace o'/O' → ў/Ў (Cyrillic) and g'/G' → ғ/Ғ (Cyrillic)
+        foreach ($apostrophes as $a) {
+            $text = str_replace(
+                ["o{$a}", "O{$a}", "g{$a}", "G{$a}"],
+                ["\xD1\x9E", "\xD0\x8E", "\xD2\x93", "\xD2\x92"],
+                $text
+            );
+        }
 
         return $text;
     }
