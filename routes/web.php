@@ -6,7 +6,6 @@ use App\Http\Controllers\StreamDubController;
 use App\Http\Controllers\SegmentPlayerController;
 use App\Http\Controllers\LiveDubController;
 use App\Http\Controllers\OnlineDubController;
-use App\Http\Controllers\QueueMonitorController;
 
 Route::get('/', [VideoController::class, 'index'])->name('videos.index');
 Route::post('/upload', [VideoController::class, 'upload'])->name('videos.upload');
@@ -46,17 +45,3 @@ Route::get('/dub/{video}', [OnlineDubController::class, 'progress'])->name('dub.
 // Instant dub (SRT → TTS over video)
 Route::get('/instant-dub', fn() => view('instant-dub'))->name('instant-dub');
 
-// Admin panel (password protected)
-Route::middleware('admin.password')->group(function () {
-    Route::get('/admin/queue', [QueueMonitorController::class, 'index'])->name('admin.queue');
-    Route::post('/admin/queue/retry/{id}', [QueueMonitorController::class, 'retry'])->name('admin.queue.retry');
-    Route::post('/admin/queue/retry-all', [QueueMonitorController::class, 'retryAll'])->name('admin.queue.retry-all');
-    Route::delete('/admin/queue/delete/{id}', [QueueMonitorController::class, 'delete'])->name('admin.queue.delete');
-    Route::post('/admin/queue/flush', [QueueMonitorController::class, 'flush'])->name('admin.queue.flush');
-    Route::get('/admin/logs', fn () => redirect('/log-viewer'))->name('admin.logs');
-});
-
-Route::post('/admin/logout', function () {
-    session()->forget('admin_authenticated');
-    return redirect('/admin/queue');
-})->name('admin.logout');
