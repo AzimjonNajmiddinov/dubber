@@ -28,7 +28,7 @@ class InstantDubController extends Controller
         $translateFrom = $request->input('translate_from', '');
         $srt = $request->input('srt', '');
 
-        // Parse video URL components for HLS proxy
+        // Parse video URL components for HLS
         $urlWithoutQuery = strtok($videoUrl, '?');
         $videoBaseUrl = $videoUrl ? preg_replace('#/[^/]+$#', '/', $urlWithoutQuery) : '';
         $videoQuery = $videoUrl ? (parse_url($videoUrl, PHP_URL_QUERY) ?? '') : '';
@@ -127,10 +127,13 @@ class InstantDubController extends Controller
         }
 
         $master = $response->body();
-        $proxyBase = "/api/instant-dub/{$sessionId}/proxy/";
+        $videoBaseUrl = $session['video_base_url'] ?? '';
+        $videoQuery = $session['video_query'] ?? '';
         $lang = $session['language'] ?? 'uz';
         $langNames = ['uz' => "O'zbek dublyaj", 'ru' => 'Русский дубляж', 'en' => 'English dub'];
         $dubName = $langNames[$lang] ?? ucfirst($lang) . ' dub';
+        $subNames = ['uz' => "O'zbek", 'ru' => 'Русский', 'en' => 'English'];
+        $subName = $subNames[$lang] ?? ucfirst($lang);
 
         $lines = explode("\n", $master);
 
@@ -146,60 +149,56 @@ class InstantDubController extends Controller
             }
         }
 
-        // Use existing group or create "audio" group
         $groupId = $existingGroupId ?? 'audio';
-
         $output = [];
         $injected = false;
 
         foreach ($lines as $line) {
             $trimmed = trim($line);
 
-            // Inject dub audio tracks before the first STREAM-INF
+            // Inject dub audio + subtitle tracks before the first STREAM-INF
             if (!$injected && str_starts_with($trimmed, '#EXT-X-STREAM-INF')) {
-                // If no existing audio group, add an "Original" track for muxed audio
-                // (no URI = audio comes from muxed video segments)
                 if (!$existingGroupId) {
                     $output[] = "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"{$groupId}\",NAME=\"Original\",DEFAULT=YES,AUTOSELECT=YES";
                 }
-                // Add dub audio track to the same group
                 $output[] = "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"{$groupId}\",NAME=\"{$dubName}\",LANGUAGE=\"{$lang}\",URI=\"dub-audio.m3u8\",DEFAULT=NO,AUTOSELECT=NO";
+                $output[] = "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"{$subName}\",LANGUAGE=\"{$lang}\",URI=\"dub-subtitles.m3u8\",DEFAULT=YES,AUTOSELECT=YES,FORCED=NO";
                 $injected = true;
             }
 
-            // Ensure STREAM-INF lines reference our audio group
+            // Ensure STREAM-INF lines reference audio + subtitle groups
             if (str_starts_with($trimmed, '#EXT-X-STREAM-INF')) {
                 if (str_contains($trimmed, 'AUDIO=')) {
-                    // Keep existing group reference (we added dub to that group)
                     if (!$existingGroupId) {
                         $line = preg_replace('/AUDIO="[^"]*"/', 'AUDIO="' . $groupId . '"', $line);
                     }
                 } else {
                     $line = rtrim($line) . ',AUDIO="' . $groupId . '"';
                 }
+                if (!str_contains($line, 'SUBTITLES=')) {
+                    $line = rtrim($line) . ',SUBTITLES="subs"';
+                }
             }
 
-            // Rewrite URI= in EXT-X-MEDIA tags to proxy
+            // EXT-X-MEDIA URIs: convert relative to absolute CDN URLs (skip our own)
             if (str_starts_with($trimmed, '#EXT-X-MEDIA') && str_contains($trimmed, 'URI="')) {
-                $line = preg_replace_callback('/URI="([^"]+)"/', function ($m) use ($proxyBase) {
+                $line = preg_replace_callback('/URI="([^"]+)"/', function ($m) use ($videoBaseUrl, $videoQuery) {
                     $uri = $m[1];
-                    // Don't proxy our own dub-audio.m3u8
-                    if (str_contains($uri, 'dub-audio.m3u8')) {
-                        return $m[0];
+                    if (str_contains($uri, 'dub-')) return $m[0];
+                    if (!str_starts_with($uri, 'http')) {
+                        $abs = $videoBaseUrl . $uri;
+                        if ($videoQuery) $abs .= (str_contains($abs, '?') ? '&' : '?') . $videoQuery;
+                        return 'URI="' . $abs . '"';
                     }
-                    if (str_starts_with($uri, 'http')) {
-                        return 'URI="' . $proxyBase . ltrim(parse_url($uri, PHP_URL_PATH) ?? $uri, '/') . '"';
-                    }
-                    return 'URI="' . $proxyBase . $uri . '"';
+                    return $m[0];
                 }, $line);
             }
 
-            // Rewrite standalone URI lines (non-comment, non-empty) to proxy
+            // Standalone URIs: convert relative to absolute CDN URLs
             if ($trimmed !== '' && !str_starts_with($trimmed, '#')) {
-                if (str_starts_with($trimmed, 'http')) {
-                    $line = $proxyBase . ltrim(parse_url($trimmed, PHP_URL_PATH) ?? $trimmed, '/');
-                } else {
-                    $line = $proxyBase . $trimmed;
+                if (!str_starts_with($trimmed, 'http')) {
+                    $line = $videoBaseUrl . $trimmed;
+                    if ($videoQuery) $line .= (str_contains($line, '?') ? '&' : '?') . $videoQuery;
                 }
             }
 
@@ -223,27 +222,41 @@ class InstantDubController extends Controller
         $total = (int) ($session['total_segments'] ?? 0);
         $status = $session['status'] ?? 'preparing';
 
-        // Collect ready segments in order — stop at first missing chunk
-        // Each segment covers exactly prevEnd → end_time in the video timeline
-        // so audio stays perfectly synced with video
-        $segments = [];
+        // Build segment list with gap-splitting: long gaps become
+        // separate max-10s silence segments so AVPlayer doesn't stall
+        $entries = [];
         $prevEnd = 0.0;
-        $maxDuration = 3;
+        $maxDuration = 10;
 
         for ($i = 0; $i < $total; $i++) {
             $chunkJson = Redis::get("instant-dub:{$sessionId}:chunk:{$i}");
             if (!$chunkJson) break;
 
             $chunk = json_decode($chunkJson, true);
+            $startTime = (float) ($chunk['start_time'] ?? 0);
             $endTime = (float) ($chunk['end_time'] ?? 0);
-            $segDuration = max(0.1, $endTime - $prevEnd);
+            $gap = max(0, $startTime - $prevEnd);
 
-            $segments[] = [
-                'index' => $i,
-                'duration' => round($segDuration, 3),
+            // Break large gaps into max-10s silence segments
+            $gapRemaining = $gap;
+            while ($gapRemaining > 0.05) {
+                $silenceDur = min($gapRemaining, 10.0);
+                $durMs = (int) round($silenceDur * 1000);
+                $entries[] = [
+                    'uri' => "gap/{$durMs}.aac",
+                    'duration' => round($silenceDur, 3),
+                ];
+                $gapRemaining -= $silenceDur;
+            }
+
+            // TTS segment (speech only, no gap — padded to slot duration)
+            $slotDur = max(0.1, $endTime - $startTime);
+            $entries[] = [
+                'uri' => "dub-segment/{$i}.aac",
+                'duration' => round($slotDur, 3),
             ];
 
-            $maxDuration = max($maxDuration, (int) ceil($segDuration));
+            $maxDuration = max($maxDuration, (int) ceil($slotDur));
             $prevEnd = $endTime;
         }
 
@@ -256,12 +269,12 @@ class InstantDubController extends Controller
             $m3u8 .= "#EXT-X-PLAYLIST-TYPE:EVENT\n";
         }
 
-        foreach ($segments as $seg) {
-            $m3u8 .= "#EXTINF:{$seg['duration']},\n";
-            $m3u8 .= "dub-segment/{$seg['index']}.aac\n";
+        foreach ($entries as $entry) {
+            $m3u8 .= "#EXTINF:{$entry['duration']},\n";
+            $m3u8 .= "{$entry['uri']}\n";
         }
 
-        if ($status === 'complete' && count($segments) === $total) {
+        if ($status === 'complete' && count($entries) > 0) {
             $m3u8 .= "#EXT-X-ENDLIST\n";
         }
 
@@ -294,7 +307,7 @@ class InstantDubController extends Controller
         }
 
         $chunk = json_decode($chunkJson, true);
-        $aacData = $this->generateAacSegment($sessionId, $index, $chunk);
+        $aacData = $this->generateAacSegment($chunk);
 
         if (!$aacData) {
             return response('Failed to generate AAC segment', 500);
@@ -307,6 +320,117 @@ class InstantDubController extends Controller
             'Content-Type' => 'audio/aac',
             'Access-Control-Allow-Origin' => '*',
             'Cache-Control' => 'max-age=86400',
+        ]);
+    }
+
+    public function hlsGapSegment(string $sessionId, int $durationMs)
+    {
+        $durationMs = max(10, min($durationMs, 30000));
+        $duration = $durationMs / 1000;
+
+        // Cache silence by duration (shared across all sessions)
+        $cacheKey = "instant-dub:silence-aac:{$durationMs}";
+        $cached = Redis::get($cacheKey);
+
+        if ($cached) {
+            return response(base64_decode($cached), 200, [
+                'Content-Type' => 'audio/aac',
+                'Access-Control-Allow-Origin' => '*',
+                'Cache-Control' => 'max-age=86400',
+            ]);
+        }
+
+        $tmpFile = sys_get_temp_dir() . "/silence_{$durationMs}.aac";
+        Process::timeout(10)->run([
+            'ffmpeg', '-y', '-f', 'lavfi', '-t', (string) round($duration, 3),
+            '-i', 'anullsrc=r=44100:cl=mono',
+            '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $tmpFile,
+        ]);
+
+        if (!file_exists($tmpFile) || filesize($tmpFile) < 10) {
+            @unlink($tmpFile);
+            return response('Failed to generate silence', 500);
+        }
+
+        $data = file_get_contents($tmpFile);
+        @unlink($tmpFile);
+
+        Redis::setex($cacheKey, 86400, base64_encode($data));
+
+        return response($data, 200, [
+            'Content-Type' => 'audio/aac',
+            'Access-Control-Allow-Origin' => '*',
+            'Cache-Control' => 'max-age=86400',
+        ]);
+    }
+
+    // ── HLS Subtitle endpoints ──
+
+    public function hlsSubtitlePlaylist(string $sessionId)
+    {
+        $session = $this->getSession($sessionId);
+        if (!$session) {
+            return response('Session not found', 404);
+        }
+
+        $status = $session['status'] ?? 'preparing';
+
+        $m3u8 = "#EXTM3U\n";
+        $m3u8 .= "#EXT-X-VERSION:3\n";
+        $m3u8 .= "#EXT-X-TARGETDURATION:86400\n";
+        $m3u8 .= "#EXT-X-MEDIA-SEQUENCE:0\n";
+
+        if ($status !== 'complete') {
+            $m3u8 .= "#EXT-X-PLAYLIST-TYPE:EVENT\n";
+        }
+
+        $m3u8 .= "#EXTINF:86400,\n";
+        $m3u8 .= "dub-subtitles.vtt\n";
+
+        if ($status === 'complete') {
+            $m3u8 .= "#EXT-X-ENDLIST\n";
+        }
+
+        $cacheControl = $status === 'complete' ? 'max-age=3600' : 'no-cache';
+
+        return response($m3u8, 200, [
+            'Content-Type' => 'application/vnd.apple.mpegurl',
+            'Access-Control-Allow-Origin' => '*',
+            'Cache-Control' => $cacheControl,
+        ]);
+    }
+
+    public function hlsSubtitleVtt(string $sessionId)
+    {
+        $session = $this->getSession($sessionId);
+        if (!$session) {
+            return response('Session not found', 404);
+        }
+
+        $total = (int) ($session['total_segments'] ?? 0);
+        $vtt = "WEBVTT\n\n";
+
+        for ($i = 0; $i < $total; $i++) {
+            $chunkJson = Redis::get("instant-dub:{$sessionId}:chunk:{$i}");
+            if (!$chunkJson) continue;
+
+            $chunk = json_decode($chunkJson, true);
+            $start = $this->formatVttTime((float) ($chunk['start_time'] ?? 0));
+            $end = $this->formatVttTime((float) ($chunk['end_time'] ?? 0));
+            $text = $chunk['text'] ?? '';
+
+            if ($text) {
+                $vtt .= "{$start} --> {$end}\n{$text}\n\n";
+            }
+        }
+
+        $status = $session['status'] ?? 'preparing';
+        $cacheControl = $status === 'complete' ? 'max-age=3600' : 'no-cache';
+
+        return response($vtt, 200, [
+            'Content-Type' => 'text/vtt',
+            'Access-Control-Allow-Origin' => '*',
+            'Cache-Control' => $cacheControl,
         ]);
     }
 
@@ -346,51 +470,34 @@ class InstantDubController extends Controller
         return $json ? json_decode($json, true) : null;
     }
 
-    private function generateAacSegment(string $sessionId, int $index, array $chunk): ?string
+    /**
+     * Generate AAC for a TTS segment (speech only, no gap silence).
+     * Pads/trims to exact slot duration (start_time → end_time).
+     */
+    private function generateAacSegment(array $chunk): ?string
     {
-        $tmpDir = sys_get_temp_dir() . "/hls-dub-{$sessionId}";
+        $tmpDir = sys_get_temp_dir() . '/hls-dub-' . Str::random(8);
         @mkdir($tmpDir, 0755, true);
 
-        $mp3File = "{$tmpDir}/seg_{$index}.mp3";
-        $aacFile = "{$tmpDir}/seg_{$index}.aac";
+        $mp3File = "{$tmpDir}/seg.mp3";
+        $aacFile = "{$tmpDir}/seg.aac";
 
         try {
-            // Calculate the exact time slot this segment must cover
-            $prevEnd = 0.0;
-            if ($index > 0) {
-                $prevJson = Redis::get("instant-dub:{$sessionId}:chunk:" . ($index - 1));
-                if ($prevJson) {
-                    $prev = json_decode($prevJson, true);
-                    $prevEnd = (float) ($prev['end_time'] ?? 0);
-                }
-            }
-            $gap = max(0, ($chunk['start_time'] ?? 0) - $prevEnd);
+            $startTime = (float) ($chunk['start_time'] ?? 0);
             $endTime = (float) ($chunk['end_time'] ?? 0);
-            $slotDuration = round(max(0.1, $endTime - $prevEnd), 3);
+            $slotDuration = round(max(0.1, $endTime - $startTime), 3);
 
             $audioBase64 = $chunk['audio_base64'] ?? null;
 
             if (!$audioBase64) {
-                // Error chunk — generate silence for the full slot
+                // Error chunk — silence for the slot
                 Process::timeout(15)->run([
                     'ffmpeg', '-y', '-f', 'lavfi', '-t', (string) $slotDuration,
                     '-i', 'anullsrc=r=44100:cl=mono',
                     '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
                 ]);
-            } elseif ($gap > 0.01) {
-                // Silence gap + TTS audio, padded/trimmed to exact slot duration
-                file_put_contents($mp3File, base64_decode($audioBase64));
-                Process::timeout(15)->run([
-                    'ffmpeg', '-y',
-                    '-f', 'lavfi', '-t', (string) round($gap, 3),
-                    '-i', 'anullsrc=r=44100:cl=mono',
-                    '-i', $mp3File,
-                    '-filter_complex', '[1:a]aresample=44100[r];[0:a][r]concat=n=2:v=0:a=1,apad=whole_dur=' . $slotDuration,
-                    '-t', (string) $slotDuration,
-                    '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
-                ]);
             } else {
-                // No gap — TTS audio padded/trimmed to exact slot duration
+                // TTS audio padded/trimmed to exact slot duration
                 file_put_contents($mp3File, base64_decode($audioBase64));
                 Process::timeout(15)->run([
                     'ffmpeg', '-y', '-i', $mp3File,
@@ -410,5 +517,13 @@ class InstantDubController extends Controller
             @unlink($aacFile);
             @rmdir($tmpDir);
         }
+    }
+
+    private function formatVttTime(float $seconds): string
+    {
+        $hours = (int) ($seconds / 3600);
+        $minutes = (int) (fmod($seconds, 3600) / 60);
+        $secs = fmod($seconds, 60);
+        return sprintf('%02d:%02d:%06.3f', $hours, $minutes, $secs);
     }
 }
