@@ -20,12 +20,12 @@ services:
         aliases:
           - app
 
-  queue:
+  horizon:
     build:
       context: .
       dockerfile: docker/php/Dockerfile
-    container_name: movie_dubber_queue
-    command: php -d memory_limit=512M artisan queue:work --queue=chunks,segment-processing,segment-generation,default --sleep=3 --tries=2 --timeout=600
+    container_name: movie_dubber_horizon
+    command: php -d memory_limit=512M artisan horizon
     volumes:
       - .:/var/www
     depends_on:
@@ -39,51 +39,7 @@ services:
     networks:
       dubber:
         aliases:
-          - queue
-    restart: unless-stopped
-
-  queue2:
-    build:
-      context: .
-      dockerfile: docker/php/Dockerfile
-    container_name: movie_dubber_queue2
-    command: php -d memory_limit=512M artisan queue:work --queue=chunks,segment-generation,default --sleep=3 --tries=2 --timeout=600
-    volumes:
-      - .:/var/www
-    depends_on:
-      redis:
-        condition: service_started
-      mysql:
-        condition: service_healthy
-    dns:
-      - 1.1.1.1
-      - 8.8.8.8
-    networks:
-      dubber:
-        aliases:
-          - queue2
-    restart: unless-stopped
-
-  queue3:
-    build:
-      context: .
-      dockerfile: docker/php/Dockerfile
-    container_name: movie_dubber_queue3
-    command: php -d memory_limit=512M artisan queue:work --queue=chunks,segment-generation,default --sleep=3 --tries=2 --timeout=600
-    volumes:
-      - .:/var/www
-    depends_on:
-      redis:
-        condition: service_started
-      mysql:
-        condition: service_healthy
-    dns:
-      - 1.1.1.1
-      - 8.8.8.8
-    networks:
-      dubber:
-        aliases:
-          - queue3
+          - horizon
     restart: unless-stopped
 
   nginx:
