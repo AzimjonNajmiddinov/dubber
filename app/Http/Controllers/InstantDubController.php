@@ -137,19 +137,27 @@ class InstantDubController extends Controller
 
         $lines = explode("\n", $master);
 
-        // First pass: find existing audio group ID
-        $existingGroupId = null;
+        // First pass: find existing audio and subtitle group IDs
+        $existingAudioGroup = null;
+        $existingSubsGroup = null;
         foreach ($lines as $line) {
             $trimmed = trim($line);
-            if (str_starts_with($trimmed, '#EXT-X-MEDIA') && str_contains($trimmed, 'TYPE=AUDIO')) {
-                if (preg_match('/GROUP-ID="([^"]+)"/', $trimmed, $m)) {
-                    $existingGroupId = $m[1];
-                    break;
+            if (str_starts_with($trimmed, '#EXT-X-MEDIA')) {
+                if (str_contains($trimmed, 'TYPE=AUDIO') && !$existingAudioGroup) {
+                    if (preg_match('/GROUP-ID="([^"]+)"/', $trimmed, $m)) {
+                        $existingAudioGroup = $m[1];
+                    }
+                }
+                if (str_contains($trimmed, 'TYPE=SUBTITLES') && !$existingSubsGroup) {
+                    if (preg_match('/GROUP-ID="([^"]+)"/', $trimmed, $m)) {
+                        $existingSubsGroup = $m[1];
+                    }
                 }
             }
         }
 
-        $groupId = $existingGroupId ?? 'audio';
+        $groupId = $existingAudioGroup ?? 'audio';
+        $subsGroupId = $existingSubsGroup ?? 'subs';
         $output = [];
         $injected = false;
 
@@ -158,25 +166,25 @@ class InstantDubController extends Controller
 
             // Inject dub audio + subtitle tracks before the first STREAM-INF
             if (!$injected && str_starts_with($trimmed, '#EXT-X-STREAM-INF')) {
-                if (!$existingGroupId) {
+                if (!$existingAudioGroup) {
                     $output[] = "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"{$groupId}\",NAME=\"Original\",DEFAULT=YES,AUTOSELECT=YES";
                 }
                 $output[] = "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"{$groupId}\",NAME=\"{$dubName}\",LANGUAGE=\"{$lang}\",URI=\"dub-audio.m3u8\",DEFAULT=NO,AUTOSELECT=NO";
-                $output[] = "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"{$subName}\",LANGUAGE=\"{$lang}\",URI=\"dub-subtitles.m3u8\",DEFAULT=YES,AUTOSELECT=YES,FORCED=NO";
+                $output[] = "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"{$subsGroupId}\",NAME=\"{$subName}\",LANGUAGE=\"{$lang}\",URI=\"dub-subtitles.m3u8\",DEFAULT=NO,AUTOSELECT=YES,FORCED=NO";
                 $injected = true;
             }
 
             // Ensure STREAM-INF lines reference audio + subtitle groups
             if (str_starts_with($trimmed, '#EXT-X-STREAM-INF')) {
                 if (str_contains($trimmed, 'AUDIO=')) {
-                    if (!$existingGroupId) {
+                    if (!$existingAudioGroup) {
                         $line = preg_replace('/AUDIO="[^"]*"/', 'AUDIO="' . $groupId . '"', $line);
                     }
                 } else {
                     $line = rtrim($line) . ',AUDIO="' . $groupId . '"';
                 }
                 if (!str_contains($line, 'SUBTITLES=')) {
-                    $line = rtrim($line) . ',SUBTITLES="subs"';
+                    $line = rtrim($line) . ',SUBTITLES="' . $subsGroupId . '"';
                 }
             }
 
