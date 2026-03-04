@@ -47,7 +47,7 @@ Route::prefix('instant-dub')->group(function () {
     Route::get('/{sessionId}/master.m3u8', [InstantDubController::class, 'hlsMaster'])->name('api.instant-dub.master');
     Route::get('/{sessionId}/dub-audio.m3u8', [InstantDubController::class, 'hlsAudioPlaylist'])->name('api.instant-dub.dub-audio');
     Route::get('/{sessionId}/dub-segment/{index}.aac', [InstantDubController::class, 'hlsAudioSegment'])->name('api.instant-dub.dub-segment');
-    Route::get('/{sessionId}/gap/{durationMs}.aac', [InstantDubController::class, 'hlsGapSegment'])->name('api.instant-dub.gap');
+    Route::get('/{sessionId}/gap/{startMs}/{durationMs}.aac', [InstantDubController::class, 'hlsGapSegment'])->name('api.instant-dub.gap');
     Route::get('/{sessionId}/dub-subtitles.m3u8', [InstantDubController::class, 'hlsSubtitlePlaylist'])->name('api.instant-dub.dub-subtitles');
     Route::get('/{sessionId}/dub-subtitles.vtt', [InstantDubController::class, 'hlsSubtitleVtt'])->name('api.instant-dub.dub-subtitles-vtt');
     Route::get('/{sessionId}/proxy/{path}', [InstantDubController::class, 'hlsProxy'])->where('path', '.*')->name('api.instant-dub.proxy');

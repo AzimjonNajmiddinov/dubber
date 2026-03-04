@@ -10,6 +10,7 @@ use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Facades\Redis;
 use Illuminate\Support\Str;
 
@@ -73,6 +74,12 @@ class PrepareInstantDubJob implements ShouldQueue
             $fullDialogue[] = ($i + 1) . '. ' . $seg['text'];
         }
         $fullDialogueText = implode("\n", $fullDialogue);
+
+        // 2b. Download original audio track for background mixing (30% volume)
+        $originalAudioPath = $this->downloadOriginalAudio();
+        if ($originalAudioPath) {
+            $this->updateSession(['original_audio_path' => $originalAudioPath]);
+        }
 
         // 3. Translate and dispatch TTS per batch — first TTS starts while rest translates
         // If subtitle language matches dub language (e.g. Uzbek→Uzbek), skip translation entirely
@@ -589,6 +596,100 @@ PROMPT;
             Log::error('HLS sub fetch failed', ['error' => $e->getMessage()]);
             return null;
         }
+    }
+
+    private function downloadOriginalAudio(): ?string
+    {
+        $videoUrl = $this->videoUrl;
+        if (!str_contains($videoUrl, '.m3u8')) return null;
+
+        try {
+            $masterResp = Http::timeout(10)->get($videoUrl);
+            if ($masterResp->failed()) return null;
+
+            $master = $masterResp->body();
+            $urlWithoutQuery = strtok($videoUrl, '?');
+            $baseUrl = preg_replace('#/[^/]+$#', '/', $urlWithoutQuery);
+            $query = parse_url($videoUrl, PHP_URL_QUERY) ?? '';
+
+            // Find first audio track with URI
+            preg_match_all('/^#EXT-X-MEDIA:.*TYPE=AUDIO.*$/m', $master, $audioLines);
+            $audioUri = null;
+            foreach ($audioLines[0] ?? [] as $line) {
+                if (preg_match('/URI="([^"]+)"/', $line, $m)) {
+                    $audioUri = $m[1];
+                    break;
+                }
+            }
+
+            if (!$audioUri) return null;
+
+            // Resolve to absolute URL
+            $audioPlaylistUrl = str_starts_with($audioUri, 'http') ? $audioUri : $baseUrl . $audioUri;
+            if ($query) $audioPlaylistUrl .= (str_contains($audioPlaylistUrl, '?') ? '&' : '?') . $query;
+
+            // Fetch audio playlist and rewrite segment URIs to absolute (CDN may require auth tokens)
+            $audioResp = Http::timeout(10)->get($audioPlaylistUrl);
+            if ($audioResp->failed()) return null;
+
+            $audioPlaylist = $audioResp->body();
+            $audioBase = preg_replace('#/[^/]+$#', '/', strtok($audioPlaylistUrl, '?'));
+
+            $rewritten = '';
+            foreach (explode("\n", $audioPlaylist) as $pLine) {
+                $trimmed = trim($pLine);
+                if ($trimmed !== '' && !str_starts_with($trimmed, '#')) {
+                    if (!str_starts_with($trimmed, 'http')) {
+                        $trimmed = $audioBase . $trimmed;
+                    }
+                    if ($query && !str_contains($trimmed, '?')) {
+                        $trimmed .= '?' . $query;
+                    }
+                    $rewritten .= $trimmed . "\n";
+                } else {
+                    $rewritten .= $pLine . "\n";
+                }
+            }
+
+            // Save rewritten playlist and download via ffmpeg
+            $tmpDir = storage_path("app/instant-dub/{$this->sessionId}");
+            @mkdir($tmpDir, 0755, true);
+            $localPlaylist = "{$tmpDir}/audio_playlist.m3u8";
+            $outputPath = "{$tmpDir}/original_audio.m4a";
+
+            file_put_contents($localPlaylist, $rewritten);
+
+            $result = Process::timeout(300)->run([
+                'ffmpeg', '-y',
+                '-protocol_whitelist', 'file,http,https,tcp,tls,crypto',
+                '-i', $localPlaylist,
+                '-vn', '-ac', '1', '-ar', '44100',
+                '-c:a', 'aac', '-b:a', '96k',
+                $outputPath,
+            ]);
+
+            @unlink($localPlaylist);
+
+            if ($result->successful() && file_exists($outputPath) && filesize($outputPath) > 1000) {
+                Log::info('Original audio downloaded', [
+                    'session' => $this->sessionId,
+                    'size' => filesize($outputPath),
+                ]);
+                return $outputPath;
+            }
+
+            Log::warning('Original audio download failed', [
+                'session' => $this->sessionId,
+                'error' => Str::limit($result->errorOutput(), 300),
+            ]);
+        } catch (\Throwable $e) {
+            Log::warning('Original audio download error', [
+                'session' => $this->sessionId,
+                'error' => $e->getMessage(),
+            ]);
+        }
+
+        return null;
     }
 
     private function updateStatus(string $status, string $error = ''): void

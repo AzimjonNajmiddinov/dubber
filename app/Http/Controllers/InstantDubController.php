@@ -99,6 +99,13 @@ class InstantDubController extends Controller
         $session['status'] = 'stopped';
         Redis::setex("instant-dub:{$sessionId}", 300, json_encode($session));
 
+        // Clean up original audio file
+        if (!empty($session['original_audio_path'])) {
+            @unlink($session['original_audio_path']);
+            $dir = dirname($session['original_audio_path']);
+            @rmdir($dir);
+        }
+
         $total = $session['total_segments'] ?? 0;
         for ($i = 0; $i < $total; $i++) {
             Redis::del("instant-dub:{$sessionId}:chunk:{$i}");
@@ -245,15 +252,18 @@ class InstantDubController extends Controller
             $endTime = (float) ($chunk['end_time'] ?? 0);
             $gap = max(0, $startTime - $prevEnd);
 
-            // Break large gaps into max-10s silence segments
+            // Break large gaps into max-10s segments (with background audio if available)
             $gapRemaining = $gap;
+            $gapStart = $prevEnd;
             while ($gapRemaining > 0.05) {
                 $silenceDur = min($gapRemaining, 10.0);
+                $startMs = (int) round($gapStart * 1000);
                 $durMs = (int) round($silenceDur * 1000);
                 $entries[] = [
-                    'uri' => "gap/{$durMs}.aac",
+                    'uri' => "gap/{$startMs}/{$durMs}.aac",
                     'duration' => round($silenceDur, 3),
                 ];
+                $gapStart += $silenceDur;
                 $gapRemaining -= $silenceDur;
             }
 
@@ -314,8 +324,11 @@ class InstantDubController extends Controller
             return response('Segment not ready', 404);
         }
 
+        $session = $this->getSession($sessionId);
+        $originalAudioPath = $session['original_audio_path'] ?? null;
+
         $chunk = json_decode($chunkJson, true);
-        $aacData = $this->generateAacSegment($chunk);
+        $aacData = $this->generateAacSegment($chunk, $originalAudioPath);
 
         if (!$aacData) {
             return response('Failed to generate AAC segment', 500);
@@ -331,12 +344,52 @@ class InstantDubController extends Controller
         ]);
     }
 
-    public function hlsGapSegment(string $sessionId, int $durationMs)
+    public function hlsGapSegment(string $sessionId, int $startMs, int $durationMs)
     {
         $durationMs = max(10, min($durationMs, 30000));
         $duration = $durationMs / 1000;
+        $startSeconds = $startMs / 1000;
 
-        // Cache silence by duration (shared across all sessions)
+        $session = $this->getSession($sessionId);
+        $originalAudioPath = $session['original_audio_path'] ?? null;
+
+        // If we have original audio, mix at 30% for this time range
+        if ($originalAudioPath && file_exists($originalAudioPath)) {
+            $cacheKey = "instant-dub:{$sessionId}:gap-aac:{$startMs}-{$durationMs}";
+            $cached = Redis::get($cacheKey);
+
+            if ($cached) {
+                return response(base64_decode($cached), 200, [
+                    'Content-Type' => 'audio/aac',
+                    'Access-Control-Allow-Origin' => '*',
+                    'Cache-Control' => 'max-age=86400',
+                ]);
+            }
+
+            $tmpFile = sys_get_temp_dir() . "/gap_{$sessionId}_{$startMs}_{$durationMs}.aac";
+            Process::timeout(20)->run([
+                'ffmpeg', '-y',
+                '-ss', (string) round($startSeconds, 3),
+                '-t', (string) round($duration, 3),
+                '-i', $originalAudioPath,
+                '-af', 'volume=0.3',
+                '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $tmpFile,
+            ]);
+
+            if (file_exists($tmpFile) && filesize($tmpFile) > 10) {
+                $data = file_get_contents($tmpFile);
+                @unlink($tmpFile);
+                Redis::setex($cacheKey, 50400, base64_encode($data));
+                return response($data, 200, [
+                    'Content-Type' => 'audio/aac',
+                    'Access-Control-Allow-Origin' => '*',
+                    'Cache-Control' => 'max-age=86400',
+                ]);
+            }
+            @unlink($tmpFile);
+        }
+
+        // Fallback: silence (shared cache)
         $cacheKey = "instant-dub:silence-aac:{$durationMs}";
         $cached = Redis::get($cacheKey);
 
@@ -479,16 +532,18 @@ class InstantDubController extends Controller
     }
 
     /**
-     * Generate AAC for a TTS segment (speech only, no gap silence).
+     * Generate AAC for a TTS segment.
+     * Mixes TTS with original audio at 30% if available.
      * Pads/trims to exact slot duration (start_time → end_time).
      */
-    private function generateAacSegment(array $chunk): ?string
+    private function generateAacSegment(array $chunk, ?string $originalAudioPath = null): ?string
     {
         $tmpDir = sys_get_temp_dir() . '/hls-dub-' . Str::random(8);
         @mkdir($tmpDir, 0755, true);
 
         $mp3File = "{$tmpDir}/seg.mp3";
         $aacFile = "{$tmpDir}/seg.aac";
+        $hasBg = $originalAudioPath && file_exists($originalAudioPath);
 
         try {
             $startTime = (float) ($chunk['start_time'] ?? 0);
@@ -498,21 +553,49 @@ class InstantDubController extends Controller
             $audioBase64 = $chunk['audio_base64'] ?? null;
 
             if (!$audioBase64) {
-                // Error chunk — silence for the slot
-                Process::timeout(15)->run([
-                    'ffmpeg', '-y', '-f', 'lavfi', '-t', (string) $slotDuration,
-                    '-i', 'anullsrc=r=44100:cl=mono',
-                    '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
-                ]);
+                if ($hasBg) {
+                    // Background audio only at 30%
+                    Process::timeout(20)->run([
+                        'ffmpeg', '-y',
+                        '-ss', (string) round($startTime, 3),
+                        '-t', (string) $slotDuration,
+                        '-i', $originalAudioPath,
+                        '-af', 'volume=0.3',
+                        '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
+                    ]);
+                } else {
+                    // Silence for the slot
+                    Process::timeout(15)->run([
+                        'ffmpeg', '-y', '-f', 'lavfi', '-t', (string) $slotDuration,
+                        '-i', 'anullsrc=r=44100:cl=mono',
+                        '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
+                    ]);
+                }
             } else {
-                // TTS audio padded/trimmed to exact slot duration
                 file_put_contents($mp3File, base64_decode($audioBase64));
-                Process::timeout(15)->run([
-                    'ffmpeg', '-y', '-i', $mp3File,
-                    '-af', 'aresample=44100,apad=whole_dur=' . $slotDuration,
-                    '-t', (string) $slotDuration,
-                    '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
-                ]);
+
+                if ($hasBg) {
+                    // Mix TTS (100%) + original audio (30%)
+                    Process::timeout(20)->run([
+                        'ffmpeg', '-y',
+                        '-i', $mp3File,
+                        '-ss', (string) round($startTime, 3),
+                        '-t', (string) $slotDuration,
+                        '-i', $originalAudioPath,
+                        '-filter_complex',
+                        "[0:a]aresample=44100,apad=whole_dur={$slotDuration}[tts];[1:a]volume=0.3[bg];[tts][bg]amix=inputs=2:duration=first:normalize=0",
+                        '-t', (string) $slotDuration,
+                        '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
+                    ]);
+                } else {
+                    // TTS only, padded to slot duration
+                    Process::timeout(15)->run([
+                        'ffmpeg', '-y', '-i', $mp3File,
+                        '-af', 'aresample=44100,apad=whole_dur=' . $slotDuration,
+                        '-t', (string) $slotDuration,
+                        '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
+                    ]);
+                }
             }
 
             if (!file_exists($aacFile) || filesize($aacFile) < 10) {
