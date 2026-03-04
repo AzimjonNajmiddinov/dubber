@@ -126,6 +126,15 @@ class InstantDubController extends Controller
         return response()->stream(function () use ($sessionId) {
             set_time_limit(0);
 
+            // Kill ALL output buffering layers (PHP + FastCGI)
+            while (ob_get_level() > 0) {
+                ob_end_flush();
+            }
+
+            // Pad first write to exceed FastCGI buffer threshold
+            echo ':' . str_repeat(' ', 4096) . "\n\n";
+            flush();
+
             $lastReady = -1;
             $lastStatus = '';
             $lastProgress = '';
@@ -177,7 +186,6 @@ class InstantDubController extends Controller
                 // Heartbeat every 15s to keep connection alive
                 if ($tick > 0 && $tick % 15 === 0) {
                     echo ": heartbeat\n\n";
-                    if (ob_get_level() > 0) ob_flush();
                     flush();
                 }
 
@@ -186,7 +194,7 @@ class InstantDubController extends Controller
             }
         }, 200, [
             'Content-Type' => 'text/event-stream',
-            'Cache-Control' => 'no-cache',
+            'Cache-Control' => 'no-cache, no-store',
             'Connection' => 'keep-alive',
             'X-Accel-Buffering' => 'no',
             'Access-Control-Allow-Origin' => '*',
@@ -195,9 +203,7 @@ class InstantDubController extends Controller
 
     private function sseEvent(string $event, array $data): void
     {
-        echo "event: {$event}\n";
-        echo 'data: ' . json_encode($data) . "\n\n";
-        if (ob_get_level() > 0) ob_flush();
+        echo "event: {$event}\ndata: " . json_encode($data) . "\n\n";
         flush();
     }
 
