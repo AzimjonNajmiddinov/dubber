@@ -76,6 +76,7 @@ class PrepareInstantDubJob implements ShouldQueue
         $fullDialogueText = implode("\n", $fullDialogue);
 
         // 2b. Download original audio track for background mixing (30% volume)
+        $this->updateSession(['progress' => 'Downloading background audio...']);
         $originalAudioPath = $this->downloadOriginalAudio();
         if ($originalAudioPath) {
             $this->updateSession(['original_audio_path' => $originalAudioPath]);
@@ -106,6 +107,7 @@ class PrepareInstantDubJob implements ShouldQueue
         $segments = array_values(array_filter($segments, fn($s) => trim($s['text']) !== ''));
 
         // Update total count so UI can show progress
+        $totalBatches = (int) ceil(count($segments) / 15);
         $this->updateSession(['total_segments' => count($segments), 'status' => 'processing']);
 
         $batches = array_chunk($segments, 15, true);
@@ -118,7 +120,7 @@ class PrepareInstantDubJob implements ShouldQueue
                 // FIRST BATCH: translate + analyze characters IN PARALLEL
                 // Translate batch 1 without character context (faster start)
                 // Character analysis runs simultaneously for batches 2+
-                $this->updateStatus('Translating...');
+                $this->updateSession(['status' => 'Translating...', 'progress' => "Translating (1/{$totalBatches})..."]);
 
                 $apiKey = config('services.openai.key');
                 if ($apiKey) {
@@ -158,6 +160,8 @@ class PrepareInstantDubJob implements ShouldQueue
                 }
             } else {
                 // BATCHES 2+: translate with character context
+                $batchNum = $batchIdx + 1;
+                $this->updateSession(['progress' => "Translating ({$batchNum}/{$totalBatches})..."]);
                 // Brief pause between batches to avoid OpenAI rate limits
                 if ($batchIdx > 1) {
                     usleep(500_000); // 0.5s
@@ -173,6 +177,8 @@ class PrepareInstantDubJob implements ShouldQueue
             $this->buildVoiceMap($allSpeakers);
 
             // Dispatch TTS immediately for this batch
+            $batchNum = $batchIdx + 1;
+            $this->updateSession(['progress' => "Generating audio ({$batchNum}/{$totalBatches})..."]);
             foreach ($batch as $i => $seg) {
                 $text = trim($seg['text']);
                 // Strip bracket annotations GPT may have kept (e.g. [narrator], [music])
@@ -402,15 +408,19 @@ PROMPT;
                 // Exponential backoff on rate limit (429)
                 if ($response->status() === 429) {
                     $wait = min(2 ** $attempt, 15);
+                    $this->updateSession(['last_warning' => "OpenAI rate limited, retrying in {$wait}s... (attempt {$attempt}/4)"]);
                     sleep($wait);
                     continue;
                 }
+
+                $this->updateSession(['last_warning' => "Translation API error {$response->status()}, retrying..."]);
             } catch (\Throwable $e) {
                 Log::warning('Batch translation failed', [
                     'session' => $this->sessionId,
                     'attempt' => $attempt,
                     'error' => $e->getMessage(),
                 ]);
+                $this->updateSession(['last_warning' => "Translation error: " . Str::limit($e->getMessage(), 100)]);
             }
 
             if ($attempt < 4) {

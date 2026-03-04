@@ -114,6 +114,93 @@ class InstantDubController extends Controller
         return response()->json(['status' => 'stopped']);
     }
 
+    // ── Server-Sent Events for real-time updates ──
+
+    public function events(string $sessionId)
+    {
+        $session = $this->getSession($sessionId);
+        if (!$session) {
+            return response()->json(['error' => 'Session not found'], 404);
+        }
+
+        return response()->stream(function () use ($sessionId) {
+            set_time_limit(0);
+
+            $lastReady = -1;
+            $lastStatus = '';
+            $lastProgress = '';
+            $lastWarning = '';
+            $tick = 0;
+
+            while (true) {
+                if (connection_aborted()) break;
+
+                $session = $this->getSession($sessionId);
+                if (!$session) {
+                    $this->sseEvent('error', ['error' => 'Session expired']);
+                    break;
+                }
+
+                $status = $session['status'] ?? 'preparing';
+                $ready = (int) ($session['segments_ready'] ?? 0);
+                $total = (int) ($session['total_segments'] ?? 0);
+                $error = $session['error'] ?? null;
+                $progress = $session['progress'] ?? null;
+                $warning = $session['last_warning'] ?? null;
+
+                // Send warning event (transient errors like 429)
+                if ($warning && $warning !== $lastWarning) {
+                    $this->sseEvent('warning', ['message' => $warning]);
+                    $lastWarning = $warning;
+                }
+
+                // Send update if state changed
+                if ($status !== $lastStatus || $ready !== $lastReady || $progress !== $lastProgress) {
+                    $this->sseEvent('update', [
+                        'status' => $status,
+                        'segments_ready' => $ready,
+                        'total_segments' => $total,
+                        'progress' => $progress,
+                        'error' => $error,
+                    ]);
+                    $lastStatus = $status;
+                    $lastReady = $ready;
+                    $lastProgress = $progress;
+                }
+
+                // Terminal states — close connection
+                if (in_array($status, ['complete', 'stopped', 'error'])) {
+                    $this->sseEvent('done', ['status' => $status]);
+                    break;
+                }
+
+                // Heartbeat every 15s to keep connection alive
+                if ($tick > 0 && $tick % 15 === 0) {
+                    echo ": heartbeat\n\n";
+                    if (ob_get_level() > 0) ob_flush();
+                    flush();
+                }
+
+                $tick++;
+                sleep(1);
+            }
+        }, 200, [
+            'Content-Type' => 'text/event-stream',
+            'Cache-Control' => 'no-cache',
+            'Connection' => 'keep-alive',
+            'X-Accel-Buffering' => 'no',
+            'Access-Control-Allow-Origin' => '*',
+        ]);
+    }
+
+    private function sseEvent(string $event, array $data): void
+    {
+        echo "event: {$event}\n";
+        echo 'data: ' . json_encode($data) . "\n\n";
+        if (ob_get_level() > 0) ob_flush();
+        flush();
+    }
+
     // ── HLS endpoints for PlayerKit integration ──
 
     public function hlsMaster(string $sessionId)

@@ -42,6 +42,7 @@ Route::prefix('instant-dub')->group(function () {
     Route::post('/start', [InstantDubController::class, 'start'])->name('api.instant-dub.start');
     Route::get('/{sessionId}/poll', [InstantDubController::class, 'poll'])->name('api.instant-dub.poll');
     Route::post('/{sessionId}/stop', [InstantDubController::class, 'stop'])->name('api.instant-dub.stop');
+    Route::get('/{sessionId}/events', [InstantDubController::class, 'events'])->name('api.instant-dub.events');
 
     // HLS endpoints for PlayerKit integration
     Route::get('/{sessionId}/master.m3u8', [InstantDubController::class, 'hlsMaster'])->name('api.instant-dub.master');
