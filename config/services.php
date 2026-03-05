@@ -38,6 +38,10 @@ return [
         'key' => env('OPENAI_API_KEY'),
     ],
 
+    'anthropic' => [
+        'key' => env('ANTHROPIC_API_KEY'),
+    ],
+
     'openvoice' => [
         'url' => env('OPENVOICE_SERVICE_URL', 'http://localhost:8005'),
     ],

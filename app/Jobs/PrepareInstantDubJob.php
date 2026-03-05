@@ -18,7 +18,7 @@ class PrepareInstantDubJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public int $timeout = 600;
+    public int $timeout = 120;
     public int $tries = 1;
 
     public function __construct(
@@ -82,13 +82,9 @@ class PrepareInstantDubJob implements ShouldQueue
             $this->updateSession(['original_audio_path' => $originalAudioPath]);
         }
 
-        // 3. Translate and dispatch TTS per batch — first TTS starts while rest translates
-        // If subtitle language matches dub language (e.g. Uzbek→Uzbek), skip translation entirely
+        // 3. Filter to speakable segments
         $needsTranslation = $this->translateFrom && $this->translateFrom !== $this->language;
-        $dispatched = 0;
-        $allSpeakers = [];
 
-        // Filter to speakable segments for TTS dispatch
         $segments = array_values(array_filter($allSegments, function ($seg) {
             $clean = preg_replace('/\[[^\]]*\]/', '', $seg['text']);
             $clean = preg_replace('/[-♪\s]+/', '', $clean);
@@ -106,84 +102,22 @@ class PrepareInstantDubJob implements ShouldQueue
         unset($seg);
         $segments = array_values(array_filter($segments, fn($s) => trim($s['text']) !== ''));
 
-        // Update total count so UI can show progress
         $totalBatches = (int) ceil(count($segments) / 15);
         $this->updateSession(['total_segments' => count($segments), 'status' => 'processing']);
 
-        $batches = array_chunk($segments, 15, true);
-        $characterContext = '';
-
-        foreach ($batches as $batchIdx => $batch) {
-            if (!$needsTranslation) {
-                // No translation — dispatch TTS directly
-            } elseif ($batchIdx === 0) {
-                // FIRST BATCH: translate + analyze characters IN PARALLEL
-                // Translate batch 1 without character context (faster start)
-                // Character analysis runs simultaneously for batches 2+
-                $this->updateSession(['status' => 'Translating...', 'progress' => "Translating (1/{$totalBatches})..."]);
-
-                $apiKey = config('services.openai.key');
-                if ($apiKey) {
-                    $analysisPrompt = $this->buildAnalysisPrompt($allSegments);
-                    $translationMessages = $this->buildTranslationMessages($batch, '', $fullDialogueText);
-
-                    $pool = Http::pool(function ($pool) use ($apiKey, $analysisPrompt, $translationMessages) {
-                        $pool->as('analysis')->withToken($apiKey)->timeout(45)
-                            ->post('https://api.openai.com/v1/chat/completions', [
-                                'model' => 'gpt-4o',
-                                'temperature' => 0.1,
-                                'messages' => $analysisPrompt,
-                            ]);
-                        $pool->as('translation')->withToken($apiKey)->timeout(60)
-                            ->post('https://api.openai.com/v1/chat/completions', [
-                                'model' => 'gpt-4o',
-                                'temperature' => 0.3,
-                                'messages' => $translationMessages,
-                            ]);
-                    });
-
-                    // Process character analysis result
-                    if (isset($pool['analysis']) && $pool['analysis'] instanceof \Illuminate\Http\Client\Response && $pool['analysis']->successful()) {
-                        $characterContext = trim($pool['analysis']->json('choices.0.message.content') ?? '');
-                        Log::info('Character analysis', ['session' => $this->sessionId, 'result' => $characterContext]);
-                    }
-
-                    // Process translation result
-                    if (isset($pool['translation']) && $pool['translation'] instanceof \Illuminate\Http\Client\Response && $pool['translation']->successful()) {
-                        $batch = $this->parseTranslationResponse($batch, $pool['translation']->json('choices.0.message.content') ?? '');
-                    } else {
-                        Log::warning('Batch 0 translation failed', [
-                            'session' => $this->sessionId,
-                            'status' => isset($pool['translation']) && $pool['translation'] instanceof \Illuminate\Http\Client\Response ? $pool['translation']->status() : 'no response',
-                        ]);
-                    }
-                }
-            } else {
-                // BATCHES 2+: translate with character context
-                $batchNum = $batchIdx + 1;
-                $this->updateSession(['progress' => "Translating ({$batchNum}/{$totalBatches})..."]);
-                // Brief pause between batches to avoid OpenAI rate limits
-                if ($batchIdx > 1) {
-                    usleep(500_000); // 0.5s
-                }
-                $batch = $this->translateBatch($batch, $characterContext, $fullDialogueText);
-            }
-
-            // Collect speakers and update voice map incrementally
-            foreach ($batch as $seg) {
+        if (!$needsTranslation) {
+            // No translation — build voice map and dispatch TTS directly
+            $allSpeakers = [];
+            foreach ($segments as $seg) {
                 $tag = $seg['speaker'] ?? 'M1';
                 $allSpeakers[$tag] = true;
             }
             $this->buildVoiceMap($allSpeakers);
 
-            // Dispatch TTS immediately for this batch
-            $batchNum = $batchIdx + 1;
-            $this->updateSession(['progress' => "Generating audio ({$batchNum}/{$totalBatches})..."]);
-            foreach ($batch as $i => $seg) {
+            $dispatched = 0;
+            foreach ($segments as $i => $seg) {
                 $text = trim($seg['text']);
-                // Strip bracket annotations GPT may have kept (e.g. [narrator], [music])
                 $text = trim(preg_replace('/\[[^\]]*\]\s*/', '', $text));
-                // Normalize backtick → apostrophe (GPT sometimes uses ` in Uzbek words like o`zbek)
                 $text = str_replace('`', '\'', $text);
                 if ($text === '') continue;
 
@@ -194,265 +128,62 @@ class PrepareInstantDubJob implements ShouldQueue
                 )->onQueue('segment-generation');
                 $dispatched++;
             }
+
+            Log::info('Instant dub prepared (no translation)', [
+                'session' => $this->sessionId,
+                'segments' => $dispatched,
+            ]);
+            return;
         }
 
-        Log::info('Instant dub prepared', [
+        // 4. Store batches in Redis for per-batch translation jobs
+        $batches = array_chunk($segments, 15);
+        foreach ($batches as $batchIdx => $batch) {
+            $batchKey = "instant-dub:{$this->sessionId}:batch:{$batchIdx}";
+            Redis::setex($batchKey, 50400, json_encode(array_values($batch)));
+        }
+
+        // Store all segments for batch 0 character analysis
+        $allSegmentsKey = "instant-dub:{$this->sessionId}:all-segments";
+        Redis::setex($allSegmentsKey, 50400, json_encode($allSegments));
+
+        // 5. Dispatch first batch job — it chains the rest
+        TranslateInstantDubBatchJob::dispatch(
+            $this->sessionId,
+            0,
+            $totalBatches,
+            $fullDialogueText,
+            $this->language,
+            $this->translateFrom,
+        )->onQueue('default');
+
+        Log::info('Instant dub prepared, translation chain started', [
             'session' => $this->sessionId,
-            'segments' => $dispatched,
-            'needsTranslation' => $needsTranslation,
+            'totalSegments' => count($segments),
+            'totalBatches' => $totalBatches,
+            'needsTranslation' => true,
             'translateFrom' => $this->translateFrom,
             'detectedLang' => $detectedLang,
         ]);
     }
 
-    private function buildAnalysisPrompt(array $segments): array
-    {
-        $lines = [];
-        foreach ($segments as $i => $seg) {
-            $lines[] = ($i + 1) . '. ' . $seg['text'];
-        }
-
-        $sourceLangRules = '';
-        if ($this->translateFrom === 'ru') {
-            $sourceLangRules = <<<'RULES'
-
-RUSSIAN GENDER DETECTION — use these clues to determine speaker gender:
-- Past tense verb endings: -л (male: сказал, пошёл, знал), -ла (female: сказала, пошла, знала)
-- Short adjective forms: рад/готов/должен (male), рада/готова/должна (female)
-- Self-references: "я сам" (male), "я сама" (female)
-- Russian names: masculine (Андрей, Сергей, Дмитрий, Алексей), feminine (Мария, Анна, Елена, Наталья)
-- Patronymics: -ович/-евич (addressing male), -овна/-евна (addressing female)
-- Diminutives: -ка, -очка, -енька often for females; -ик, -чик often for males
-
-RUSSIAN FORMALITY DETECTION — maps to Uzbek sen/siz:
-- "ты" forms (говоришь, идёшь, -ешь/-ишь endings) = informal → the listener is younger or close
-- "Вы" forms (говорите, идёте, -ете/-ите endings) = formal → the listener is older or respected
-- This tells you the RELATIONSHIP: if speaker uses "ты", they are senior to or close peers with the listener
-RULES;
-        } elseif ($this->translateFrom === 'en') {
-            $sourceLangRules = <<<'RULES'
-
-ENGLISH GENDER DETECTION — use these clues:
-- Pronouns used about the speaker by others: "he/him/his" (male), "she/her" (female)
-- Names: gendered names (John=male, Mary=female)
-- Terms of address: "sir/mister/Mr." (male), "ma'am/miss/Mrs./Ms." (female)
-- Family roles: "father/son/brother/husband" (male), "mother/daughter/sister/wife" (female)
-- Vocal descriptions in stage directions: "he said", "she whispered"
-RULES;
-        }
-
-        $prompt = <<<PROMPT
-You are analyzing a film/series dialogue to identify speakers. This is CRITICAL for voice dubbing — wrong gender = wrong voice actor.
-
-{$sourceLangRules}
-
-TASK: Analyze every line carefully. Determine:
-1. How many distinct speakers are in this dialogue
-2. Each speaker's GENDER (from grammatical clues, names, context — see rules above)
-3. Each speaker's approximate AGE (child, young ~15-25, adult ~25-50, elderly ~50+)
-4. Relationships between speakers (parent-child, friends, spouses, boss-employee, etc.)
-5. Which lines each speaker says
-
-IMPORTANT:
-- Do NOT guess gender randomly. If a line has "-ла" ending (Russian), it's FEMALE. If "-л" ending, it's MALE.
-- Look at consecutive lines — dialogues alternate between speakers. If line 1 asks a question and line 2 answers, they are usually different speakers.
-- A dash "-" at the start of a line often indicates a different speaker from the previous line.
-- If someone is addressed by name, that person is the LISTENER, not the speaker.
-
-Format your response EXACTLY like this:
-CHARACTERS:
-M1: [name/role], [age category], [relationship to others]
-F1: [name/role], [age category], [relationship to others]
-
-LINES:
-1-3,7,12: M1
-4-6,8-9: F1
-PROMPT;
-
-        return [
-            ['role' => 'system', 'content' => $prompt],
-            ['role' => 'user', 'content' => implode("\n", $lines)],
-        ];
-    }
-
-    private function buildTranslationMessages(array $batch, string $characterContext, string $fullDialogue): array
-    {
-        $langNames = [
-            'uz' => 'Uzbek', 'ru' => 'Russian', 'en' => 'English', 'tr' => 'Turkish',
-            'es' => 'Spanish', 'fr' => 'French', 'de' => 'German', 'ar' => 'Arabic',
-            'zh' => 'Chinese', 'ja' => 'Japanese', 'ko' => 'Korean',
-        ];
-        $toLang = $langNames[$this->language] ?? $this->language;
-
-        $lines = [];
-        foreach ($batch as $i => $seg) {
-            $duration = round($seg['end'] - $seg['start'], 1);
-            $maxChars = (int) round($duration * 12);
-            $rawText = $seg['raw_text'] ?? $seg['text'];
-            $lines[] = ($i + 1) . '. [' . $duration . 's, max ' . $maxChars . ' chars] ' . $rawText;
-        }
-
-        $uzbekRules = '';
-        $fromLangHint = '';
-        if ($this->language === 'uz') {
-            if ($this->translateFrom === 'ru') {
-                $fromLangHint = <<<'HINT'
-
-RUSSIAN→UZBEK MAPPING:
-- Russian "ты" (informal) → Uzbek "sen": speaker is older/senior or they are close friends
-- Russian "Вы" (formal) → Uzbek "Siz": speaker is younger or it's a formal setting
-- Keep this consistent: if character A uses "ты" to B in Russian, A must use "sen" to B in Uzbek throughout
-HINT;
-            }
-
-            $uzbekRules = <<<UZ
-
-UZBEK LANGUAGE RULES (CRITICAL):
-- SEN/SIZ — this is the #1 priority, getting it wrong ruins the dub:
-  * Look at CHARACTER ANALYSIS above for age and relationships
-  * Elderly/parent → child/young person: always "sen" (-san, -ding, -yapsanmi)
-  * Young person → elderly/parent: always "Siz" (-siz, -dingiz, -yapsizmi)
-  * Same-age close friends: "sen"
-  * Same-age strangers/formal: "Siz"
-  * Child → parent: "Siz" (respectful)
-  * Husband ↔ wife: usually "sen" (intimate)
-  * Boss → employee: can be "sen"; employee → boss: "Siz"
-{$fromLangHint}
-- STYLE — spoken Uzbek, like real people talk:
-  * Use colloquial forms: "qilyapman" not "qilayotirman", "ketyapman" not "ketayotirman"
-  * Use "bor" not "mavjud", "yo'q" not "mavjud emas"
-  * Contractions: "nimaga" not "nima uchun" (when casual)
-  * Emotional words: "voy!" (surprise), "ey!" (calling), "qo'ying!" (stop it!)
-- Names and proper nouns: keep original, don't translate
-- Keep emotional register: anger, love, fear, humor must come through
-UZ;
-        }
-
-        $systemPrompt = <<<PROMPT
-You are an expert film/series dubbing translator. Your translations will be spoken aloud by TTS voice actors, so they must sound like natural spoken {$toLang} dialogue — not written subtitles.
-
-CHARACTER ANALYSIS:
-{$characterContext}
-
-FULL DIALOGUE (for context — do NOT translate this, only use for understanding the scene):
-{$fullDialogue}
-{$uzbekRules}
-
-TRANSLATION RULES:
-1. Each line has [Ns, max M chars]. Translation MUST fit within that character limit — it will be spoken in that time slot.
-2. Lines may contain annotations like [music], [laughing], [whispering], [door opens] etc. — use these to understand the scene mood and context, but translate ONLY the spoken dialogue part. Do not include the annotations in your translation.
-3. Translate meaning, not words. Rephrase freely to sound natural in {$toLang}.
-4. Keep the emotional register: if someone is angry, scared, joking, whispering — the translation must convey that.
-5. Use the character analysis above to assign the correct speaker tag [M1], [F1], etc. to each line.
-6. Preserve interruptions, hesitations, and conversational flow.
-
-Format: "1. [M1] translated text"
-Do not include timing info. Do not skip or merge lines. Keep exact numbering.
-PROMPT;
-
-        return [
-            ['role' => 'system', 'content' => $systemPrompt],
-            ['role' => 'user', 'content' => "Translate ONLY these lines:\n\n" . implode("\n", $lines)],
-        ];
-    }
-
-    private function parseTranslationResponse(array $batch, string $content): array
-    {
-        $translated = trim($content);
-        foreach (preg_split('/\n+/', $translated) as $line) {
-            if (preg_match('/^(\d+)\.\s*\[([MFC]\d+)\]\s*(.+)/', $line, $lm)) {
-                $idx = (int) $lm[1] - 1;
-                if (isset($batch[$idx])) {
-                    $batch[$idx]['speaker'] = $lm[2];
-                    $batch[$idx]['text'] = trim($lm[3]);
-                }
-            } elseif (preg_match('/^(\d+)\.\s*(.+)/', $line, $lm)) {
-                $idx = (int) $lm[1] - 1;
-                if (isset($batch[$idx])) {
-                    $batch[$idx]['text'] = trim($lm[2]);
-                }
-            }
-        }
-        return $batch;
-    }
-
-    private function translateBatch(array $batch, string $characterContext, string $fullDialogue): array
-    {
-        $apiKey = config('services.openai.key');
-        if (!$apiKey) return $batch;
-
-        $messages = $this->buildTranslationMessages($batch, $characterContext, $fullDialogue);
-
-        // Try up to 4 times with exponential backoff for rate limits
-        for ($attempt = 1; $attempt <= 4; $attempt++) {
-            try {
-                $response = Http::withToken($apiKey)
-                    ->timeout(90)
-                    ->post('https://api.openai.com/v1/chat/completions', [
-                        'model' => 'gpt-4o',
-                        'temperature' => 0.3,
-                        'messages' => $messages,
-                    ]);
-
-                if ($response->successful()) {
-                    return $this->parseTranslationResponse($batch, $response->json('choices.0.message.content') ?? '');
-                }
-
-                Log::warning('Batch translation API error', [
-                    'session' => $this->sessionId,
-                    'attempt' => $attempt,
-                    'status' => $response->status(),
-                    'body' => Str::limit($response->body(), 200),
-                ]);
-
-                // Exponential backoff on rate limit (429)
-                if ($response->status() === 429) {
-                    $wait = min(2 ** $attempt, 15);
-                    $this->updateSession(['last_warning' => "OpenAI rate limited, retrying in {$wait}s... (attempt {$attempt}/4)"]);
-                    sleep($wait);
-                    continue;
-                }
-
-                $this->updateSession(['last_warning' => "Translation API error {$response->status()}, retrying..."]);
-            } catch (\Throwable $e) {
-                Log::warning('Batch translation failed', [
-                    'session' => $this->sessionId,
-                    'attempt' => $attempt,
-                    'error' => $e->getMessage(),
-                ]);
-                $this->updateSession(['last_warning' => "Translation error: " . Str::limit($e->getMessage(), 100)]);
-            }
-
-            if ($attempt < 4) {
-                sleep(2);
-            }
-        }
-
-        return $batch;
-    }
-
     private function buildVoiceMap(array $speakers): void
     {
-        // Edge-tts voices with pitch variants for speaker differentiation.
-        // SardorNeural = male base, MadinaNeural = female base.
-        // Pitch: edge-tts --pitch=+/-NHz shifts vocal tone.
         $maleVariants = [
             ['voice' => 'uz-UZ-SardorNeural', 'pitch' => '+0Hz',  'rate' => '+0%'],
-            ['voice' => 'uz-UZ-SardorNeural', 'pitch' => '-8Hz',  'rate' => '-5%'],  // deeper, slower
-            ['voice' => 'uz-UZ-SardorNeural', 'pitch' => '+6Hz',  'rate' => '+5%'],  // higher, faster
-            ['voice' => 'uz-UZ-SardorNeural', 'pitch' => '-15Hz', 'rate' => '-8%'],  // much deeper
+            ['voice' => 'uz-UZ-SardorNeural', 'pitch' => '-8Hz',  'rate' => '-5%'],
+            ['voice' => 'uz-UZ-SardorNeural', 'pitch' => '+6Hz',  'rate' => '+5%'],
+            ['voice' => 'uz-UZ-SardorNeural', 'pitch' => '-15Hz', 'rate' => '-8%'],
         ];
         $femaleVariants = [
             ['voice' => 'uz-UZ-MadinaNeural', 'pitch' => '+0Hz',  'rate' => '+0%'],
-            ['voice' => 'uz-UZ-MadinaNeural', 'pitch' => '-6Hz',  'rate' => '-5%'],  // deeper
-            ['voice' => 'uz-UZ-MadinaNeural', 'pitch' => '+8Hz',  'rate' => '+5%'],  // higher
-            ['voice' => 'uz-UZ-MadinaNeural', 'pitch' => '-12Hz', 'rate' => '-8%'],  // much deeper
+            ['voice' => 'uz-UZ-MadinaNeural', 'pitch' => '-6Hz',  'rate' => '-5%'],
+            ['voice' => 'uz-UZ-MadinaNeural', 'pitch' => '+8Hz',  'rate' => '+5%'],
+            ['voice' => 'uz-UZ-MadinaNeural', 'pitch' => '-12Hz', 'rate' => '-8%'],
         ];
-
-        // Child voices: higher pitch for younger sound
         $childVariants = [
-            ['voice' => 'uz-UZ-MadinaNeural', 'pitch' => '+15Hz', 'rate' => '+10%'],  // high, fast
-            ['voice' => 'uz-UZ-SardorNeural',  'pitch' => '+12Hz', 'rate' => '+8%'],   // boy
+            ['voice' => 'uz-UZ-MadinaNeural', 'pitch' => '+15Hz', 'rate' => '+10%'],
+            ['voice' => 'uz-UZ-SardorNeural',  'pitch' => '+12Hz', 'rate' => '+8%'],
         ];
 
         $voiceMap = [];

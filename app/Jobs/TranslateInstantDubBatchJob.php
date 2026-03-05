@@ -1,0 +1,621 @@
+<?php
+
+namespace App\Jobs;
+
+use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldQueue;
+use Illuminate\Foundation\Bus\Dispatchable;
+use Illuminate\Queue\InteractsWithQueue;
+use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Redis;
+use Illuminate\Support\Str;
+
+class TranslateInstantDubBatchJob implements ShouldQueue
+{
+    use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
+
+    public int $timeout = 120;
+    public int $tries = 2;
+
+    public function __construct(
+        public string $sessionId,
+        public int    $batchIndex,
+        public int    $totalBatches,
+        public string $fullDialogueText,
+        public string $language,
+        public string $translateFrom,
+    ) {}
+
+    public function handle(): void
+    {
+        // Check if session was stopped
+        $sessionKey = "instant-dub:{$this->sessionId}";
+        $sessionJson = Redis::get($sessionKey);
+        if (!$sessionJson) return;
+        $session = json_decode($sessionJson, true);
+        if (($session['status'] ?? '') === 'stopped') {
+            Log::info('Batch translation stopped', ['session' => $this->sessionId, 'batch' => $this->batchIndex]);
+            return;
+        }
+
+        // Load batch from Redis
+        $batchKey = "instant-dub:{$this->sessionId}:batch:{$this->batchIndex}";
+        $batchJson = Redis::get($batchKey);
+        if (!$batchJson) {
+            Log::error('Batch data missing from Redis', ['session' => $this->sessionId, 'batch' => $this->batchIndex]);
+            return;
+        }
+        $batch = json_decode($batchJson, true);
+
+        $batchNum = $this->batchIndex + 1;
+        $this->updateSession(['status' => 'Translating...', 'progress' => "Translating ({$batchNum}/{$this->totalBatches})..."]);
+
+        // Translate
+        if ($this->batchIndex === 0) {
+            $batch = $this->translateBatchZero($batch);
+        } else {
+            $batch = $this->translateBatchWithContext($batch);
+        }
+
+        // Merge voice map (additive — don't overwrite existing speakers)
+        $speakers = [];
+        foreach ($batch as $seg) {
+            $tag = $seg['speaker'] ?? 'M1';
+            $speakers[$tag] = true;
+        }
+        $this->mergeVoiceMap($speakers);
+
+        // Dispatch TTS for this batch's segments
+        $this->updateSession(['progress' => "Generating audio ({$batchNum}/{$this->totalBatches})..."]);
+        $globalOffset = $this->batchIndex * 15;
+
+        foreach ($batch as $localIdx => $seg) {
+            $text = trim($seg['text']);
+            $text = trim(preg_replace('/\[[^\]]*\]\s*/', '', $text));
+            $text = str_replace('`', '\'', $text);
+            if ($text === '') continue;
+
+            ProcessInstantDubSegmentJob::dispatch(
+                $this->sessionId,
+                $globalOffset + $localIdx,
+                $text,
+                $seg['start'],
+                $seg['end'],
+                $this->language,
+                $seg['speaker'] ?? 'M1',
+            )->onQueue('segment-generation');
+        }
+
+        // Clean up batch key
+        Redis::del($batchKey);
+
+        // Chain next batch
+        $nextBatch = $this->batchIndex + 1;
+        if ($nextBatch < $this->totalBatches) {
+            self::dispatch(
+                $this->sessionId,
+                $nextBatch,
+                $this->totalBatches,
+                $this->fullDialogueText,
+                $this->language,
+                $this->translateFrom,
+            )->onQueue('default');
+        } else {
+            // Last batch — clean up all-segments key
+            Redis::del("instant-dub:{$this->sessionId}:all-segments");
+            Log::info('All translation batches complete', [
+                'session' => $this->sessionId,
+                'totalBatches' => $this->totalBatches,
+            ]);
+        }
+    }
+
+    private function translateBatchZero(array $batch): array
+    {
+        // Load all segments for character analysis
+        $allSegmentsJson = Redis::get("instant-dub:{$this->sessionId}:all-segments");
+        $allSegments = $allSegmentsJson ? json_decode($allSegmentsJson, true) : [];
+
+        $analysisPrompt = $this->buildAnalysisPrompt($allSegments);
+        $translationMessages = $this->buildTranslationMessages($batch, '', $this->fullDialogueText);
+
+        $characterContext = '';
+
+        // Try Claude Sonnet first (parallel: analysis + translation)
+        $anthropicKey = config('services.anthropic.key');
+        if ($anthropicKey) {
+            $results = $this->callAnthropicParallel($analysisPrompt, $translationMessages, $batch);
+
+            if ($results['analysis'] !== null) {
+                $characterContext = $results['analysis'];
+                Log::info('Character analysis (Claude)', ['session' => $this->sessionId, 'result' => Str::limit($characterContext, 200)]);
+            }
+
+            if ($results['translation'] !== null) {
+                $batch = $this->parseTranslationResponse($batch, $results['translation']);
+                // Store character context for subsequent batches
+                Redis::setex("instant-dub:{$this->sessionId}:character-context", 50400, $characterContext);
+                return $batch;
+            }
+
+            Log::warning('Claude failed for batch 0, falling back to GPT-4o', ['session' => $this->sessionId]);
+        }
+
+        // Fallback: GPT-4o parallel
+        $openaiKey = config('services.openai.key');
+        if ($openaiKey) {
+            $pool = Http::pool(function ($pool) use ($openaiKey, $analysisPrompt, $translationMessages) {
+                $pool->as('analysis')->withToken($openaiKey)->timeout(45)
+                    ->post('https://api.openai.com/v1/chat/completions', [
+                        'model' => 'gpt-4o',
+                        'temperature' => 0.1,
+                        'messages' => $analysisPrompt,
+                    ]);
+                $pool->as('translation')->withToken($openaiKey)->timeout(60)
+                    ->post('https://api.openai.com/v1/chat/completions', [
+                        'model' => 'gpt-4o',
+                        'temperature' => 0.3,
+                        'messages' => $translationMessages,
+                    ]);
+            });
+
+            if (isset($pool['analysis']) && $pool['analysis'] instanceof \Illuminate\Http\Client\Response && $pool['analysis']->successful()) {
+                $characterContext = trim($pool['analysis']->json('choices.0.message.content') ?? '');
+                Log::info('Character analysis (GPT)', ['session' => $this->sessionId, 'result' => Str::limit($characterContext, 200)]);
+            }
+
+            if (isset($pool['translation']) && $pool['translation'] instanceof \Illuminate\Http\Client\Response && $pool['translation']->successful()) {
+                $batch = $this->parseTranslationResponse($batch, $pool['translation']->json('choices.0.message.content') ?? '');
+            } else {
+                Log::warning('Batch 0 GPT translation also failed', ['session' => $this->sessionId]);
+            }
+        }
+
+        // Store character context for subsequent batches
+        Redis::setex("instant-dub:{$this->sessionId}:character-context", 50400, $characterContext);
+        return $batch;
+    }
+
+    private function translateBatchWithContext(array $batch): array
+    {
+        $characterContext = Redis::get("instant-dub:{$this->sessionId}:character-context") ?? '';
+        $messages = $this->buildTranslationMessages($batch, $characterContext, $this->fullDialogueText);
+
+        // Try Claude Sonnet first
+        $result = $this->callAnthropic($messages);
+        if ($result !== null) {
+            return $this->parseTranslationResponse($batch, $result);
+        }
+
+        // Fallback: GPT-4o with retry
+        return $this->callOpenAiWithRetry($batch, $messages);
+    }
+
+    private function callAnthropic(array $messages): ?string
+    {
+        $apiKey = config('services.anthropic.key');
+        if (!$apiKey) return null;
+
+        // Convert OpenAI-style messages to Anthropic format
+        $system = '';
+        $anthropicMessages = [];
+        foreach ($messages as $msg) {
+            if ($msg['role'] === 'system') {
+                $system = $msg['content'];
+            } else {
+                $anthropicMessages[] = $msg;
+            }
+        }
+
+        try {
+            $response = Http::withHeaders([
+                'x-api-key' => $apiKey,
+                'anthropic-version' => '2023-06-01',
+                'content-type' => 'application/json',
+            ])->timeout(90)->post('https://api.anthropic.com/v1/messages', [
+                'model' => 'claude-sonnet-4-5-20250514',
+                'max_tokens' => 4096,
+                'system' => $system,
+                'messages' => $anthropicMessages,
+            ]);
+
+            if ($response->successful()) {
+                return trim($response->json('content.0.text') ?? '');
+            }
+
+            Log::warning('Anthropic API error', [
+                'session' => $this->sessionId,
+                'batch' => $this->batchIndex,
+                'status' => $response->status(),
+                'body' => Str::limit($response->body(), 200),
+            ]);
+        } catch (\Throwable $e) {
+            Log::warning('Anthropic API exception', [
+                'session' => $this->sessionId,
+                'batch' => $this->batchIndex,
+                'error' => $e->getMessage(),
+            ]);
+        }
+
+        return null;
+    }
+
+    private function callAnthropicParallel(array $analysisPrompt, array $translationMessages, array $batch): array
+    {
+        $apiKey = config('services.anthropic.key');
+        $results = ['analysis' => null, 'translation' => null];
+        if (!$apiKey) return $results;
+
+        // Extract system prompts
+        $analysisSystem = '';
+        $analysisUserMessages = [];
+        foreach ($analysisPrompt as $msg) {
+            if ($msg['role'] === 'system') $analysisSystem = $msg['content'];
+            else $analysisUserMessages[] = $msg;
+        }
+
+        $translationSystem = '';
+        $translationUserMessages = [];
+        foreach ($translationMessages as $msg) {
+            if ($msg['role'] === 'system') $translationSystem = $msg['content'];
+            else $translationUserMessages[] = $msg;
+        }
+
+        $headers = [
+            'x-api-key' => $apiKey,
+            'anthropic-version' => '2023-06-01',
+            'content-type' => 'application/json',
+        ];
+
+        try {
+            $pool = Http::pool(function ($pool) use ($headers, $analysisSystem, $analysisUserMessages, $translationSystem, $translationUserMessages) {
+                $pool->as('analysis')
+                    ->withHeaders($headers)
+                    ->timeout(60)
+                    ->post('https://api.anthropic.com/v1/messages', [
+                        'model' => 'claude-sonnet-4-5-20250514',
+                        'max_tokens' => 4096,
+                        'system' => $analysisSystem,
+                        'messages' => $analysisUserMessages,
+                    ]);
+                $pool->as('translation')
+                    ->withHeaders($headers)
+                    ->timeout(90)
+                    ->post('https://api.anthropic.com/v1/messages', [
+                        'model' => 'claude-sonnet-4-5-20250514',
+                        'max_tokens' => 4096,
+                        'system' => $translationSystem,
+                        'messages' => $translationUserMessages,
+                    ]);
+            });
+
+            if (isset($pool['analysis']) && $pool['analysis'] instanceof \Illuminate\Http\Client\Response && $pool['analysis']->successful()) {
+                $results['analysis'] = trim($pool['analysis']->json('content.0.text') ?? '');
+            }
+
+            if (isset($pool['translation']) && $pool['translation'] instanceof \Illuminate\Http\Client\Response && $pool['translation']->successful()) {
+                $results['translation'] = trim($pool['translation']->json('content.0.text') ?? '');
+            }
+        } catch (\Throwable $e) {
+            Log::warning('Anthropic parallel failed', [
+                'session' => $this->sessionId,
+                'error' => $e->getMessage(),
+            ]);
+        }
+
+        return $results;
+    }
+
+    private function callOpenAiWithRetry(array $batch, array $messages): array
+    {
+        $apiKey = config('services.openai.key');
+        if (!$apiKey) return $batch;
+
+        for ($attempt = 1; $attempt <= 4; $attempt++) {
+            try {
+                $response = Http::withToken($apiKey)
+                    ->timeout(90)
+                    ->post('https://api.openai.com/v1/chat/completions', [
+                        'model' => 'gpt-4o',
+                        'temperature' => 0.3,
+                        'messages' => $messages,
+                    ]);
+
+                if ($response->successful()) {
+                    return $this->parseTranslationResponse($batch, $response->json('choices.0.message.content') ?? '');
+                }
+
+                Log::warning('Batch translation API error', [
+                    'session' => $this->sessionId,
+                    'batch' => $this->batchIndex,
+                    'attempt' => $attempt,
+                    'status' => $response->status(),
+                    'body' => Str::limit($response->body(), 200),
+                ]);
+
+                if ($response->status() === 429) {
+                    $wait = min(2 ** $attempt, 15);
+                    $this->updateSession(['last_warning' => "OpenAI rate limited, retrying in {$wait}s... (attempt {$attempt}/4)"]);
+                    sleep($wait);
+                    continue;
+                }
+
+                $this->updateSession(['last_warning' => "Translation API error {$response->status()}, retrying..."]);
+            } catch (\Throwable $e) {
+                Log::warning('Batch translation failed', [
+                    'session' => $this->sessionId,
+                    'batch' => $this->batchIndex,
+                    'attempt' => $attempt,
+                    'error' => $e->getMessage(),
+                ]);
+                $this->updateSession(['last_warning' => "Translation error: " . Str::limit($e->getMessage(), 100)]);
+            }
+
+            if ($attempt < 4) {
+                sleep(2);
+            }
+        }
+
+        return $batch;
+    }
+
+    private function mergeVoiceMap(array $newSpeakers): void
+    {
+        $voiceKey = "instant-dub:{$this->sessionId}:voices";
+
+        $maleVariants = [
+            ['voice' => 'uz-UZ-SardorNeural', 'pitch' => '+0Hz',  'rate' => '+0%'],
+            ['voice' => 'uz-UZ-SardorNeural', 'pitch' => '-8Hz',  'rate' => '-5%'],
+            ['voice' => 'uz-UZ-SardorNeural', 'pitch' => '+6Hz',  'rate' => '+5%'],
+            ['voice' => 'uz-UZ-SardorNeural', 'pitch' => '-15Hz', 'rate' => '-8%'],
+        ];
+        $femaleVariants = [
+            ['voice' => 'uz-UZ-MadinaNeural', 'pitch' => '+0Hz',  'rate' => '+0%'],
+            ['voice' => 'uz-UZ-MadinaNeural', 'pitch' => '-6Hz',  'rate' => '-5%'],
+            ['voice' => 'uz-UZ-MadinaNeural', 'pitch' => '+8Hz',  'rate' => '+5%'],
+            ['voice' => 'uz-UZ-MadinaNeural', 'pitch' => '-12Hz', 'rate' => '-8%'],
+        ];
+        $childVariants = [
+            ['voice' => 'uz-UZ-MadinaNeural', 'pitch' => '+15Hz', 'rate' => '+10%'],
+            ['voice' => 'uz-UZ-SardorNeural',  'pitch' => '+12Hz', 'rate' => '+8%'],
+        ];
+
+        // Read existing voice map
+        $existingJson = Redis::get($voiceKey);
+        $voiceMap = $existingJson ? json_decode($existingJson, true) : [];
+
+        // Count already-assigned variants per gender
+        $maleIdx = 0;
+        $femaleIdx = 0;
+        $childIdx = 0;
+        foreach ($voiceMap as $tag => $voice) {
+            if (str_starts_with($tag, 'C')) $childIdx++;
+            elseif (str_starts_with($tag, 'M')) $maleIdx++;
+            else $femaleIdx++;
+        }
+
+        // Only assign new speakers
+        foreach (array_keys($newSpeakers) as $tag) {
+            if (isset($voiceMap[$tag])) continue;
+
+            if (str_starts_with($tag, 'C')) {
+                $voiceMap[$tag] = $childVariants[$childIdx % count($childVariants)];
+                $childIdx++;
+            } elseif (str_starts_with($tag, 'M')) {
+                $voiceMap[$tag] = $maleVariants[$maleIdx % count($maleVariants)];
+                $maleIdx++;
+            } else {
+                $voiceMap[$tag] = $femaleVariants[$femaleIdx % count($femaleVariants)];
+                $femaleIdx++;
+            }
+        }
+
+        Redis::setex($voiceKey, 50400, json_encode($voiceMap));
+
+        Log::info('Voice map merged', [
+            'session' => $this->sessionId,
+            'batch' => $this->batchIndex,
+            'newSpeakers' => array_keys($newSpeakers),
+            'totalSpeakers' => array_keys($voiceMap),
+        ]);
+    }
+
+    private function buildAnalysisPrompt(array $segments): array
+    {
+        $lines = [];
+        foreach ($segments as $i => $seg) {
+            $lines[] = ($i + 1) . '. ' . $seg['text'];
+        }
+
+        $sourceLangRules = '';
+        if ($this->translateFrom === 'ru') {
+            $sourceLangRules = <<<'RULES'
+
+RUSSIAN GENDER DETECTION — use these clues to determine speaker gender:
+- Past tense verb endings: -л (male: сказал, пошёл, знал), -ла (female: сказала, пошла, знала)
+- Short adjective forms: рад/готов/должен (male), рада/готова/должна (female)
+- Self-references: "я сам" (male), "я сама" (female)
+- Russian names: masculine (Андрей, Сергей, Дмитрий, Алексей), feminine (Мария, Анна, Елена, Наталья)
+- Patronymics: -ович/-евич (addressing male), -овна/-евна (addressing female)
+- Diminutives: -ка, -очка, -енька often for females; -ик, -чик often for males
+
+RUSSIAN FORMALITY DETECTION — maps to Uzbek sen/siz:
+- "ты" forms (говоришь, идёшь, -ешь/-ишь endings) = informal → the listener is younger or close
+- "Вы" forms (говорите, идёте, -ете/-ите endings) = formal → the listener is older or respected
+- This tells you the RELATIONSHIP: if speaker uses "ты", they are senior to or close peers with the listener
+RULES;
+        } elseif ($this->translateFrom === 'en') {
+            $sourceLangRules = <<<'RULES'
+
+ENGLISH GENDER DETECTION — use these clues:
+- Pronouns used about the speaker by others: "he/him/his" (male), "she/her" (female)
+- Names: gendered names (John=male, Mary=female)
+- Terms of address: "sir/mister/Mr." (male), "ma'am/miss/Mrs./Ms." (female)
+- Family roles: "father/son/brother/husband" (male), "mother/daughter/sister/wife" (female)
+- Vocal descriptions in stage directions: "he said", "she whispered"
+RULES;
+        }
+
+        $prompt = <<<PROMPT
+You are analyzing a film/series dialogue to identify speakers. This is CRITICAL for voice dubbing — wrong gender = wrong voice actor.
+
+{$sourceLangRules}
+
+TASK: Analyze every line carefully. Determine:
+1. How many distinct speakers are in this dialogue
+2. Each speaker's GENDER (from grammatical clues, names, context — see rules above)
+3. Each speaker's approximate AGE (child, young ~15-25, adult ~25-50, elderly ~50+)
+4. Relationships between speakers (parent-child, friends, spouses, boss-employee, etc.)
+5. Which lines each speaker says
+
+IMPORTANT:
+- Do NOT guess gender randomly. If a line has "-ла" ending (Russian), it's FEMALE. If "-л" ending, it's MALE.
+- Look at consecutive lines — dialogues alternate between speakers. If line 1 asks a question and line 2 answers, they are usually different speakers.
+- A dash "-" at the start of a line often indicates a different speaker from the previous line.
+- If someone is addressed by name, that person is the LISTENER, not the speaker.
+
+Format your response EXACTLY like this:
+CHARACTERS:
+M1: [name/role], [age category], [relationship to others]
+F1: [name/role], [age category], [relationship to others]
+
+LINES:
+1-3,7,12: M1
+4-6,8-9: F1
+PROMPT;
+
+        return [
+            ['role' => 'system', 'content' => $prompt],
+            ['role' => 'user', 'content' => implode("\n", $lines)],
+        ];
+    }
+
+    private function buildTranslationMessages(array $batch, string $characterContext, string $fullDialogue): array
+    {
+        $langNames = [
+            'uz' => 'Uzbek', 'ru' => 'Russian', 'en' => 'English', 'tr' => 'Turkish',
+            'es' => 'Spanish', 'fr' => 'French', 'de' => 'German', 'ar' => 'Arabic',
+            'zh' => 'Chinese', 'ja' => 'Japanese', 'ko' => 'Korean',
+        ];
+        $toLang = $langNames[$this->language] ?? $this->language;
+
+        $lines = [];
+        foreach ($batch as $i => $seg) {
+            $duration = round($seg['end'] - $seg['start'], 1);
+            $maxChars = (int) round($duration * 12);
+            $rawText = $seg['raw_text'] ?? $seg['text'];
+            $lines[] = ($i + 1) . '. [' . $duration . 's, max ' . $maxChars . ' chars] ' . $rawText;
+        }
+
+        $uzbekRules = '';
+        $fromLangHint = '';
+        if ($this->language === 'uz') {
+            if ($this->translateFrom === 'ru') {
+                $fromLangHint = <<<'HINT'
+
+RUSSIAN→UZBEK MAPPING:
+- Russian "ты" (informal) → Uzbek "sen": speaker is older/senior or they are close friends
+- Russian "Вы" (formal) → Uzbek "Siz": speaker is younger or it's a formal setting
+- Keep this consistent: if character A uses "ты" to B in Russian, A must use "sen" to B in Uzbek throughout
+HINT;
+            }
+
+            $uzbekRules = <<<UZ
+
+UZBEK LANGUAGE RULES (CRITICAL):
+- SEN/SIZ — this is the #1 priority, getting it wrong ruins the dub:
+  * Look at CHARACTER ANALYSIS above for age and relationships
+  * Elderly/parent → child/young person: always "sen" (-san, -ding, -yapsanmi)
+  * Young person → elderly/parent: always "Siz" (-siz, -dingiz, -yapsizmi)
+  * Same-age close friends: "sen"
+  * Same-age strangers/formal: "Siz"
+  * Child → parent: "Siz" (respectful)
+  * Husband ↔ wife: usually "sen" (intimate)
+  * Boss → employee: can be "sen"; employee → boss: "Siz"
+{$fromLangHint}
+- STYLE — spoken Uzbek, like real people talk:
+  * Use colloquial forms: "qilyapman" not "qilayotirman", "ketyapman" not "ketayotirman"
+  * Use "bor" not "mavjud", "yo'q" not "mavjud emas"
+  * Contractions: "nimaga" not "nima uchun" (when casual)
+  * Emotional words: "voy!" (surprise), "ey!" (calling), "qo'ying!" (stop it!)
+- Names and proper nouns: keep original, don't translate
+- Keep emotional register: anger, love, fear, humor must come through
+UZ;
+        }
+
+        $systemPrompt = <<<PROMPT
+You are an expert film/series dubbing translator. Your translations will be spoken aloud by TTS voice actors, so they must sound like natural spoken {$toLang} dialogue — not written subtitles.
+
+CHARACTER ANALYSIS:
+{$characterContext}
+
+FULL DIALOGUE (for context — do NOT translate this, only use for understanding the scene):
+{$fullDialogue}
+{$uzbekRules}
+
+TRANSLATION RULES:
+1. Each line has [Ns, max M chars]. Translation MUST fit within that character limit — it will be spoken in that time slot.
+2. Lines may contain annotations like [music], [laughing], [whispering], [door opens] etc. — use these to understand the scene mood and context, but translate ONLY the spoken dialogue part. Do not include the annotations in your translation.
+3. Translate meaning, not words. Rephrase freely to sound natural in {$toLang}.
+4. Keep the emotional register: if someone is angry, scared, joking, whispering — the translation must convey that.
+5. Use the character analysis above to assign the correct speaker tag [M1], [F1], etc. to each line.
+6. Preserve interruptions, hesitations, and conversational flow.
+
+Format: "1. [M1] translated text"
+Do not include timing info. Do not skip or merge lines. Keep exact numbering.
+PROMPT;
+
+        return [
+            ['role' => 'system', 'content' => $systemPrompt],
+            ['role' => 'user', 'content' => "Translate ONLY these lines:\n\n" . implode("\n", $lines)],
+        ];
+    }
+
+    private function parseTranslationResponse(array $batch, string $content): array
+    {
+        $translated = trim($content);
+        foreach (preg_split('/\n+/', $translated) as $line) {
+            if (preg_match('/^(\d+)\.\s*\[([MFC]\d+)\]\s*(.+)/', $line, $lm)) {
+                $idx = (int) $lm[1] - 1;
+                if (isset($batch[$idx])) {
+                    $batch[$idx]['speaker'] = $lm[2];
+                    $batch[$idx]['text'] = trim($lm[3]);
+                }
+            } elseif (preg_match('/^(\d+)\.\s*(.+)/', $line, $lm)) {
+                $idx = (int) $lm[1] - 1;
+                if (isset($batch[$idx])) {
+                    $batch[$idx]['text'] = trim($lm[2]);
+                }
+            }
+        }
+        return $batch;
+    }
+
+    private function updateSession(array $data): void
+    {
+        $sessionKey = "instant-dub:{$this->sessionId}";
+        $json = Redis::get($sessionKey);
+        if (!$json) return;
+        $session = json_decode($json, true);
+        Redis::setex($sessionKey, 50400, json_encode(array_merge($session, $data)));
+    }
+
+    public function failed(\Throwable $exception): void
+    {
+        Log::error('TranslateInstantDubBatchJob failed', [
+            'session' => $this->sessionId,
+            'batch' => $this->batchIndex,
+            'error' => $exception->getMessage(),
+        ]);
+
+        $sessionKey = "instant-dub:{$this->sessionId}";
+        $json = Redis::get($sessionKey);
+        if (!$json) return;
+        $session = json_decode($json, true);
+        $session['status'] = 'error';
+        $session['error'] = "Translation failed at batch {$this->batchIndex}: " . Str::limit($exception->getMessage(), 100);
+        Redis::setex($sessionKey, 50400, json_encode($session));
+    }
+}
