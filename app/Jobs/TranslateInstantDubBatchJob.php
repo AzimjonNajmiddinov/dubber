@@ -431,60 +431,49 @@ class TranslateInstantDubBatchJob implements ShouldQueue
 
         $sourceLangRules = '';
         if ($this->translateFrom === 'ru') {
-            $sourceLangRules = <<<'RULES'
-
-RUSSIAN GENDER DETECTION — use these clues to determine speaker gender:
-- Past tense verb endings: -л (male: сказал, пошёл, знал), -ла (female: сказала, пошла, знала)
-- Short adjective forms: рад/готов/должен (male), рада/готова/должна (female)
-- Self-references: "я сам" (male), "я сама" (female)
-- Russian names: masculine (Андрей, Сергей, Дмитрий, Алексей), feminine (Мария, Анна, Елена, Наталья)
-- Patronymics: -ович/-евич (addressing male), -овна/-евна (addressing female)
-- Diminutives: -ка, -очка, -енька often for females; -ик, -чик often for males
-
-RUSSIAN FORMALITY DETECTION — maps to Uzbek sen/siz:
-- "ты" forms (говоришь, идёшь, -ешь/-ишь endings) = informal → the listener is younger or close
-- "Вы" forms (говорите, идёте, -ете/-ите endings) = formal → the listener is older or respected
-- This tells you the RELATIONSHIP: if speaker uses "ты", they are senior to or close peers with the listener
-RULES;
+            $sourceLangRules = "\n"
+                . "RUSSIAN GENDER DETECTION — use these clues to determine speaker gender:\n"
+                . "- Past tense verb endings: -л (male: сказал, пошёл, знал), -ла (female: сказала, пошла, знала)\n"
+                . "- Short adjective forms: рад/готов/должен (male), рада/готова/должна (female)\n"
+                . '- Self-references: "я сам" (male), "я сама" (female)' . "\n"
+                . "- Russian names: masculine (Андрей, Сергей, Дмитрий, Алексей), feminine (Мария, Анна, Елена, Наталья)\n"
+                . "- Patronymics: -ович/-евич (addressing male), -овна/-евна (addressing female)\n"
+                . "- Diminutives: -ка, -очка, -енька often for females; -ик, -чик often for males\n"
+                . "\n"
+                . "RUSSIAN FORMALITY DETECTION — maps to Uzbek sen/siz:\n"
+                . '- "ты" forms (говоришь, идёшь, -ешь/-ишь endings) = informal → the listener is younger or close' . "\n"
+                . '- "Вы" forms (говорите, идёте, -ете/-ите endings) = formal → the listener is older or respected' . "\n"
+                . '- This tells you the RELATIONSHIP: if speaker uses "ты", they are senior to or close peers with the listener';
         } elseif ($this->translateFrom === 'en') {
-            $sourceLangRules = <<<'RULES'
-
-ENGLISH GENDER DETECTION — use these clues:
-- Pronouns used about the speaker by others: "he/him/his" (male), "she/her" (female)
-- Names: gendered names (John=male, Mary=female)
-- Terms of address: "sir/mister/Mr." (male), "ma'am/miss/Mrs./Ms." (female)
-- Family roles: "father/son/brother/husband" (male), "mother/daughter/sister/wife" (female)
-- Vocal descriptions in stage directions: "he said", "she whispered"
-RULES;
+            $sourceLangRules = "\n"
+                . "ENGLISH GENDER DETECTION — use these clues:\n"
+                . '- Pronouns used about the speaker by others: "he/him/his" (male), "she/her" (female)' . "\n"
+                . "- Names: gendered names (John=male, Mary=female)\n"
+                . '- Terms of address: "sir/mister/Mr." (male), "ma\'am/miss/Mrs./Ms." (female)' . "\n"
+                . '- Family roles: "father/son/brother/husband" (male), "mother/daughter/sister/wife" (female)' . "\n"
+                . '- Vocal descriptions in stage directions: "he said", "she whispered"';
         }
 
-        $prompt = <<<PROMPT
-You are analyzing a film/series dialogue to identify speakers. This is CRITICAL for voice dubbing — wrong gender = wrong voice actor.
-
-{$sourceLangRules}
-
-TASK: Analyze every line carefully. Determine:
-1. How many distinct speakers are in this dialogue
-2. Each speaker's GENDER (from grammatical clues, names, context — see rules above)
-3. Each speaker's approximate AGE (child, young ~15-25, adult ~25-50, elderly ~50+)
-4. Relationships between speakers (parent-child, friends, spouses, boss-employee, etc.)
-5. Which lines each speaker says
-
-IMPORTANT:
-- Do NOT guess gender randomly. If a line has "-ла" ending (Russian), it's FEMALE. If "-л" ending, it's MALE.
-- Look at consecutive lines — dialogues alternate between speakers. If line 1 asks a question and line 2 answers, they are usually different speakers.
-- A dash "-" at the start of a line often indicates a different speaker from the previous line.
-- If someone is addressed by name, that person is the LISTENER, not the speaker.
-
-Format your response EXACTLY like this:
-CHARACTERS:
-M1: [name/role], [age category], [relationship to others]
-F1: [name/role], [age category], [relationship to others]
-
-LINES:
-1-3,7,12: M1
-4-6,8-9: F1
-PROMPT;
+        $prompt = "You are analyzing a film/series dialogue to identify speakers. This is CRITICAL for voice dubbing — wrong gender = wrong voice actor.\n"
+            . "\n{$sourceLangRules}\n"
+            . "\nTASK: Analyze every line carefully. Determine:\n"
+            . "1. How many distinct speakers are in this dialogue\n"
+            . "2. Each speaker's GENDER (from grammatical clues, names, context — see rules above)\n"
+            . "3. Each speaker's approximate AGE (child, young ~15-25, adult ~25-50, elderly ~50+)\n"
+            . "4. Relationships between speakers (parent-child, friends, spouses, boss-employee, etc.)\n"
+            . "5. Which lines each speaker says\n"
+            . "\nIMPORTANT:\n"
+            . '- Do NOT guess gender randomly. If a line has "-ла" ending (Russian), it\'s FEMALE. If "-л" ending, it\'s MALE.' . "\n"
+            . "- Look at consecutive lines — dialogues alternate between speakers. If line 1 asks a question and line 2 answers, they are usually different speakers.\n"
+            . '- A dash "-" at the start of a line often indicates a different speaker from the previous line.' . "\n"
+            . "- If someone is addressed by name, that person is the LISTENER, not the speaker.\n"
+            . "\nFormat your response EXACTLY like this:\n"
+            . "CHARACTERS:\n"
+            . "M1: [name/role], [age category], [relationship to others]\n"
+            . "F1: [name/role], [age category], [relationship to others]\n"
+            . "\nLINES:\n"
+            . "1-3,7,12: M1\n"
+            . "4-6,8-9: F1";
 
         return [
             ['role' => 'system', 'content' => $prompt],
@@ -513,59 +502,47 @@ PROMPT;
         $fromLangHint = '';
         if ($this->language === 'uz') {
             if ($this->translateFrom === 'ru') {
-                $fromLangHint = <<<'HINT'
-
-RUSSIAN→UZBEK MAPPING:
-- Russian "ты" (informal) → Uzbek "sen": speaker is older/senior or they are close friends
-- Russian "Вы" (formal) → Uzbek "Siz": speaker is younger or it's a formal setting
-- Keep this consistent: if character A uses "ты" to B in Russian, A must use "sen" to B in Uzbek throughout
-HINT;
+                $fromLangHint = "\n"
+                    . "RUSSIAN→UZBEK MAPPING:\n"
+                    . '- Russian "ты" (informal) → Uzbek "sen": speaker is older/senior or they are close friends' . "\n"
+                    . '- Russian "Вы" (formal) → Uzbek "Siz": speaker is younger or it\'s a formal setting' . "\n"
+                    . '- Keep this consistent: if character A uses "ты" to B in Russian, A must use "sen" to B in Uzbek throughout';
             }
 
-            $uzbekRules = <<<UZ
-
-UZBEK LANGUAGE RULES (CRITICAL):
-- SEN/SIZ — this is the #1 priority, getting it wrong ruins the dub:
-  * Look at CHARACTER ANALYSIS above for age and relationships
-  * Elderly/parent → child/young person: always "sen" (-san, -ding, -yapsanmi)
-  * Young person → elderly/parent: always "Siz" (-siz, -dingiz, -yapsizmi)
-  * Same-age close friends: "sen"
-  * Same-age strangers/formal: "Siz"
-  * Child → parent: "Siz" (respectful)
-  * Husband ↔ wife: usually "sen" (intimate)
-  * Boss → employee: can be "sen"; employee → boss: "Siz"
-{$fromLangHint}
-- STYLE — spoken Uzbek, like real people talk:
-  * Use colloquial forms: "qilyapman" not "qilayotirman", "ketyapman" not "ketayotirman"
-  * Use "bor" not "mavjud", "yo'q" not "mavjud emas"
-  * Contractions: "nimaga" not "nima uchun" (when casual)
-  * Emotional words: "voy!" (surprise), "ey!" (calling), "qo'ying!" (stop it!)
-- Names and proper nouns: keep original, don't translate
-- Keep emotional register: anger, love, fear, humor must come through
-UZ;
+            $uzbekRules = "\n"
+                . "UZBEK LANGUAGE RULES (CRITICAL):\n"
+                . "- SEN/SIZ — this is the #1 priority, getting it wrong ruins the dub:\n"
+                . '  * Look at CHARACTER ANALYSIS above for age and relationships' . "\n"
+                . '  * Elderly/parent → child/young person: always "sen" (-san, -ding, -yapsanmi)' . "\n"
+                . '  * Young person → elderly/parent: always "Siz" (-siz, -dingiz, -yapsizmi)' . "\n"
+                . '  * Same-age close friends: "sen"' . "\n"
+                . '  * Same-age strangers/formal: "Siz"' . "\n"
+                . '  * Child → parent: "Siz" (respectful)' . "\n"
+                . '  * Husband ↔ wife: usually "sen" (intimate)' . "\n"
+                . '  * Boss → employee: can be "sen"; employee → boss: "Siz"' . "\n"
+                . $fromLangHint . "\n"
+                . "- STYLE — spoken Uzbek, like real people talk:\n"
+                . '  * Use colloquial forms: "qilyapman" not "qilayotirman", "ketyapman" not "ketayotirman"' . "\n"
+                . '  * Use "bor" not "mavjud", "yo\'q" not "mavjud emas"' . "\n"
+                . '  * Contractions: "nimaga" not "nima uchun" (when casual)' . "\n"
+                . '  * Emotional words: "voy!" (surprise), "ey!" (calling), "qo\'ying!" (stop it!)' . "\n"
+                . "- Names and proper nouns: keep original, don't translate\n"
+                . "- Keep emotional register: anger, love, fear, humor must come through";
         }
 
-        $systemPrompt = <<<PROMPT
-You are an expert film/series dubbing translator. Your translations will be spoken aloud by TTS voice actors, so they must sound like natural spoken {$toLang} dialogue — not written subtitles.
-
-CHARACTER ANALYSIS:
-{$characterContext}
-
-FULL DIALOGUE (for context — do NOT translate this, only use for understanding the scene):
-{$fullDialogue}
-{$uzbekRules}
-
-TRANSLATION RULES:
-1. Each line has [Ns, max M chars]. Translation MUST fit within that character limit — it will be spoken in that time slot.
-2. Lines may contain annotations like [music], [laughing], [whispering], [door opens] etc. — use these to understand the scene mood and context, but translate ONLY the spoken dialogue part. Do not include the annotations in your translation.
-3. Translate meaning, not words. Rephrase freely to sound natural in {$toLang}.
-4. Keep the emotional register: if someone is angry, scared, joking, whispering — the translation must convey that.
-5. Use the character analysis above to assign the correct speaker tag [M1], [F1], etc. to each line.
-6. Preserve interruptions, hesitations, and conversational flow.
-
-Format: "1. [M1] translated text"
-Do not include timing info. Do not skip or merge lines. Keep exact numbering.
-PROMPT;
+        $systemPrompt = "You are an expert film/series dubbing translator. Your translations will be spoken aloud by TTS voice actors, so they must sound like natural spoken {$toLang} dialogue — not written subtitles.\n"
+            . "\nCHARACTER ANALYSIS:\n{$characterContext}\n"
+            . "\nFULL DIALOGUE (for context — do NOT translate this, only use for understanding the scene):\n{$fullDialogue}\n"
+            . "{$uzbekRules}\n"
+            . "\nTRANSLATION RULES:\n"
+            . "1. Each line has [Ns, max M chars]. Translation MUST fit within that character limit — it will be spoken in that time slot.\n"
+            . "2. Lines may contain annotations like [music], [laughing], [whispering], [door opens] etc. — use these to understand the scene mood and context, but translate ONLY the spoken dialogue part. Do not include the annotations in your translation.\n"
+            . "3. Translate meaning, not words. Rephrase freely to sound natural in {$toLang}.\n"
+            . "4. Keep the emotional register: if someone is angry, scared, joking, whispering — the translation must convey that.\n"
+            . "5. Use the character analysis above to assign the correct speaker tag [M1], [F1], etc. to each line.\n"
+            . "6. Preserve interruptions, hesitations, and conversational flow.\n"
+            . "\n" . 'Format: "1. [M1] translated text"' . "\n"
+            . "Do not include timing info. Do not skip or merge lines. Keep exact numbering.";
 
         return [
             ['role' => 'system', 'content' => $systemPrompt],
