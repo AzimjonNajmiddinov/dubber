@@ -51,6 +51,10 @@ class SrtParser
             $textLines = array_slice($lines, $timecodeIndex + 1);
             $text = trim(implode(' ', array_map('trim', $textLines)));
 
+            // Strip VTT/HTML formatting tags (<i>, <b>, <u>, <font>, etc.)
+            // These come from HLS WebVTT subtitles and cause TTS to pronounce tag names
+            $text = strip_tags($text);
+
             if ($text === '') {
                 continue;
             }
