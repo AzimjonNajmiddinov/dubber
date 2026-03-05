@@ -217,7 +217,7 @@
                 video.src = url;
                 video.addEventListener('loadedmetadata', () => resolve(), { once: true });
             }
-            video.volume = 0.3;
+            video.volume = 0.2;
         });
     }
 

@@ -75,7 +75,7 @@ class PrepareInstantDubJob implements ShouldQueue
         }
         $fullDialogueText = implode("\n", $fullDialogue);
 
-        // 2b. Download original audio track for background mixing (30% volume)
+        // 2b. Download original audio track for background mixing (20% volume)
         $this->updateSession(['progress' => 'Downloading background audio...']);
         $originalAudioPath = $this->downloadOriginalAudio();
         if ($originalAudioPath) {

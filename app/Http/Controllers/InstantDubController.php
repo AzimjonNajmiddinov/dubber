@@ -446,7 +446,7 @@ class InstantDubController extends Controller
         $session = $this->getSession($sessionId);
         $originalAudioPath = $session['original_audio_path'] ?? null;
 
-        // If we have original audio, mix at 30% for this time range
+        // If we have original audio, mix at 20% for this time range
         if ($originalAudioPath && file_exists($originalAudioPath)) {
             $cacheKey = "instant-dub:{$sessionId}:gap-aac:{$startMs}-{$durationMs}";
             $cached = Redis::get($cacheKey);
@@ -465,7 +465,7 @@ class InstantDubController extends Controller
                 '-ss', (string) round($startSeconds, 3),
                 '-t', (string) round($duration, 3),
                 '-i', $originalAudioPath,
-                '-af', 'volume=0.3',
+                '-af', 'volume=0.2',
                 '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $tmpFile,
             ]);
 
@@ -626,7 +626,7 @@ class InstantDubController extends Controller
 
     /**
      * Generate AAC for a TTS segment.
-     * Mixes TTS with original audio at 30% if available.
+     * Mixes TTS with original audio at 20% if available.
      * Pads/trims to exact slot duration (start_time → end_time).
      */
     private function generateAacSegment(array $chunk, ?string $originalAudioPath = null): ?string
@@ -647,13 +647,13 @@ class InstantDubController extends Controller
 
             if (!$audioBase64) {
                 if ($hasBg) {
-                    // Background audio only at 30%
+                    // Background audio only at 20%
                     Process::timeout(20)->run([
                         'ffmpeg', '-y',
                         '-ss', (string) round($startTime, 3),
                         '-t', (string) $slotDuration,
                         '-i', $originalAudioPath,
-                        '-af', 'volume=0.3',
+                        '-af', 'volume=0.2',
                         '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
                     ]);
                 } else {
@@ -676,7 +676,7 @@ class InstantDubController extends Controller
                         '-t', (string) $slotDuration,
                         '-i', $originalAudioPath,
                         '-filter_complex',
-                        "[0:a]aresample=44100,apad=whole_dur={$slotDuration}[tts];[1:a]volume=0.3[bg];[tts][bg]amix=inputs=2:duration=first:normalize=0",
+                        "[0:a]aresample=44100,apad=whole_dur={$slotDuration}[tts];[1:a]volume=0.2[bg];[tts][bg]amix=inputs=2:duration=first:normalize=0",
                         '-t', (string) $slotDuration,
                         '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
                     ]);
