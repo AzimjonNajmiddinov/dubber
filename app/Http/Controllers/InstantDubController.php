@@ -405,8 +405,10 @@ class InstantDubController extends Controller
         $cached = Redis::get($cacheKey);
 
         if ($cached) {
-            return response(base64_decode($cached), 200, [
+            $data = base64_decode($cached);
+            return response($data, 200, [
                 'Content-Type' => 'audio/aac',
+                'Content-Length' => strlen($data),
                 'Access-Control-Allow-Origin' => '*',
                 'Cache-Control' => 'max-age=86400',
             ]);
@@ -432,6 +434,7 @@ class InstantDubController extends Controller
 
         return response($aacData, 200, [
             'Content-Type' => 'audio/aac',
+            'Content-Length' => strlen($aacData),
             'Access-Control-Allow-Origin' => '*',
             'Cache-Control' => 'max-age=86400',
         ]);
@@ -452,8 +455,10 @@ class InstantDubController extends Controller
             $cached = Redis::get($cacheKey);
 
             if ($cached) {
-                return response(base64_decode($cached), 200, [
+                $data = base64_decode($cached);
+                return response($data, 200, [
                     'Content-Type' => 'audio/aac',
+                    'Content-Length' => strlen($data),
                     'Access-Control-Allow-Origin' => '*',
                     'Cache-Control' => 'max-age=86400',
                 ]);
@@ -475,6 +480,7 @@ class InstantDubController extends Controller
                 Redis::setex($cacheKey, 50400, base64_encode($data));
                 return response($data, 200, [
                     'Content-Type' => 'audio/aac',
+                    'Content-Length' => strlen($data),
                     'Access-Control-Allow-Origin' => '*',
                     'Cache-Control' => 'max-age=86400',
                 ]);
@@ -487,8 +493,10 @@ class InstantDubController extends Controller
         $cached = Redis::get($cacheKey);
 
         if ($cached) {
-            return response(base64_decode($cached), 200, [
+            $data = base64_decode($cached);
+            return response($data, 200, [
                 'Content-Type' => 'audio/aac',
+                'Content-Length' => strlen($data),
                 'Access-Control-Allow-Origin' => '*',
                 'Cache-Control' => 'max-age=86400',
             ]);
@@ -513,6 +521,7 @@ class InstantDubController extends Controller
 
         return response($data, 200, [
             'Content-Type' => 'audio/aac',
+            'Content-Length' => strlen($data),
             'Access-Control-Allow-Origin' => '*',
             'Cache-Control' => 'max-age=86400',
         ]);
