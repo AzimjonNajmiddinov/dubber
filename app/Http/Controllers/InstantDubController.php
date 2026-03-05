@@ -221,12 +221,17 @@ class InstantDubController extends Controller
             return response('No video URL in session', 400);
         }
 
-        $response = Http::timeout(10)->get($videoUrl);
-        if ($response->failed()) {
-            return response('Failed to fetch master playlist', 502);
+        // Cache the original master playlist in Redis (CDN tokens expire after a few minutes)
+        $masterCacheKey = "instant-dub:{$sessionId}:master-playlist";
+        $master = Redis::get($masterCacheKey);
+        if (!$master) {
+            $response = Http::timeout(10)->get($videoUrl);
+            if ($response->failed()) {
+                return response('Failed to fetch master playlist', 502);
+            }
+            $master = $response->body();
+            Redis::setex($masterCacheKey, 50400, $master);
         }
-
-        $master = $response->body();
         $videoBaseUrl = $session['video_base_url'] ?? '';
         $videoQuery = $session['video_query'] ?? '';
         $lang = $session['language'] ?? 'uz';
@@ -449,46 +454,9 @@ class InstantDubController extends Controller
         $session = $this->getSession($sessionId);
         $originalAudioPath = $session['original_audio_path'] ?? null;
 
-        // If we have original audio, mix at 20% for this time range
-        if ($originalAudioPath && file_exists($originalAudioPath)) {
-            $cacheKey = "instant-dub:{$sessionId}:gap-aac:{$startMs}-{$durationMs}";
-            $cached = Redis::get($cacheKey);
-
-            if ($cached) {
-                $data = base64_decode($cached);
-                return response($data, 200, [
-                    'Content-Type' => 'audio/aac',
-                    'Content-Length' => strlen($data),
-                    'Access-Control-Allow-Origin' => '*',
-                    'Cache-Control' => 'max-age=86400',
-                ]);
-            }
-
-            $tmpFile = sys_get_temp_dir() . "/gap_{$sessionId}_{$startMs}_{$durationMs}.aac";
-            Process::timeout(20)->run([
-                'ffmpeg', '-y',
-                '-ss', (string) round($startSeconds, 3),
-                '-t', (string) round($duration, 3),
-                '-i', $originalAudioPath,
-                '-af', 'volume=0.2',
-                '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $tmpFile,
-            ]);
-
-            if (file_exists($tmpFile) && filesize($tmpFile) > 10) {
-                $data = file_get_contents($tmpFile);
-                @unlink($tmpFile);
-                Redis::setex($cacheKey, 50400, base64_encode($data));
-                return response($data, 200, [
-                    'Content-Type' => 'audio/aac',
-                    'Content-Length' => strlen($data),
-                    'Access-Control-Allow-Origin' => '*',
-                    'Cache-Control' => 'max-age=86400',
-                ]);
-            }
-            @unlink($tmpFile);
-        }
-
-        // Fallback: silence (shared cache)
+        // Serve silence immediately — background audio extraction via ffmpeg is too slow
+        // for live HLS serving (5-20s per segment, overwhelms server with concurrent requests).
+        // TTS segments already have background audio mixed in.
         $cacheKey = "instant-dub:silence-aac:{$durationMs}";
         $cached = Redis::get($cacheKey);
 
