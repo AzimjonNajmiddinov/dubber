@@ -2,6 +2,8 @@
 
 namespace App\Jobs;
 
+use App\Services\ElevenLabs\ElevenLabsClient;
+use App\Services\ElevenLabs\SpeakerSampleExtractor;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -66,6 +68,11 @@ class TranslateInstantDubBatchJob implements ShouldQueue
             $speakers[$tag] = true;
         }
         $this->mergeVoiceMap($speakers);
+
+        // Clone voices with ElevenLabs on batch 0 (first time speakers are identified)
+        if ($this->batchIndex === 0 && config('dubber.tts.default') === 'elevenlabs') {
+            $this->cloneVoicesWithElevenLabs($batch);
+        }
 
         // Dispatch TTS for this batch's segments
         $this->updateSession(['progress' => "Generating audio ({$batchNum}/{$this->totalBatches})..."]);
@@ -359,6 +366,82 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         }
 
         return $batch;
+    }
+
+    private function cloneVoicesWithElevenLabs(array $batch): void
+    {
+        $apiKey = config('services.elevenlabs.api_key', '');
+        if ($apiKey === '') return;
+
+        // Get original audio path from session
+        $sessionJson = Redis::get("instant-dub:{$this->sessionId}");
+        if (!$sessionJson) return;
+        $session = json_decode($sessionJson, true);
+        $originalAudioPath = $session['original_audio_path'] ?? null;
+        if (!$originalAudioPath || !file_exists($originalAudioPath)) return;
+
+        // Load all segments for sample extraction (need original timing + speaker tags)
+        $allSegmentsJson = Redis::get("instant-dub:{$this->sessionId}:all-segments");
+        $allSegments = $allSegmentsJson ? json_decode($allSegmentsJson, true) : [];
+        if (empty($allSegments)) return;
+
+        // Map speaker tags from translated batch onto original segments by index
+        $speakerMap = [];
+        foreach ($batch as $seg) {
+            $tag = $seg['speaker'] ?? 'M1';
+            $speakerMap[$tag] = true;
+        }
+
+        // Assign speaker tags to all segments for extraction
+        // Segments from batch have speakers identified by GPT/Claude
+        $segmentsWithSpeakers = [];
+        foreach ($allSegments as $seg) {
+            $seg['speaker'] = $seg['speaker'] ?? 'M1';
+            $segmentsWithSpeakers[] = $seg;
+        }
+
+        try {
+            $extractor = new SpeakerSampleExtractor();
+            $samples = $extractor->extractSamples($originalAudioPath, $segmentsWithSpeakers);
+
+            if (empty($samples)) return;
+
+            $client = new ElevenLabsClient($apiKey);
+            $voiceKey = "instant-dub:{$this->sessionId}:voices";
+            $voiceMap = json_decode(Redis::get($voiceKey), true) ?? [];
+            $clonedVoiceIds = [];
+
+            foreach ($samples as $tag => $samplePath) {
+                try {
+                    $voiceId = $client->addVoice("dub-{$this->sessionId}-{$tag}", [$samplePath]);
+                    $voiceMap[$tag] = ['driver' => 'elevenlabs', 'voice_id' => $voiceId];
+                    $clonedVoiceIds[] = $voiceId;
+                    Log::info('ElevenLabs voice cloned for speaker (translation path)', [
+                        'session' => $this->sessionId,
+                        'speaker' => $tag,
+                        'voice_id' => $voiceId,
+                    ]);
+                } catch (\Throwable $e) {
+                    Log::warning('ElevenLabs clone failed for speaker, keeping fallback', [
+                        'session' => $this->sessionId,
+                        'speaker' => $tag,
+                        'error' => $e->getMessage(),
+                    ]);
+                } finally {
+                    @unlink($samplePath);
+                }
+            }
+
+            if (!empty($clonedVoiceIds)) {
+                Redis::setex($voiceKey, 50400, json_encode($voiceMap));
+                Redis::setex("instant-dub:{$this->sessionId}:elevenlabs-voices", 50400, json_encode($clonedVoiceIds));
+            }
+        } catch (\Throwable $e) {
+            Log::warning('ElevenLabs voice cloning failed entirely (translation path)', [
+                'session' => $this->sessionId,
+                'error' => $e->getMessage(),
+            ]);
+        }
     }
 
     private function mergeVoiceMap(array $newSpeakers): void

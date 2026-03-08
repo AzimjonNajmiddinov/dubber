@@ -7,6 +7,7 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use App\Services\ElevenLabs\ElevenLabsClient;
 use App\Services\TextNormalizer;
 use App\Services\Tts\Drivers\AishaTtsDriver;
 use Illuminate\Support\Facades\Log;
@@ -52,9 +53,16 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             @mkdir($tmpDir, 0755, true);
 
             $rawMp3 = "{$tmpDir}/seg_{$this->index}.mp3";
-            $driver = config('dubber.tts.default', 'edge');
 
-            if ($driver === 'aisha') {
+            // Read per-speaker driver from voice map
+            $voiceKey = "instant-dub:{$this->sessionId}:voices";
+            $voiceMap = json_decode(Redis::get($voiceKey), true) ?? [];
+            $speakerEntry = $voiceMap[$this->speaker] ?? [];
+            $driver = $speakerEntry['driver'] ?? config('dubber.tts.default', 'edge');
+
+            if ($driver === 'elevenlabs' && !empty($speakerEntry['voice_id'])) {
+                $this->generateWithElevenLabs($rawMp3, $speakerEntry['voice_id']);
+            } elseif ($driver === 'aisha') {
                 $this->generateWithAisha($rawMp3, $tmpDir);
             } else {
                 $this->generateWithEdgeTts($rawMp3, $tmpDir);
@@ -181,6 +189,20 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                 'Edge TTS failed (bin=' . $edgeTts . '): '
                 . Str::limit($result->errorOutput() ?: $result->output(), 300)
             );
+        }
+    }
+
+    private function generateWithElevenLabs(string $outputMp3, string $voiceId): void
+    {
+        $text = TextNormalizer::normalize($this->text, $this->language);
+
+        $client = new ElevenLabsClient();
+        $mp3Data = $client->synthesize($voiceId, $text);
+
+        file_put_contents($outputMp3, $mp3Data);
+
+        if (!file_exists($outputMp3) || filesize($outputMp3) < 200) {
+            throw new \RuntimeException('ElevenLabs TTS returned invalid audio');
         }
     }
 

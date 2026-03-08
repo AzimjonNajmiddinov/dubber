@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Jobs\PrepareInstantDubJob;
+use App\Services\ElevenLabs\ElevenLabsClient;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
@@ -104,6 +105,16 @@ class InstantDubController extends Controller
             @unlink($session['original_audio_path']);
             $dir = dirname($session['original_audio_path']);
             @rmdir($dir);
+        }
+
+        // Delete cloned ElevenLabs voices
+        $voiceIdsJson = Redis::get("instant-dub:{$sessionId}:elevenlabs-voices");
+        if ($voiceIdsJson) {
+            $client = new ElevenLabsClient();
+            foreach (json_decode($voiceIdsJson, true) as $voiceId) {
+                try { $client->deleteVoice($voiceId); } catch (\Throwable) {}
+            }
+            Redis::del("instant-dub:{$sessionId}:elevenlabs-voices");
         }
 
         $total = $session['total_segments'] ?? 0;

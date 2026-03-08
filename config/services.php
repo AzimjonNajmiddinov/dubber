@@ -63,4 +63,8 @@ return [
         'url' => env('UZBEKVOICE_API_URL', 'https://uzbekvoice.ai/api/v1'),
         'api_key' => env('UZBEKVOICE_API_KEY', ''),
     ],
+
+    'elevenlabs' => [
+        'api_key' => env('ELEVENLABS_API_KEY', ''),
+    ],
 ];

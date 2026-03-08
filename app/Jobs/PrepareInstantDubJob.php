@@ -2,6 +2,8 @@
 
 namespace App\Jobs;
 
+use App\Services\ElevenLabs\ElevenLabsClient;
+use App\Services\ElevenLabs\SpeakerSampleExtractor;
 use App\Services\SrtParser;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -113,6 +115,11 @@ class PrepareInstantDubJob implements ShouldQueue
                 $allSpeakers[$tag] = true;
             }
             $this->buildVoiceMap($allSpeakers);
+
+            // Clone voices with ElevenLabs if driver is set to elevenlabs
+            if ($originalAudioPath && config('dubber.tts.default') === 'elevenlabs') {
+                $this->cloneVoicesWithElevenLabs(array_keys($allSpeakers), $segments, $originalAudioPath);
+            }
 
             $dispatched = 0;
             foreach ($segments as $i => $seg) {
@@ -431,6 +438,58 @@ class PrepareInstantDubJob implements ShouldQueue
         }
 
         return null;
+    }
+
+    private function cloneVoicesWithElevenLabs(array $speakers, array $segments, string $originalAudioPath): void
+    {
+        $apiKey = config('services.elevenlabs.api_key', '');
+        if ($apiKey === '') return;
+
+        try {
+            $extractor = new SpeakerSampleExtractor();
+            $samples = $extractor->extractSamples($originalAudioPath, $segments);
+
+            if (empty($samples)) {
+                Log::info('No speaker samples extracted, skipping ElevenLabs cloning', ['session' => $this->sessionId]);
+                return;
+            }
+
+            $client = new ElevenLabsClient($apiKey);
+            $voiceKey = "instant-dub:{$this->sessionId}:voices";
+            $voiceMap = json_decode(Redis::get($voiceKey), true) ?? [];
+            $clonedVoiceIds = [];
+
+            foreach ($samples as $tag => $samplePath) {
+                try {
+                    $voiceId = $client->addVoice("dub-{$this->sessionId}-{$tag}", [$samplePath]);
+                    $voiceMap[$tag] = ['driver' => 'elevenlabs', 'voice_id' => $voiceId];
+                    $clonedVoiceIds[] = $voiceId;
+                    Log::info('ElevenLabs voice cloned for speaker', [
+                        'session' => $this->sessionId,
+                        'speaker' => $tag,
+                        'voice_id' => $voiceId,
+                    ]);
+                } catch (\Throwable $e) {
+                    Log::warning('ElevenLabs clone failed for speaker, keeping fallback', [
+                        'session' => $this->sessionId,
+                        'speaker' => $tag,
+                        'error' => $e->getMessage(),
+                    ]);
+                } finally {
+                    @unlink($samplePath);
+                }
+            }
+
+            if (!empty($clonedVoiceIds)) {
+                Redis::setex($voiceKey, 50400, json_encode($voiceMap));
+                Redis::setex("instant-dub:{$this->sessionId}:elevenlabs-voices", 50400, json_encode($clonedVoiceIds));
+            }
+        } catch (\Throwable $e) {
+            Log::warning('ElevenLabs voice cloning failed entirely', [
+                'session' => $this->sessionId,
+                'error' => $e->getMessage(),
+            ]);
+        }
     }
 
     private function updateStatus(string $status, string $error = ''): void
