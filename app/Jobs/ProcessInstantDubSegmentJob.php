@@ -8,6 +8,7 @@ use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use App\Services\TextNormalizer;
+use App\Services\Tts\Drivers\AishaTtsDriver;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Facades\Redis;
@@ -46,12 +47,18 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         try {
             $slotDuration = $this->endTime - $this->startTime;
 
-            // 1. Generate TTS audio via edge-tts with per-speaker voice/pitch/rate
+            // 1. Generate TTS audio with configured driver
             $tmpDir = '/tmp/instant-dub-' . $this->sessionId;
             @mkdir($tmpDir, 0755, true);
 
             $rawMp3 = "{$tmpDir}/seg_{$this->index}.mp3";
-            $this->generateWithEdgeTts($rawMp3, $tmpDir);
+            $driver = config('dubber.tts.default', 'edge');
+
+            if ($driver === 'aisha') {
+                $this->generateWithAisha($rawMp3, $tmpDir);
+            } else {
+                $this->generateWithEdgeTts($rawMp3, $tmpDir);
+            }
 
             // 2. Check duration and speed up if needed
             $ttsDuration = $this->getAudioDuration($rawMp3);
@@ -174,6 +181,28 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                 'Edge TTS failed (bin=' . $edgeTts . '): '
                 . Str::limit($result->errorOutput() ?: $result->output(), 300)
             );
+        }
+    }
+
+    private function generateWithAisha(string $outputMp3, string $tmpDir): void
+    {
+        $voiceKey = "instant-dub:{$this->sessionId}:voices";
+        $voiceMapJson = Redis::get($voiceKey);
+        $voiceMap = $voiceMapJson ? json_decode($voiceMapJson, true) : [];
+        $speakerEntry = $voiceMap[$this->speaker] ?? null;
+
+        $model = $speakerEntry['voice'] ?? (str_starts_with($this->speaker, 'F') ? 'gulnoza' : 'jaxongir');
+        $mood = $speakerEntry['mood'] ?? 'neutral';
+
+        $text = TextNormalizer::normalize($this->text, $this->language);
+
+        $aisha = new AishaTtsDriver();
+        $mp3Data = $aisha->callAishaApi($text, $this->language, $model, $mood);
+
+        file_put_contents($outputMp3, $mp3Data);
+
+        if (!file_exists($outputMp3) || filesize($outputMp3) < 200) {
+            throw new \RuntimeException('AISHA TTS returned invalid audio');
         }
     }
 

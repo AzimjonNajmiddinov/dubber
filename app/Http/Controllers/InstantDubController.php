@@ -242,6 +242,20 @@ class InstantDubController extends Controller
 
         $lines = explode("\n", $master);
 
+        // Inject EXT-X-INDEPENDENT-SEGMENTS if not present (helps AVPlayer avoid cross-segment deps)
+        $hasIndependent = false;
+        foreach ($lines as $line) {
+            if (str_contains(trim($line), '#EXT-X-INDEPENDENT-SEGMENTS')) {
+                $hasIndependent = true;
+                break;
+            }
+        }
+        if (!$hasIndependent) {
+            // Insert after #EXTM3U
+            $insertPos = 1;
+            array_splice($lines, $insertPos, 0, ['#EXT-X-INDEPENDENT-SEGMENTS']);
+        }
+
         // First pass: find existing audio and subtitle group IDs
         $existingAudioGroup = null;
         $existingSubsGroup = null;
@@ -335,8 +349,10 @@ class InstantDubController extends Controller
         $total = (int) ($session['total_segments'] ?? 0);
         $status = $session['status'] ?? 'preparing';
 
-        // Build segment list with gap-splitting: long gaps become
-        // separate max-10s silence segments so AVPlayer doesn't stall
+        // Build segment list — keep segment count low to avoid AVPlayer
+        // main-thread stalls on iOS (each segment triggers KVO updates).
+        // Small gaps (< 1s) are absorbed into adjacent TTS segment duration.
+        // Larger gaps become single gap segments (max 30s each).
         $entries = [];
         $prevEnd = 0.0;
         $maxDuration = 10;
@@ -350,19 +366,24 @@ class InstantDubController extends Controller
             $endTime = (float) ($chunk['end_time'] ?? 0);
             $gap = max(0, $startTime - $prevEnd);
 
-            // Break large gaps into max-10s segments (with background audio if available)
-            $gapRemaining = $gap;
-            $gapStart = $prevEnd;
-            while ($gapRemaining > 0.05) {
-                $silenceDur = min($gapRemaining, 10.0);
-                $startMs = (int) round($gapStart * 1000);
-                $durMs = (int) round($silenceDur * 1000);
-                $entries[] = [
-                    'uri' => "gap/{$startMs}/{$durMs}.aac",
-                    'duration' => round($silenceDur, 3),
-                ];
-                $gapStart += $silenceDur;
-                $gapRemaining -= $silenceDur;
+            // Only create gap segments for gaps >= 1s; smaller gaps are
+            // absorbed into the TTS segment padding (apad already fills).
+            // Use max-30s chunks to keep segment count minimal.
+            if ($gap >= 1.0) {
+                $gapRemaining = $gap;
+                $gapStart = $prevEnd;
+                while ($gapRemaining >= 1.0) {
+                    $silenceDur = min($gapRemaining, 30.0);
+                    $startMs = (int) round($gapStart * 1000);
+                    $durMs = (int) round($silenceDur * 1000);
+                    $entries[] = [
+                        'uri' => "gap/{$startMs}/{$durMs}.aac",
+                        'duration' => round($silenceDur, 3),
+                    ];
+                    $maxDuration = max($maxDuration, (int) ceil($silenceDur));
+                    $gapStart += $silenceDur;
+                    $gapRemaining -= $silenceDur;
+                }
             }
 
             // TTS segment (speech only, no gap — padded to slot duration)
@@ -380,6 +401,7 @@ class InstantDubController extends Controller
         $m3u8 .= "#EXT-X-VERSION:3\n";
         $m3u8 .= "#EXT-X-TARGETDURATION:{$maxDuration}\n";
         $m3u8 .= "#EXT-X-MEDIA-SEQUENCE:0\n";
+        $m3u8 .= "#EXT-X-INDEPENDENT-SEGMENTS\n";
 
         if ($status !== 'complete') {
             $m3u8 .= "#EXT-X-PLAYLIST-TYPE:EVENT\n";
@@ -449,14 +471,8 @@ class InstantDubController extends Controller
     {
         $durationMs = max(10, min($durationMs, 30000));
         $duration = $durationMs / 1000;
-        $startSeconds = $startMs / 1000;
 
-        $session = $this->getSession($sessionId);
-        $originalAudioPath = $session['original_audio_path'] ?? null;
-
-        // Serve silence immediately — background audio extraction via ffmpeg is too slow
-        // for live HLS serving (5-20s per segment, overwhelms server with concurrent requests).
-        // TTS segments already have background audio mixed in.
+        // Check Redis cache first (keyed only by duration — all silence is the same)
         $cacheKey = "instant-dub:silence-aac:{$durationMs}";
         $cached = Redis::get($cacheKey);
 
@@ -470,6 +486,8 @@ class InstantDubController extends Controller
             ]);
         }
 
+        // Generate silence via ffmpeg — with larger gap segments (max 30s)
+        // there are very few gap segments per session, so this is fast enough.
         $tmpFile = sys_get_temp_dir() . "/silence_{$durationMs}.aac";
         Process::timeout(10)->run([
             'ffmpeg', '-y', '-f', 'lavfi', '-t', (string) round($duration, 3),
@@ -506,16 +524,28 @@ class InstantDubController extends Controller
 
         $status = $session['status'] ?? 'preparing';
 
+        // Estimate total duration from the last chunk's end_time
+        $lastChunkJson = null;
+        for ($i = $total - 1; $i >= 0; $i--) {
+            $lastChunkJson = Redis::get("instant-dub:{$sessionId}:chunk:{$i}");
+            if ($lastChunkJson) break;
+        }
+        $totalDuration = 3600; // fallback 1h
+        if ($lastChunkJson) {
+            $lastChunk = json_decode($lastChunkJson, true);
+            $totalDuration = (int) ceil((float) ($lastChunk['end_time'] ?? 3600));
+        }
+
         $m3u8 = "#EXTM3U\n";
         $m3u8 .= "#EXT-X-VERSION:3\n";
-        $m3u8 .= "#EXT-X-TARGETDURATION:86400\n";
+        $m3u8 .= "#EXT-X-TARGETDURATION:{$totalDuration}\n";
         $m3u8 .= "#EXT-X-MEDIA-SEQUENCE:0\n";
 
         if ($status !== 'complete') {
             $m3u8 .= "#EXT-X-PLAYLIST-TYPE:EVENT\n";
         }
 
-        $m3u8 .= "#EXTINF:86400,\n";
+        $m3u8 .= "#EXTINF:{$totalDuration},\n";
         $m3u8 .= "dub-subtitles.vtt\n";
 
         if ($status === 'complete') {

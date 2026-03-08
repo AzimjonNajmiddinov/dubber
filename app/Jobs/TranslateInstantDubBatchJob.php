@@ -364,23 +364,42 @@ class TranslateInstantDubBatchJob implements ShouldQueue
     private function mergeVoiceMap(array $newSpeakers): void
     {
         $voiceKey = "instant-dub:{$this->sessionId}:voices";
+        $driver = config('dubber.tts.default', 'edge');
 
-        $maleVariants = [
-            ['voice' => 'uz-UZ-SardorNeural', 'pitch' => '+0Hz',  'rate' => '+0%'],
-            ['voice' => 'uz-UZ-SardorNeural', 'pitch' => '-8Hz',  'rate' => '-5%'],
-            ['voice' => 'uz-UZ-SardorNeural', 'pitch' => '+6Hz',  'rate' => '+5%'],
-            ['voice' => 'uz-UZ-SardorNeural', 'pitch' => '-15Hz', 'rate' => '-8%'],
-        ];
-        $femaleVariants = [
-            ['voice' => 'uz-UZ-MadinaNeural', 'pitch' => '+0Hz',  'rate' => '+0%'],
-            ['voice' => 'uz-UZ-MadinaNeural', 'pitch' => '-6Hz',  'rate' => '-5%'],
-            ['voice' => 'uz-UZ-MadinaNeural', 'pitch' => '+8Hz',  'rate' => '+5%'],
-            ['voice' => 'uz-UZ-MadinaNeural', 'pitch' => '-12Hz', 'rate' => '-8%'],
-        ];
-        $childVariants = [
-            ['voice' => 'uz-UZ-MadinaNeural', 'pitch' => '+15Hz', 'rate' => '+10%'],
-            ['voice' => 'uz-UZ-SardorNeural',  'pitch' => '+12Hz', 'rate' => '+8%'],
-        ];
+        if ($driver === 'aisha') {
+            // AISHA has 2 voices + 3 moods — use mood to differentiate speakers
+            $maleVariants = [
+                ['voice' => 'jaxongir', 'mood' => 'neutral'],
+                ['voice' => 'jaxongir', 'mood' => 'happy'],
+                ['voice' => 'jaxongir', 'mood' => 'sad'],
+            ];
+            $femaleVariants = [
+                ['voice' => 'gulnoza', 'mood' => 'neutral'],
+                ['voice' => 'gulnoza', 'mood' => 'happy'],
+                ['voice' => 'gulnoza', 'mood' => 'sad'],
+            ];
+            $childVariants = [
+                ['voice' => 'gulnoza', 'mood' => 'happy'],
+                ['voice' => 'jaxongir', 'mood' => 'happy'],
+            ];
+        } else {
+            $maleVariants = [
+                ['voice' => 'uz-UZ-SardorNeural', 'pitch' => '+0Hz',  'rate' => '+0%'],
+                ['voice' => 'uz-UZ-SardorNeural', 'pitch' => '-8Hz',  'rate' => '-5%'],
+                ['voice' => 'uz-UZ-SardorNeural', 'pitch' => '+6Hz',  'rate' => '+5%'],
+                ['voice' => 'uz-UZ-SardorNeural', 'pitch' => '-15Hz', 'rate' => '-8%'],
+            ];
+            $femaleVariants = [
+                ['voice' => 'uz-UZ-MadinaNeural', 'pitch' => '+0Hz',  'rate' => '+0%'],
+                ['voice' => 'uz-UZ-MadinaNeural', 'pitch' => '-6Hz',  'rate' => '-5%'],
+                ['voice' => 'uz-UZ-MadinaNeural', 'pitch' => '+8Hz',  'rate' => '+5%'],
+                ['voice' => 'uz-UZ-MadinaNeural', 'pitch' => '-12Hz', 'rate' => '-8%'],
+            ];
+            $childVariants = [
+                ['voice' => 'uz-UZ-MadinaNeural', 'pitch' => '+15Hz', 'rate' => '+10%'],
+                ['voice' => 'uz-UZ-SardorNeural',  'pitch' => '+12Hz', 'rate' => '+8%'],
+            ];
+        }
 
         // Read existing voice map
         $existingJson = Redis::get($voiceKey);

@@ -54,6 +54,11 @@ return [
         'url' => env('DEMUCS_SERVICE_URL', 'http://demucs:8000'),
     ],
 
+    'aisha' => [
+        'url' => env('AISHA_API_URL', 'https://back.aisha.group/api/v1'),
+        'api_key' => env('AISHA_API_KEY', ''),
+    ],
+
     'uzbekvoice' => [
         'url' => env('UZBEKVOICE_API_URL', 'https://uzbekvoice.ai/api/v1'),
         'api_key' => env('UZBEKVOICE_API_KEY', ''),

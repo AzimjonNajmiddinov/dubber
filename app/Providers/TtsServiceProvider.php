@@ -2,6 +2,7 @@
 
 namespace App\Providers;
 
+use App\Services\Tts\Drivers\AishaTtsDriver;
 use App\Services\Tts\Drivers\EdgeTtsDriver;
 use App\Services\Tts\Drivers\HybridUzbekDriver;
 use App\Services\Tts\Drivers\UzbekVoiceDriver;
@@ -16,6 +17,7 @@ class TtsServiceProvider extends ServiceProvider
             $manager = new TtsManager();
 
             // Register available TTS drivers
+            $manager->register('aisha', new AishaTtsDriver());
             $manager->register('edge', new EdgeTtsDriver());
             $manager->register('hybrid_uzbek', new HybridUzbekDriver());
             $manager->register('uzbekvoice', new UzbekVoiceDriver());
