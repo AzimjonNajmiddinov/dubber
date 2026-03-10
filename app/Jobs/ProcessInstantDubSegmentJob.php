@@ -36,11 +36,12 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
     {
         $sessionKey = "instant-dub:{$this->sessionId}";
 
-        if (!Redis::exists($sessionKey)) {
+        $sessionJson = Redis::get($sessionKey);
+        if (!$sessionJson) {
             return;
         }
 
-        $session = json_decode(Redis::get($sessionKey), true);
+        $session = json_decode($sessionJson, true);
         if (($session['status'] ?? '') === 'stopped') {
             return;
         }

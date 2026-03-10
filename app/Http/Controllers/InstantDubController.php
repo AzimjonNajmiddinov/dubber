@@ -123,15 +123,38 @@ class InstantDubController extends Controller
             Redis::del("instant-dub:{$sessionId}:elevenlabs-voices");
         }
 
-        // Batch delete all chunk and AAC cache keys
+        // Batch delete all chunk keys + cached responses
         $total = $session['total_segments'] ?? 0;
-        if ($total > 0) {
-            $keysToDelete = [];
-            for ($i = 0; $i < $total; $i++) {
-                $keysToDelete[] = "instant-dub:{$sessionId}:chunk:{$i}";
-                $keysToDelete[] = "instant-dub:{$sessionId}:aac:{$i}";
-            }
+        $keysToDelete = [
+            "instant-dub:{$sessionId}:rewritten-master",
+            "instant-dub:{$sessionId}:master-playlist",
+            "instant-dub:{$sessionId}:vtt-cache",
+            "instant-dub:{$sessionId}:voices",
+        ];
+        for ($i = 0; $i < $total; $i++) {
+            $keysToDelete[] = "instant-dub:{$sessionId}:chunk:{$i}";
+        }
+        if (!empty($keysToDelete)) {
             Redis::del($keysToDelete);
+        }
+
+        // Clean up AAC files on disk
+        $aacDir = storage_path("app/instant-dub/{$sessionId}/aac");
+        if (is_dir($aacDir)) {
+            array_map('unlink', glob("{$aacDir}/*.aac"));
+            @rmdir($aacDir);
+        }
+        // Clean up session directory
+        $sessionDir = storage_path("app/instant-dub/{$sessionId}");
+        if (is_dir($sessionDir)) {
+            @rmdir($sessionDir);
+        }
+
+        // Clean up tmp dir used by segment jobs
+        $tmpDir = '/tmp/instant-dub-' . $sessionId;
+        if (is_dir($tmpDir)) {
+            array_map('unlink', glob("{$tmpDir}/*"));
+            @rmdir($tmpDir);
         }
 
         return response()->json(['status' => 'stopped']);
@@ -244,7 +267,18 @@ class InstantDubController extends Controller
             return response('No video URL in session', 400);
         }
 
-        // Cache the original master playlist in Redis (CDN tokens expire after a few minutes)
+        // Cache the fully rewritten master playlist — deterministic, no need to recompute
+        $rewrittenKey = "instant-dub:{$sessionId}:rewritten-master";
+        $cached = Redis::get($rewrittenKey);
+        if ($cached) {
+            return response($cached, 200, [
+                'Content-Type' => 'application/vnd.apple.mpegurl',
+                'Access-Control-Allow-Origin' => '*',
+                'Cache-Control' => 'max-age=300',
+            ]);
+        }
+
+        // Fetch original master playlist (cached separately for CDN token lifetime)
         $masterCacheKey = "instant-dub:{$sessionId}:master-playlist";
         $master = Redis::get($masterCacheKey);
         if (!$master) {
@@ -265,7 +299,7 @@ class InstantDubController extends Controller
 
         $lines = explode("\n", $master);
 
-        // Inject EXT-X-INDEPENDENT-SEGMENTS if not present (helps AVPlayer avoid cross-segment deps)
+        // Inject EXT-X-INDEPENDENT-SEGMENTS if not present
         $hasIndependent = false;
         foreach ($lines as $line) {
             if (str_contains(trim($line), '#EXT-X-INDEPENDENT-SEGMENTS')) {
@@ -274,9 +308,7 @@ class InstantDubController extends Controller
             }
         }
         if (!$hasIndependent) {
-            // Insert after #EXTM3U
-            $insertPos = 1;
-            array_splice($lines, $insertPos, 0, ['#EXT-X-INDEPENDENT-SEGMENTS']);
+            array_splice($lines, 1, 0, ['#EXT-X-INDEPENDENT-SEGMENTS']);
         }
 
         // First pass: find existing audio and subtitle group IDs
@@ -355,10 +387,15 @@ class InstantDubController extends Controller
             $output[] = $line;
         }
 
-        return response(implode("\n", $output), 200, [
+        $result = implode("\n", $output);
+
+        // Cache rewritten master — it won't change for this session
+        Redis::setex($rewrittenKey, 50400, $result);
+
+        return response($result, 200, [
             'Content-Type' => 'application/vnd.apple.mpegurl',
             'Access-Control-Allow-Origin' => '*',
-            'Cache-Control' => 'no-cache',
+            'Cache-Control' => 'max-age=300',
         ]);
     }
 
@@ -442,15 +479,13 @@ class InstantDubController extends Controller
 
     public function hlsAudioSegment(string $sessionId, int $index)
     {
-        // Check AAC cache first
-        $cacheKey = "instant-dub:{$sessionId}:aac:{$index}";
-        $cached = Redis::get($cacheKey);
+        // Check disk cache first (binary AAC, no base64 overhead)
+        $aacDir = storage_path("app/instant-dub/{$sessionId}/aac");
+        $aacFile = "{$aacDir}/{$index}.aac";
 
-        if ($cached) {
-            $data = base64_decode($cached);
-            return response($data, 200, [
+        if (file_exists($aacFile)) {
+            return response()->file($aacFile, [
                 'Content-Type' => 'audio/aac',
-                'Content-Length' => strlen($data),
                 'Access-Control-Allow-Origin' => '*',
                 'Cache-Control' => 'max-age=86400',
             ]);
@@ -461,26 +496,48 @@ class InstantDubController extends Controller
             return response('Segment not ready', 404);
         }
 
-        $session = $this->getSession($sessionId);
-        $originalAudioPath = $session['original_audio_path'] ?? null;
+        // Lock to prevent thundering herd — multiple clients requesting same uncached segment
+        $lockKey = "instant-dub:{$sessionId}:aac-lock:{$index}";
+        $lock = Redis::set($lockKey, '1', 'EX', 30, 'NX');
 
-        $chunk = json_decode($chunkJson, true);
-        [$slotStart, $slotEnd] = $this->computeSlotBounds($sessionId, $index, $chunk);
-        $aacData = $this->generateAacSegment($chunk, $originalAudioPath, $slotStart, $slotEnd);
-
-        if (!$aacData) {
-            return response('Failed to generate AAC segment', 500);
+        if (!$lock) {
+            // Another request is generating this segment — wait briefly then retry from cache
+            usleep(500000); // 500ms
+            if (file_exists($aacFile)) {
+                return response()->file($aacFile, [
+                    'Content-Type' => 'audio/aac',
+                    'Access-Control-Allow-Origin' => '*',
+                    'Cache-Control' => 'max-age=86400',
+                ]);
+            }
+            // Still not ready — let this request generate it (lock may have expired)
         }
 
-        // Cache converted AAC (14h TTL)
-        Redis::setex($cacheKey, 50400, base64_encode($aacData));
+        try {
+            $session = $this->getSession($sessionId);
+            $originalAudioPath = $session['original_audio_path'] ?? null;
 
-        return response($aacData, 200, [
-            'Content-Type' => 'audio/aac',
-            'Content-Length' => strlen($aacData),
-            'Access-Control-Allow-Origin' => '*',
-            'Cache-Control' => 'max-age=86400',
-        ]);
+            $chunk = json_decode($chunkJson, true);
+            [$slotStart, $slotEnd] = $this->computeSlotBounds($sessionId, $index, $chunk);
+            $aacData = $this->generateAacSegment($chunk, $originalAudioPath, $slotStart, $slotEnd);
+
+            if (!$aacData) {
+                return response('Failed to generate AAC segment', 500);
+            }
+
+            // Cache to disk (binary, no base64 overhead, no Redis memory)
+            @mkdir($aacDir, 0755, true);
+            file_put_contents($aacFile, $aacData);
+
+            return response($aacData, 200, [
+                'Content-Type' => 'audio/aac',
+                'Content-Length' => strlen($aacData),
+                'Access-Control-Allow-Origin' => '*',
+                'Cache-Control' => 'max-age=86400',
+            ]);
+        } finally {
+            Redis::del($lockKey);
+        }
     }
 
     // ── HLS Subtitle endpoints ──
@@ -493,7 +550,6 @@ class InstantDubController extends Controller
         }
 
         $status = $session['status'] ?? 'preparing';
-
         $total = (int) ($session['total_segments'] ?? 0);
 
         // Get last chunk's end_time for duration
@@ -538,6 +594,20 @@ class InstantDubController extends Controller
             return response('Session not found', 404);
         }
 
+        $status = $session['status'] ?? 'preparing';
+
+        // Serve cached VTT for completed sessions
+        if ($status === 'complete') {
+            $cached = Redis::get("instant-dub:{$sessionId}:vtt-cache");
+            if ($cached) {
+                return response($cached, 200, [
+                    'Content-Type' => 'text/vtt',
+                    'Access-Control-Allow-Origin' => '*',
+                    'Cache-Control' => 'max-age=3600',
+                ]);
+            }
+        }
+
         $total = (int) ($session['total_segments'] ?? 0);
         $vtt = "WEBVTT\n\n";
 
@@ -561,7 +631,11 @@ class InstantDubController extends Controller
             }
         }
 
-        $status = $session['status'] ?? 'preparing';
+        // Cache VTT once session is complete (won't change)
+        if ($status === 'complete') {
+            Redis::setex("instant-dub:{$sessionId}:vtt-cache", 50400, $vtt);
+        }
+
         $cacheControl = $status === 'complete' ? 'max-age=3600' : 'no-cache';
 
         return response($vtt, 200, [
@@ -596,6 +670,7 @@ class InstantDubController extends Controller
         return response($response->body(), 200, [
             'Content-Type' => $contentType,
             'Access-Control-Allow-Origin' => '*',
+            'Cache-Control' => 'max-age=60',
         ]);
     }
 
@@ -608,11 +683,6 @@ class InstantDubController extends Controller
     }
 
     /**
-     * Generate AAC for a TTS segment.
-     * Mixes TTS with original audio at 20% if available.
-     * Pads/trims to exact slot duration (start_time → end_time).
-     */
-    /**
      * Compute the extended slot boundaries for a segment.
      * Segment 0 starts at time 0 (absorbs leading gap).
      * Each segment extends to the next chunk's start_time (absorbs trailing gap).
@@ -622,10 +692,8 @@ class InstantDubController extends Controller
         $startTime = (float) ($chunk['start_time'] ?? 0);
         $endTime = (float) ($chunk['end_time'] ?? 0);
 
-        // First segment absorbs from time 0
         $slotStart = $index === 0 ? 0.0 : $startTime;
 
-        // Extend to next chunk's start_time, or own end_time if last
         $nextJson = Redis::get("instant-dub:{$sessionId}:chunk:" . ($index + 1));
         if ($nextJson) {
             $next = json_decode($nextJson, true);
@@ -637,6 +705,11 @@ class InstantDubController extends Controller
         return [$slotStart, $slotEnd];
     }
 
+    /**
+     * Generate AAC for a TTS segment.
+     * Mixes TTS with original audio at 20% if available.
+     * Pads/trims to exact slot duration.
+     */
     private function generateAacSegment(array $chunk, ?string $originalAudioPath = null, float $slotStart = -1, float $slotEnd = -1): ?string
     {
         $tmpDir = sys_get_temp_dir() . '/hls-dub-' . Str::random(8);
@@ -650,7 +723,6 @@ class InstantDubController extends Controller
             $startTime = (float) ($chunk['start_time'] ?? 0);
             $endTime = (float) ($chunk['end_time'] ?? 0);
 
-            // Use slot bounds if provided, otherwise fall back to chunk bounds
             if ($slotStart < 0) $slotStart = $startTime;
             if ($slotEnd < 0) $slotEnd = $endTime;
 
@@ -662,7 +734,6 @@ class InstantDubController extends Controller
 
             if (!$audioBase64) {
                 if ($hasBg) {
-                    // Background audio only at 20%
                     Process::timeout(20)->run([
                         'ffmpeg', '-y',
                         '-ss', (string) round($slotStart, 3),
@@ -672,7 +743,6 @@ class InstantDubController extends Controller
                         '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
                     ]);
                 } else {
-                    // Silence for the slot
                     Process::timeout(15)->run([
                         'ffmpeg', '-y', '-f', 'lavfi', '-t', (string) $slotDuration,
                         '-i', 'anullsrc=r=44100:cl=mono',
@@ -683,7 +753,6 @@ class InstantDubController extends Controller
                 file_put_contents($mp3File, base64_decode($audioBase64));
 
                 if ($hasBg) {
-                    // Mix TTS (100%) + original audio (20%), with pre-gap delay
                     $delayFilter = $preGapMs > 0 ? "adelay={$preGapMs}|{$preGapMs}," : '';
                     Process::timeout(20)->run([
                         'ffmpeg', '-y',
@@ -697,7 +766,6 @@ class InstantDubController extends Controller
                         '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
                     ]);
                 } else {
-                    // TTS only, with pre-gap delay, padded to slot duration
                     $delayFilter = $preGapMs > 0 ? "adelay={$preGapMs}|{$preGapMs}," : '';
                     Process::timeout(15)->run([
                         'ffmpeg', '-y', '-i', $mp3File,
