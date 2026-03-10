@@ -287,8 +287,12 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             if not data then return 0 end
             local session = cjson.decode(data)
             session['segments_ready'] = (session['segments_ready'] or 0) + 1
-            if session['segments_ready'] >= (session['total_segments'] or 999999) then
+            local total = session['total_segments'] or 999999
+            if session['segments_ready'] >= total then
                 session['status'] = 'complete'
+                session['playable'] = true
+            elseif not session['playable'] and session['segments_ready'] >= math.min(3, total) then
+                session['playable'] = true
             end
             redis.call('SETEX', KEYS[1], 50400, cjson.encode(session))
             return session['segments_ready']

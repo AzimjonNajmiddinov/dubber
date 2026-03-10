@@ -90,6 +90,7 @@ class InstantDubController extends Controller
             'error' => $session['error'] ?? null,
             'segments_ready' => (int) ($session['segments_ready'] ?? 0),
             'total_segments' => (int) ($session['total_segments'] ?? 0),
+            'playable' => !empty($session['playable']),
             'chunks' => $chunks,
         ]);
     }
@@ -202,6 +203,7 @@ class InstantDubController extends Controller
                 $error = $session['error'] ?? null;
                 $progress = $session['progress'] ?? null;
                 $warning = $session['last_warning'] ?? null;
+                $playable = !empty($session['playable']);
 
                 // Send warning event (transient errors like 429)
                 if ($warning && $warning !== $lastWarning) {
@@ -215,6 +217,7 @@ class InstantDubController extends Controller
                         'status' => $status,
                         'segments_ready' => $ready,
                         'total_segments' => $total,
+                        'playable' => $playable,
                         'progress' => $progress,
                         'error' => $error,
                     ]);
