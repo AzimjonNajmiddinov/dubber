@@ -150,16 +150,16 @@ class PrepareInstantDubJob implements ShouldQueue
             Redis::setex($batchKey, 50400, json_encode(array_values($batch)));
         }
 
-        // Store all segments for batch 0 character analysis
+        // Store all segments and full dialogue in Redis (avoids duplicating in every job payload)
         $allSegmentsKey = "instant-dub:{$this->sessionId}:all-segments";
         Redis::setex($allSegmentsKey, 50400, json_encode($allSegments));
+        Redis::setex("instant-dub:{$this->sessionId}:full-dialogue", 50400, $fullDialogueText);
 
         // 5. Dispatch first batch job — it chains the rest
         TranslateInstantDubBatchJob::dispatch(
             $this->sessionId,
             0,
             $totalBatches,
-            $fullDialogueText,
             $this->language,
             $this->translateFrom,
         )->onQueue('default');

@@ -63,9 +63,9 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             if ($driver === 'elevenlabs' && !empty($speakerEntry['voice_id'])) {
                 $this->generateWithElevenLabs($rawMp3, $speakerEntry['voice_id']);
             } elseif ($driver === 'aisha') {
-                $this->generateWithAisha($rawMp3, $tmpDir);
+                $this->generateWithAisha($rawMp3, $speakerEntry);
             } else {
-                $this->generateWithEdgeTts($rawMp3, $tmpDir);
+                $this->generateWithEdgeTts($rawMp3, $tmpDir, $speakerEntry);
             }
 
             // 2. Check duration and speed up if needed
@@ -142,15 +142,9 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         }
     }
 
-    private function generateWithEdgeTts(string $outputMp3, string $tmpDir): void
+    private function generateWithEdgeTts(string $outputMp3, string $tmpDir, array $speakerEntry = []): void
     {
-        // Load per-speaker voice settings from Redis voice map
-        $voiceKey = "instant-dub:{$this->sessionId}:voices";
-        $voiceMapJson = Redis::get($voiceKey);
-        $voiceMap = $voiceMapJson ? json_decode($voiceMapJson, true) : [];
-        $speakerEntry = $voiceMap[$this->speaker] ?? null;
-
-        if ($speakerEntry && !empty($speakerEntry['voice'])) {
+        if (!empty($speakerEntry['voice'])) {
             $voice = $speakerEntry['voice'];
             $pitch = $speakerEntry['pitch'] ?? '+0Hz';
             $rate = $speakerEntry['rate'] ?? '+0%';
@@ -206,13 +200,8 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         }
     }
 
-    private function generateWithAisha(string $outputMp3, string $tmpDir): void
+    private function generateWithAisha(string $outputMp3, array $speakerEntry = []): void
     {
-        $voiceKey = "instant-dub:{$this->sessionId}:voices";
-        $voiceMapJson = Redis::get($voiceKey);
-        $voiceMap = $voiceMapJson ? json_decode($voiceMapJson, true) : [];
-        $speakerEntry = $voiceMap[$this->speaker] ?? null;
-
         $model = $speakerEntry['voice'] ?? (str_starts_with($this->speaker, 'F') ? 'gulnoza' : 'jaxongir');
         $mood = $speakerEntry['mood'] ?? 'neutral';
 
@@ -289,19 +278,21 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
     private function incrementReady(): void
     {
         $sessionKey = "instant-dub:{$this->sessionId}";
-        $sessionJson = Redis::get($sessionKey);
 
-        if (!$sessionJson) {
-            return;
-        }
+        // Atomic increment + completion check via Lua script
+        // Avoids race condition where concurrent jobs read same counter
+        $lua = <<<'LUA'
+            local data = redis.call('GET', KEYS[1])
+            if not data then return 0 end
+            local session = cjson.decode(data)
+            session['segments_ready'] = (session['segments_ready'] or 0) + 1
+            if session['segments_ready'] >= (session['total_segments'] or 999999) then
+                session['status'] = 'complete'
+            end
+            redis.call('SETEX', KEYS[1], 50400, cjson.encode(session))
+            return session['segments_ready']
+        LUA;
 
-        $session = json_decode($sessionJson, true);
-        $session['segments_ready'] = ($session['segments_ready'] ?? 0) + 1;
-
-        if ($session['segments_ready'] >= ($session['total_segments'] ?? PHP_INT_MAX)) {
-            $session['status'] = 'complete';
-        }
-
-        Redis::setex($sessionKey, 50400, json_encode($session));
+        Redis::eval($lua, 1, $sessionKey);
     }
 }

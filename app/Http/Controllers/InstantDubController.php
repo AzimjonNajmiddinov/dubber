@@ -72,9 +72,15 @@ class InstantDubController extends Controller
         $session = json_decode($sessionJson, true);
         $after = (int) $request->query('after', -1);
 
-        $chunks = [];
+        // Batch fetch up to 20 chunks in one Redis call
+        $chunkKeys = [];
         for ($i = $after + 1; $i < $after + 21; $i++) {
-            $chunkJson = Redis::get("instant-dub:{$sessionId}:chunk:{$i}");
+            $chunkKeys[] = "instant-dub:{$sessionId}:chunk:{$i}";
+        }
+        $chunkValues = Redis::mget($chunkKeys);
+
+        $chunks = [];
+        foreach ($chunkValues as $chunkJson) {
             if (!$chunkJson) break;
             $chunks[] = json_decode($chunkJson, true);
         }
@@ -117,9 +123,15 @@ class InstantDubController extends Controller
             Redis::del("instant-dub:{$sessionId}:elevenlabs-voices");
         }
 
+        // Batch delete all chunk and AAC cache keys
         $total = $session['total_segments'] ?? 0;
-        for ($i = 0; $i < $total; $i++) {
-            Redis::del("instant-dub:{$sessionId}:chunk:{$i}");
+        if ($total > 0) {
+            $keysToDelete = [];
+            for ($i = 0; $i < $total; $i++) {
+                $keysToDelete[] = "instant-dub:{$sessionId}:chunk:{$i}";
+                $keysToDelete[] = "instant-dub:{$sessionId}:aac:{$i}";
+            }
+            Redis::del($keysToDelete);
         }
 
         return response()->json(['status' => 'stopped']);
@@ -360,18 +372,36 @@ class InstantDubController extends Controller
         $total = (int) ($session['total_segments'] ?? 0);
         $status = $session['status'] ?? 'preparing';
 
+        // Batch fetch all chunks in one Redis call (eliminates N+1)
+        $chunkKeys = [];
+        for ($i = 0; $i < $total; $i++) {
+            $chunkKeys[] = "instant-dub:{$sessionId}:chunk:{$i}";
+        }
+        $chunkValues = $total > 0 ? Redis::mget($chunkKeys) : [];
+
+        // Parse chunks, stop at first missing
+        $allChunks = [];
+        foreach ($chunkValues as $chunkJson) {
+            if (!$chunkJson) break;
+            $allChunks[] = json_decode($chunkJson, true);
+        }
+
         // Each segment covers its full "slot" — absorbing trailing gaps.
         // Segment 0 also absorbs leading silence from time 0.
         // Result: exactly N entries, zero gap segments.
         $entries = [];
         $maxDuration = 10;
 
-        for ($i = 0; $i < $total; $i++) {
-            $chunkJson = Redis::get("instant-dub:{$sessionId}:chunk:{$i}");
-            if (!$chunkJson) break;
+        foreach ($allChunks as $i => $chunk) {
+            $startTime = (float) ($chunk['start_time'] ?? 0);
+            $endTime = (float) ($chunk['end_time'] ?? 0);
 
-            $chunk = json_decode($chunkJson, true);
-            [$slotStart, $slotEnd] = $this->computeSlotBounds($sessionId, $i, $chunk);
+            // Compute slot bounds inline (no extra Redis calls)
+            $slotStart = $i === 0 ? 0.0 : $startTime;
+            $slotEnd = isset($allChunks[$i + 1])
+                ? (float) ($allChunks[$i + 1]['start_time'] ?? $endTime)
+                : $endTime;
+
             $slotDur = round(max(0.1, $slotEnd - $slotStart), 3);
 
             $entries[] = [
@@ -464,12 +494,12 @@ class InstantDubController extends Controller
 
         $status = $session['status'] ?? 'preparing';
 
-        // Estimate total duration from the last chunk's end_time
-        $lastChunkJson = null;
-        for ($i = $total - 1; $i >= 0; $i--) {
-            $lastChunkJson = Redis::get("instant-dub:{$sessionId}:chunk:{$i}");
-            if ($lastChunkJson) break;
-        }
+        $total = (int) ($session['total_segments'] ?? 0);
+
+        // Get last chunk's end_time for duration
+        $lastChunkJson = $total > 0
+            ? Redis::get("instant-dub:{$sessionId}:chunk:" . ($total - 1))
+            : null;
         $totalDuration = 3600; // fallback 1h
         if ($lastChunkJson) {
             $lastChunk = json_decode($lastChunkJson, true);
@@ -511,8 +541,14 @@ class InstantDubController extends Controller
         $total = (int) ($session['total_segments'] ?? 0);
         $vtt = "WEBVTT\n\n";
 
+        // Batch fetch all chunks
+        $chunkKeys = [];
         for ($i = 0; $i < $total; $i++) {
-            $chunkJson = Redis::get("instant-dub:{$sessionId}:chunk:{$i}");
+            $chunkKeys[] = "instant-dub:{$sessionId}:chunk:{$i}";
+        }
+        $chunkValues = $total > 0 ? Redis::mget($chunkKeys) : [];
+
+        foreach ($chunkValues as $chunkJson) {
             if (!$chunkJson) continue;
 
             $chunk = json_decode($chunkJson, true);

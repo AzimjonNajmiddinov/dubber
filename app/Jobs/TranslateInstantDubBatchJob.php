@@ -25,7 +25,6 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         public string $sessionId,
         public int    $batchIndex,
         public int    $totalBatches,
-        public string $fullDialogueText,
         public string $language,
         public string $translateFrom,
     ) {}
@@ -42,6 +41,9 @@ class TranslateInstantDubBatchJob implements ShouldQueue
             return;
         }
 
+        // Load full dialogue from Redis (stored once by PrepareInstantDubJob)
+        $fullDialogueText = Redis::get("instant-dub:{$this->sessionId}:full-dialogue") ?? '';
+
         // Load batch from Redis
         $batchKey = "instant-dub:{$this->sessionId}:batch:{$this->batchIndex}";
         $batchJson = Redis::get($batchKey);
@@ -56,9 +58,9 @@ class TranslateInstantDubBatchJob implements ShouldQueue
 
         // Translate
         if ($this->batchIndex === 0) {
-            $batch = $this->translateBatchZero($batch);
+            $batch = $this->translateBatchZero($batch, $fullDialogueText);
         } else {
-            $batch = $this->translateBatchWithContext($batch);
+            $batch = $this->translateBatchWithContext($batch, $fullDialogueText);
         }
 
         // Merge voice map (additive — don't overwrite existing speakers)
@@ -105,13 +107,15 @@ class TranslateInstantDubBatchJob implements ShouldQueue
                 $this->sessionId,
                 $nextBatch,
                 $this->totalBatches,
-                $this->fullDialogueText,
                 $this->language,
                 $this->translateFrom,
             )->onQueue('default');
         } else {
-            // Last batch — clean up all-segments key
-            Redis::del("instant-dub:{$this->sessionId}:all-segments");
+            // Last batch — clean up
+            Redis::del(
+                "instant-dub:{$this->sessionId}:full-dialogue",
+                "instant-dub:{$this->sessionId}:all-segments",
+            );
             Log::info('All translation batches complete', [
                 'session' => $this->sessionId,
                 'totalBatches' => $this->totalBatches,
@@ -119,14 +123,14 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         }
     }
 
-    private function translateBatchZero(array $batch): array
+    private function translateBatchZero(array $batch, string $fullDialogueText): array
     {
         // Load all segments for character analysis
         $allSegmentsJson = Redis::get("instant-dub:{$this->sessionId}:all-segments");
         $allSegments = $allSegmentsJson ? json_decode($allSegmentsJson, true) : [];
 
         $analysisPrompt = $this->buildAnalysisPrompt($allSegments);
-        $translationMessages = $this->buildTranslationMessages($batch, '', $this->fullDialogueText);
+        $translationMessages = $this->buildTranslationMessages($batch, '', $fullDialogueText);
 
         $characterContext = '';
 
@@ -185,10 +189,10 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         return $batch;
     }
 
-    private function translateBatchWithContext(array $batch): array
+    private function translateBatchWithContext(array $batch, string $fullDialogueText): array
     {
         $characterContext = Redis::get("instant-dub:{$this->sessionId}:character-context") ?? '';
-        $messages = $this->buildTranslationMessages($batch, $characterContext, $this->fullDialogueText);
+        $messages = $this->buildTranslationMessages($batch, $characterContext, $fullDialogueText);
 
         // Try Claude Sonnet first
         $result = $this->callAnthropic($messages);
