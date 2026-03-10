@@ -526,8 +526,14 @@ class InstantDubController extends Controller
             }
 
             // Cache to disk (binary, no base64 overhead, no Redis memory)
-            @mkdir($aacDir, 0755, true);
-            file_put_contents($aacFile, $aacData);
+            try {
+                if (!is_dir($aacDir)) {
+                    mkdir($aacDir, 0755, true);
+                }
+                file_put_contents($aacFile, $aacData);
+            } catch (\Throwable) {
+                // Disk cache failure is non-fatal — serve from memory
+            }
 
             return response($aacData, 200, [
                 'Content-Type' => 'audio/aac',
