@@ -132,7 +132,7 @@ return [
     */
 
     'silenced' => [
-        // App\Jobs\ExampleJob::class,
+        \Laravel\Telescope\Jobs\ProcessPendingUpdates::class,
     ],
 
     'silenced_tags' => [
@@ -199,7 +199,7 @@ return [
     'defaults' => [
         'supervisor-1' => [
             'connection' => 'redis',
-            'queue' => ['chunks', 'segment-processing', 'segment-generation', 'default'],
+            'queue' => ['segment-generation', 'default', 'chunks', 'segment-processing'],
             'balance' => 'auto',
             'autoScalingStrategy' => 'time',
             'maxProcesses' => 1,
@@ -215,7 +215,7 @@ return [
     'environments' => [
         'production' => [
             'supervisor-1' => [
-                'maxProcesses' => 6,
+                'maxProcesses' => 4,
                 'balanceMaxShift' => 2,
                 'balanceCooldown' => 3,
             ],
