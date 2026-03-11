@@ -95,7 +95,6 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
 
             // 3. Encode to base64 and store in Redis
             $audioBase64 = base64_encode(file_get_contents($finalMp3));
-            @unlink($finalMp3);
 
             $chunkKey = "{$sessionKey}:chunk:{$this->index}";
             Redis::setex($chunkKey, 50400, json_encode([
@@ -108,7 +107,11 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                 'audio_duration' => $ttsDuration,
             ]));
 
-            // 4. Increment ready counter
+            // 4. Pre-generate AAC with background audio for HLS
+            $this->generateHlsAac($session, $finalMp3, $ttsDuration);
+            @unlink($finalMp3);
+
+            // 5. Increment ready counter
             $this->incrementReady();
 
             Log::info('Instant dub segment ready', [
@@ -274,6 +277,63 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         ]);
 
         return (float) trim($result->output());
+    }
+
+    private function generateHlsAac(array $session, string $ttsMp3, float $ttsDuration): void
+    {
+        $originalAudioPath = $session['original_audio_path'] ?? null;
+        $hasBg = $originalAudioPath && file_exists($originalAudioPath);
+
+        // Compute slot bounds: segment absorbs surrounding silence
+        $sessionKey = "instant-dub:{$this->sessionId}";
+        $slotStart = $this->index === 0 ? 0.0 : $this->startTime;
+
+        $nextJson = Redis::get("{$sessionKey}:chunk:" . ($this->index + 1));
+        $slotEnd = $nextJson
+            ? (float) (json_decode($nextJson, true)['start_time'] ?? $this->endTime)
+            : $this->endTime;
+
+        $slotDuration = round(max(0.1, $slotEnd - $slotStart), 3);
+        $preGap = max(0, $this->startTime - $slotStart);
+        $preGapMs = (int) round($preGap * 1000);
+
+        $aacDir = storage_path("app/instant-dub/{$this->sessionId}/aac");
+        $aacFile = "{$aacDir}/{$this->index}.aac";
+
+        if (!is_dir($aacDir)) {
+            @mkdir($aacDir, 0755, true);
+        }
+
+        try {
+            if ($hasBg) {
+                $delayFilter = $preGapMs > 0 ? "adelay={$preGapMs}|{$preGapMs}," : '';
+                Process::timeout(20)->run([
+                    'ffmpeg', '-y',
+                    '-i', $ttsMp3,
+                    '-ss', (string) round($slotStart, 3),
+                    '-t', (string) $slotDuration,
+                    '-i', $originalAudioPath,
+                    '-filter_complex',
+                    "[0:a]aresample=44100,{$delayFilter}apad=whole_dur={$slotDuration}[tts];[1:a]volume=0.2[bg];[tts][bg]amix=inputs=2:duration=first:normalize=0",
+                    '-t', (string) $slotDuration,
+                    '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
+                ]);
+            } else {
+                $delayFilter = $preGapMs > 0 ? "adelay={$preGapMs}|{$preGapMs}," : '';
+                Process::timeout(15)->run([
+                    'ffmpeg', '-y', '-i', $ttsMp3,
+                    '-af', "aresample=44100,{$delayFilter}apad=whole_dur={$slotDuration}",
+                    '-t', (string) $slotDuration,
+                    '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
+                ]);
+            }
+        } catch (\Throwable $e) {
+            Log::warning('HLS AAC pre-generation failed', [
+                'session' => $this->sessionId,
+                'index' => $this->index,
+                'error' => $e->getMessage(),
+            ]);
+        }
     }
 
     private function incrementReady(): void
