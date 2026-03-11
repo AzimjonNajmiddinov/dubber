@@ -18,8 +18,8 @@ class TranslateInstantDubBatchJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public int $timeout = 120;
-    public int $tries = 2;
+    public int $timeout = 240;
+    public int $tries = 1; // Retries handled internally; chain must not break
 
     public function __construct(
         public string $sessionId,
@@ -56,27 +56,38 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         $batchNum = $this->batchIndex + 1;
         $this->updateSession(['status' => 'Translating...', 'progress' => "Translating ({$batchNum}/{$this->totalBatches})..."]);
 
-        // Translate
-        if ($this->batchIndex === 0) {
-            $batch = $this->translateBatchZero($batch, $fullDialogueText);
-        } else {
-            $batch = $this->translateBatchWithContext($batch, $fullDialogueText);
+        try {
+            // Translate
+            if ($this->batchIndex === 0) {
+                $batch = $this->translateBatchZero($batch, $fullDialogueText);
+            } else {
+                $batch = $this->translateBatchWithContext($batch, $fullDialogueText);
+            }
+
+            // Merge voice map (additive — don't overwrite existing speakers)
+            $speakers = [];
+            foreach ($batch as $seg) {
+                $tag = $seg['speaker'] ?? 'M1';
+                $speakers[$tag] = true;
+            }
+            $this->mergeVoiceMap($speakers);
+
+            // Clone voices with ElevenLabs on batch 0 (first time speakers are identified)
+            if ($this->batchIndex === 0 && config('dubber.tts.default') === 'elevenlabs') {
+                $this->cloneVoicesWithElevenLabs($batch);
+            }
+        } catch (\Throwable $e) {
+            // Translation failed — dispatch segments with original (untranslated) text
+            // This is better than no audio at all
+            Log::error('Batch translation failed, dispatching with original text', [
+                'session' => $this->sessionId,
+                'batch' => $this->batchIndex,
+                'error' => $e->getMessage(),
+            ]);
+            $this->updateSession(['last_warning' => "Batch {$batchNum} translation failed, using original text"]);
         }
 
-        // Merge voice map (additive — don't overwrite existing speakers)
-        $speakers = [];
-        foreach ($batch as $seg) {
-            $tag = $seg['speaker'] ?? 'M1';
-            $speakers[$tag] = true;
-        }
-        $this->mergeVoiceMap($speakers);
-
-        // Clone voices with ElevenLabs on batch 0 (first time speakers are identified)
-        if ($this->batchIndex === 0 && config('dubber.tts.default') === 'elevenlabs') {
-            $this->cloneVoicesWithElevenLabs($batch);
-        }
-
-        // Dispatch TTS for this batch's segments
+        // Dispatch TTS for this batch's segments — ALWAYS runs, even if translation failed
         $this->updateSession(['progress' => "Generating audio ({$batchNum}/{$this->totalBatches})..."]);
         $globalOffset = $this->batchIndex * 15;
 
@@ -100,7 +111,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         // Clean up batch key
         Redis::del($batchKey);
 
-        // Chain next batch
+        // Chain next batch — ALWAYS chains, even if this batch had errors
         $nextBatch = $this->batchIndex + 1;
         if ($nextBatch < $this->totalBatches) {
             self::dispatch(
@@ -225,7 +236,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
                 'x-api-key' => $apiKey,
                 'anthropic-version' => '2023-06-01',
                 'content-type' => 'application/json',
-            ])->timeout(90)->post('https://api.anthropic.com/v1/messages', [
+            ])->timeout(60)->post('https://api.anthropic.com/v1/messages', [
                 'model' => 'claude-sonnet-4-5-20250514',
                 'max_tokens' => 4096,
                 'system' => $system,
@@ -687,18 +698,32 @@ class TranslateInstantDubBatchJob implements ShouldQueue
 
     public function failed(\Throwable $exception): void
     {
-        Log::error('TranslateInstantDubBatchJob failed', [
+        Log::error('TranslateInstantDubBatchJob failed permanently', [
             'session' => $this->sessionId,
             'batch' => $this->batchIndex,
             'error' => $exception->getMessage(),
         ]);
 
-        $sessionKey = "instant-dub:{$this->sessionId}";
-        $json = Redis::get($sessionKey);
-        if (!$json) return;
-        $session = json_decode($json, true);
-        $session['status'] = 'error';
-        $session['error'] = "Translation failed at batch {$this->batchIndex}: " . Str::limit($exception->getMessage(), 100);
-        Redis::setex($sessionKey, 50400, json_encode($session));
+        // Don't set status to 'error' — let remaining batches continue
+        $this->updateSession([
+            'last_warning' => "Batch {$this->batchIndex} failed: " . Str::limit($exception->getMessage(), 80),
+        ]);
+
+        // Chain next batch even on permanent failure — other batches may succeed
+        $nextBatch = $this->batchIndex + 1;
+        if ($nextBatch < $this->totalBatches) {
+            self::dispatch(
+                $this->sessionId,
+                $nextBatch,
+                $this->totalBatches,
+                $this->language,
+                $this->translateFrom,
+            )->onQueue('default');
+        } else {
+            Redis::del(
+                "instant-dub:{$this->sessionId}:full-dialogue",
+                "instant-dub:{$this->sessionId}:all-segments",
+            );
+        }
     }
 }

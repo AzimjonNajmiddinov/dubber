@@ -511,4 +511,14 @@ class PrepareInstantDubJob implements ShouldQueue
         $session = json_decode($json, true);
         Redis::setex($sessionKey, 50400, json_encode(array_merge($session, $data)));
     }
+
+    public function failed(\Throwable $exception): void
+    {
+        Log::error('PrepareInstantDubJob failed', [
+            'session' => $this->sessionId,
+            'error' => $exception->getMessage(),
+        ]);
+
+        $this->updateStatus('error', 'Preparation failed: ' . Str::limit($exception->getMessage(), 100));
+    }
 }
