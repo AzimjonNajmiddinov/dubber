@@ -19,8 +19,8 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public int $timeout = 60;
-    public int $tries = 2;
+    public int $timeout = 90;
+    public int $tries = 1; // Retries handled internally with fallback voices
 
     public function __construct(
         public string $sessionId,
@@ -142,6 +142,9 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                 'error' => $e->getMessage(),
             ]));
 
+            // Generate background-only AAC so HLS has no gaps
+            $this->generateBackgroundOnlyAac($session);
+
             $this->incrementReady();
         }
     }
@@ -153,41 +156,68 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             $pitch = $speakerEntry['pitch'] ?? '+0Hz';
             $rate = $speakerEntry['rate'] ?? '+0%';
         } else {
-            // Fallback: default voice per language
             $voice = $this->getDefaultEdgeVoice();
             $pitch = '+0Hz';
             $rate = '+0%';
         }
 
-        // Normalize text for TTS (numbers→words, abbreviations, Uzbek oʻ/gʻ fix)
         $text = TextNormalizer::normalize($this->text, $this->language);
-
-        $tmpTxt = "{$tmpDir}/text_{$this->index}.txt";
-        file_put_contents($tmpTxt, $text);
-
-        // Resolve edge-tts binary — may live in ~/.local/bin on cPanel
         $edgeTts = $this->resolveEdgeTts();
 
-        // Use --pitch=VALUE format (not --pitch VALUE) because negative
-        // values like -8Hz get misinterpreted as flags in separate args.
-        $cmd = [
-            $edgeTts, '-f', $tmpTxt,
-            '--voice', $voice,
-            "--pitch={$pitch}",
-            "--rate={$rate}",
-            '--write-media', $outputMp3,
+        // Try up to 3 times: original voice, then default voice, then en-US fallback
+        $attempts = [
+            ['voice' => $voice, 'pitch' => $pitch, 'rate' => $rate],
+            ['voice' => $voice, 'pitch' => '+0Hz', 'rate' => '+0%'],
+            ['voice' => $this->getDefaultEdgeVoice(), 'pitch' => '+0Hz', 'rate' => '+0%'],
         ];
 
-        $result = Process::timeout(30)->run($cmd);
-
-        @unlink($tmpTxt);
-
-        if (!$result->successful() || !file_exists($outputMp3) || filesize($outputMp3) < 500) {
-            throw new \RuntimeException(
-                'Edge TTS failed (bin=' . $edgeTts . '): '
-                . Str::limit($result->errorOutput() ?: $result->output(), 300)
-            );
+        // Deduplicate attempts
+        $seen = [];
+        $uniqueAttempts = [];
+        foreach ($attempts as $a) {
+            $key = "{$a['voice']}|{$a['pitch']}|{$a['rate']}";
+            if (!isset($seen[$key])) {
+                $seen[$key] = true;
+                $uniqueAttempts[] = $a;
+            }
         }
+
+        $lastError = '';
+        foreach ($uniqueAttempts as $i => $attempt) {
+            if ($i > 0) {
+                usleep(500000); // 500ms delay between retries
+            }
+
+            $tmpTxt = "{$tmpDir}/text_{$this->index}.txt";
+            file_put_contents($tmpTxt, $text);
+
+            $cmd = [
+                $edgeTts, '-f', $tmpTxt,
+                '--voice', $attempt['voice'],
+                "--pitch={$attempt['pitch']}",
+                "--rate={$attempt['rate']}",
+                '--write-media', $outputMp3,
+            ];
+
+            $result = Process::timeout(30)->run($cmd);
+            @unlink($tmpTxt);
+
+            if ($result->successful() && file_exists($outputMp3) && filesize($outputMp3) >= 500) {
+                return; // Success
+            }
+
+            $lastError = Str::limit($result->errorOutput() ?: $result->output(), 300);
+            @unlink($outputMp3);
+
+            Log::warning('Edge TTS attempt failed, retrying', [
+                'session' => $this->sessionId,
+                'index' => $this->index,
+                'attempt' => $i + 1,
+                'voice' => $attempt['voice'],
+            ]);
+        }
+
+        throw new \RuntimeException('Edge TTS failed after all retries (bin=' . $edgeTts . '): ' . $lastError);
     }
 
     private function generateWithElevenLabs(string $outputMp3, string $voiceId): void
@@ -277,6 +307,42 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         ]);
 
         return (float) trim($result->output());
+    }
+
+    private function generateBackgroundOnlyAac(array $session): void
+    {
+        $originalAudioPath = $session['original_audio_path'] ?? null;
+        $hasBg = $originalAudioPath && file_exists($originalAudioPath);
+
+        $slotDuration = round(max(0.1, $this->endTime - $this->startTime), 3);
+
+        $aacDir = storage_path("app/instant-dub/{$this->sessionId}/aac");
+        $aacFile = "{$aacDir}/{$this->index}.aac";
+
+        if (!is_dir($aacDir)) {
+            @mkdir($aacDir, 0755, true);
+        }
+
+        try {
+            if ($hasBg) {
+                Process::timeout(15)->run([
+                    'ffmpeg', '-y',
+                    '-ss', (string) round($this->startTime, 3),
+                    '-t', (string) $slotDuration,
+                    '-i', $originalAudioPath,
+                    '-af', 'volume=0.2',
+                    '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
+                ]);
+            } else {
+                Process::timeout(10)->run([
+                    'ffmpeg', '-y', '-f', 'lavfi', '-t', (string) $slotDuration,
+                    '-i', 'anullsrc=r=44100:cl=mono',
+                    '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
+                ]);
+            }
+        } catch (\Throwable) {
+            // Best effort
+        }
     }
 
     private function generateHlsAac(array $session, string $ttsMp3, float $ttsDuration): void
