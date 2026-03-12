@@ -297,40 +297,44 @@ class PrepareInstantDubJob implements ShouldQueue
 
             if (empty($candidates)) return null;
 
-            // Fetch the top priority track first
-            $bestResult = $this->fetchSubtitleTrack($candidates[0], $baseUrl, $resolve);
-
-            // If only 1 track or the best has enough cues, use it
-            if (count($candidates) <= 1 || $bestResult['cues'] >= 30) {
-                Log::info("[DUB] Subtitle track selected: {$candidates[0]['langCode']} ({$bestResult['cues']} cues)", [
-                    'session' => $this->sessionId,
-                    'available' => array_map(fn($t) => "{$t['lang']}({$t['langCode']})", $tracks),
-                ]);
-                return $bestResult['srt'] ? ['srt' => $bestResult['srt'], 'language' => $candidates[0]['langCode']] : null;
+            // Fetch all candidate tracks in parallel-ish, compare cue counts
+            // Always pick by priority, but skip tracks that have <50% cues vs the richest
+            $fetched = [];
+            foreach ($candidates as $i => $candidate) {
+                $fetched[$i] = $this->fetchSubtitleTrack($candidate, $baseUrl, $resolve);
+                if ($i >= 3) break; // max 4 tracks
             }
 
-            // Sparse track — check alternatives
-            Log::info("[DUB] Priority track {$candidates[0]['langCode']} has only {$bestResult['cues']} cues, checking alternatives", [
-                'session' => $this->sessionId,
-            ]);
-
-            $bestCues = $bestResult['cues'];
+            $maxCues = max(array_column($fetched, 'cues'));
             $bestIdx = 0;
 
-            for ($i = 1; $i < count($candidates) && $i < 4; $i++) {
-                $altResult = $this->fetchSubtitleTrack($candidates[$i], $baseUrl, $resolve);
-                if ($altResult['cues'] > $bestCues * 2) {
-                    // Alternative has 2x+ more cues — it's clearly more complete
-                    $bestResult = $altResult;
-                    $bestCues = $altResult['cues'];
+            // Walk priority order, pick first track with >= 50% of the richest
+            foreach ($fetched as $i => $result) {
+                if ($result['cues'] >= $maxCues * 0.5 && $result['srt'] !== '') {
                     $bestIdx = $i;
+                    break;
                 }
             }
 
+            // If no track meets threshold, just use the richest
+            if ($fetched[$bestIdx]['cues'] < $maxCues * 0.5) {
+                foreach ($fetched as $i => $result) {
+                    if ($result['cues'] === $maxCues && $result['srt'] !== '') {
+                        $bestIdx = $i;
+                        break;
+                    }
+                }
+            }
+
+            $bestResult = $fetched[$bestIdx];
             $selected = $candidates[$bestIdx];
-            Log::info("[DUB] Subtitle track selected: {$selected['langCode']} ({$bestCues} cues)", [
+
+            $cueSummary = [];
+            foreach ($fetched as $i => $r) {
+                $cueSummary[] = "{$candidates[$i]['langCode']}:{$r['cues']}";
+            }
+            Log::info("[DUB] Subtitle track selected: {$selected['langCode']} ({$bestResult['cues']} cues) from [" . implode(', ', $cueSummary) . "]", [
                 'session' => $this->sessionId,
-                'available' => array_map(fn($t) => "{$t['lang']}({$t['langCode']})", $tracks),
             ]);
 
             return $bestResult['srt'] ? ['srt' => $bestResult['srt'], 'language' => $selected['langCode']] : null;
