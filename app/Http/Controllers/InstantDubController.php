@@ -432,17 +432,14 @@ class InstantDubController extends Controller
             $allChunks[] = json_decode($chunkJson, true);
         }
 
-        // Each segment covers its full "slot" — absorbing trailing gaps.
+        // Each segment covers its full "slot" — from its start to the next segment's start.
         // Segment 0 also absorbs leading silence from time 0.
-        // Result: exactly N entries, zero gap segments.
         $entries = [];
-        $maxDuration = 10;
 
         foreach ($allChunks as $i => $chunk) {
             $startTime = (float) ($chunk['start_time'] ?? 0);
             $endTime = (float) ($chunk['end_time'] ?? 0);
 
-            // Compute slot bounds inline (no extra Redis calls)
             $slotStart = $i === 0 ? 0.0 : $startTime;
             $slotEnd = isset($allChunks[$i + 1])
                 ? (float) ($allChunks[$i + 1]['start_time'] ?? $endTime)
@@ -454,13 +451,13 @@ class InstantDubController extends Controller
                 'uri' => "dub-segment/{$i}.aac",
                 'duration' => $slotDur,
             ];
-
-            $maxDuration = max($maxDuration, (int) ceil($slotDur));
         }
 
+        // Cap TARGETDURATION at 10s so AVPlayer reloads EVENT playlists frequently.
+        // Individual EXTINF may exceed this for long gaps — AVPlayer handles it fine.
         $m3u8 = "#EXTM3U\n";
         $m3u8 .= "#EXT-X-VERSION:3\n";
-        $m3u8 .= "#EXT-X-TARGETDURATION:{$maxDuration}\n";
+        $m3u8 .= "#EXT-X-TARGETDURATION:10\n";
         $m3u8 .= "#EXT-X-MEDIA-SEQUENCE:0\n";
         $m3u8 .= "#EXT-X-INDEPENDENT-SEGMENTS\n";
 
