@@ -351,7 +351,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         $originalAudioPath = $session['original_audio_path'] ?? null;
         $hasBg = $originalAudioPath && file_exists($originalAudioPath);
 
-        $slotStart = $this->index === 0 ? 0.0 : $this->startTime;
+        $slotStart = $this->startTime;
         $slotEnd = $this->slotEnd ?? $this->endTime;
         $slotDuration = round(max(0.1, $slotEnd - $slotStart), 3);
 

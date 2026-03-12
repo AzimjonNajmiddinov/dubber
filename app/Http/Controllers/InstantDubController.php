@@ -440,7 +440,7 @@ class InstantDubController extends Controller
             $startTime = (float) ($chunk['start_time'] ?? 0);
             $endTime = (float) ($chunk['end_time'] ?? 0);
 
-            $slotStart = $i === 0 ? 0.0 : $startTime;
+            $slotStart = $startTime;
             $slotEnd = isset($allChunks[$i + 1])
                 ? (float) ($allChunks[$i + 1]['start_time'] ?? $endTime)
                 : $endTime;
@@ -453,11 +453,14 @@ class InstantDubController extends Controller
             ];
         }
 
-        // Cap TARGETDURATION at 10s so AVPlayer reloads EVENT playlists frequently.
-        // Individual EXTINF may exceed this for long gaps — AVPlayer handles it fine.
+        // TARGETDURATION must be >= max(EXTINF) per HLS spec; AVPlayer rejects otherwise (-12642).
+        $maxDur = 1;
+        foreach ($entries as $entry) {
+            $maxDur = max($maxDur, (int) ceil($entry['duration']));
+        }
         $m3u8 = "#EXTM3U\n";
         $m3u8 .= "#EXT-X-VERSION:3\n";
-        $m3u8 .= "#EXT-X-TARGETDURATION:10\n";
+        $m3u8 .= "#EXT-X-TARGETDURATION:{$maxDur}\n";
         $m3u8 .= "#EXT-X-MEDIA-SEQUENCE:0\n";
         $m3u8 .= "#EXT-X-INDEPENDENT-SEGMENTS\n";
 
@@ -676,15 +679,14 @@ class InstantDubController extends Controller
 
     /**
      * Compute the extended slot boundaries for a segment.
-     * Segment 0 starts at time 0 (absorbs leading gap).
-     * Each segment extends to the next chunk's start_time (absorbs trailing gap).
+     * Each segment starts at its subtitle time and extends to the next chunk's start_time.
      */
     private function computeSlotBounds(string $sessionId, int $index, array $chunk): array
     {
         $startTime = (float) ($chunk['start_time'] ?? 0);
         $endTime = (float) ($chunk['end_time'] ?? 0);
 
-        $slotStart = $index === 0 ? 0.0 : $startTime;
+        $slotStart = $startTime;
 
         $nextJson = Redis::get("instant-dub:{$sessionId}:chunk:" . ($index + 1));
         if ($nextJson) {
