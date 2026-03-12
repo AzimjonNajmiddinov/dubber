@@ -572,7 +572,12 @@ class TranslateInstantDubBatchJob implements ShouldQueue
                 . '- Vocal descriptions in stage directions: "he said", "she whispered"';
         }
 
+        $titleHint = ($this->title && $this->title !== 'Untitled')
+            ? "\nFILM/SERIES TITLE: \"{$this->title}\" — use your knowledge of this title (plot, characters, relationships, setting) to improve accuracy.\n"
+            : '';
+
         $prompt = "You are analyzing a film/series dialogue to identify speakers. This is CRITICAL for voice dubbing — wrong gender = wrong voice actor.\n"
+            . $titleHint
             . "\n{$sourceLangRules}\n"
             . "\nTASK: Analyze every line carefully. Determine:\n"
             . "1. How many distinct speakers are in this dialogue\n"
@@ -648,14 +653,19 @@ class TranslateInstantDubBatchJob implements ShouldQueue
                 . "- Keep emotional register: anger, love, fear, humor must come through";
         }
 
+        $titleHint = ($this->title && $this->title !== 'Untitled')
+            ? "\nFILM/SERIES TITLE: \"{$this->title}\" — you know this title. Use your knowledge of the plot, characters, their relationships, and the tone of the story to produce accurate, contextually appropriate translations.\n"
+            : '';
+
         $systemPrompt = "You are an expert film/series dubbing translator. Your translations will be spoken aloud by TTS voice actors, so they must sound like natural spoken {$toLang} dialogue — not written subtitles.\n"
+            . $titleHint
             . "\nCHARACTER ANALYSIS:\n{$characterContext}\n"
             . "\nFULL DIALOGUE (for context — do NOT translate this, only use for understanding the scene):\n{$fullDialogue}\n"
             . "{$uzbekRules}\n"
             . "\nTRANSLATION RULES:\n"
-            . "1. Each line has [Ns, max M chars]. Translation MUST fit within that character limit — it will be spoken in that time slot.\n"
+            . "1. Each line has [Ns, max M chars]. Try to stay within the character limit, but NEVER sacrifice meaning to fit — keeping the full meaning is more important than the length limit.\n"
             . "2. Lines may contain annotations like [music], [laughing], [whispering], [door opens] etc. — use these to understand the scene mood and context, but translate ONLY the spoken dialogue part. Do not include the annotations in your translation.\n"
-            . "3. Translate meaning, not words. Rephrase freely to sound natural in {$toLang}.\n"
+            . "3. Translate meaning, not words. Rephrase freely to sound natural in {$toLang}. NEVER drop phrases, skip meaning, or oversimplify — every idea in the original must appear in the translation.\n"
             . "4. Keep the emotional register: if someone is angry, scared, joking, whispering — the translation must convey that.\n"
             . "5. Use the character analysis above to assign the correct speaker tag [M1], [F1], etc. to each line.\n"
             . "6. Preserve interruptions, hesitations, and conversational flow.\n"
