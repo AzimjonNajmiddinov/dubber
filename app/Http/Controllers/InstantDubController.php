@@ -440,7 +440,7 @@ class InstantDubController extends Controller
             $startTime = (float) ($chunk['start_time'] ?? 0);
             $endTime = (float) ($chunk['end_time'] ?? 0);
 
-            $slotStart = $startTime;
+            $slotStart = $i === 0 ? 0.0 : $startTime;
             $slotEnd = isset($allChunks[$i + 1])
                 ? (float) ($allChunks[$i + 1]['start_time'] ?? $endTime)
                 : $endTime;
@@ -679,14 +679,15 @@ class InstantDubController extends Controller
 
     /**
      * Compute the extended slot boundaries for a segment.
-     * Each segment starts at its subtitle time and extends to the next chunk's start_time.
+     * Segment 0 starts at time 0 (absorbs leading gap for timeline alignment).
+     * Each segment extends to the next chunk's start_time.
      */
     private function computeSlotBounds(string $sessionId, int $index, array $chunk): array
     {
         $startTime = (float) ($chunk['start_time'] ?? 0);
         $endTime = (float) ($chunk['end_time'] ?? 0);
 
-        $slotStart = $startTime;
+        $slotStart = $index === 0 ? 0.0 : $startTime;
 
         $nextJson = Redis::get("instant-dub:{$sessionId}:chunk:" . ($index + 1));
         if ($nextJson) {
