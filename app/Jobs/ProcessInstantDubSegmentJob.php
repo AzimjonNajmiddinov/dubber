@@ -369,7 +369,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                     '-ss', (string) round($slotStart, 3),
                     '-t', (string) $slotDuration,
                     '-i', $originalAudioPath,
-                    '-af', 'volume=0.3',
+                    '-af', 'volume=0.5',
                     '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
                 ]);
             } else {
@@ -416,7 +416,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                     '-t', (string) $slotDuration,
                     '-i', $originalAudioPath,
                     '-filter_complex',
-                    "[0:a]aresample=44100,{$delayFilter}apad=whole_dur={$slotDuration}[tts];[1:a]volume=0.3[bg];[tts][bg]amix=inputs=2:duration=first:normalize=0",
+                    "[0:a]aresample=44100,{$delayFilter}apad=whole_dur={$slotDuration}[tts];[1:a]volume=0.5[bg];[tts][bg]amix=inputs=2:duration=first:normalize=0",
                     '-t', (string) $slotDuration,
                     '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
                 ]);
