@@ -71,27 +71,37 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                 $this->generateWithEdgeTts($rawMp3, $tmpDir, $speakerEntry);
             }
 
-            // 2. Check duration and speed up if needed
+            // 2. Adjust tempo so TTS fills the timeslot naturally
             $ttsDuration = $this->getAudioDuration($rawMp3);
             $finalMp3 = $rawMp3;
 
-            if ($ttsDuration > $slotDuration * 1.05 && $slotDuration > 0.5) {
+            if ($slotDuration > 0.5 && $ttsDuration > 0.1) {
                 $ratio = $ttsDuration / $slotDuration;
-                // Gentle speed-up only — cap at 1.15x to avoid robotic sound
-                $tempo = min($ratio, 1.15);
+                $tempo = null;
 
-                $speedMp3 = "{$tmpDir}/seg_{$this->index}_fast.mp3";
-                $speedResult = Process::timeout(15)->run([
-                    'ffmpeg', '-y', '-i', $rawMp3,
-                    '-filter:a', "atempo={$tempo}",
-                    '-codec:a', 'libmp3lame', '-b:a', '128k',
-                    $speedMp3,
-                ]);
+                if ($ratio > 1.05) {
+                    // Too long — speed up (cap 1.15x to avoid robotic sound)
+                    $tempo = min($ratio, 1.15);
+                } elseif ($ratio < 0.9) {
+                    // Too short — slow down to fill ~95% of slot (cap 0.8x to stay natural)
+                    $targetDuration = $slotDuration * 0.95;
+                    $tempo = max($ttsDuration / $targetDuration, 0.8);
+                }
 
-                if ($speedResult->successful() && file_exists($speedMp3) && filesize($speedMp3) > 200) {
-                    @unlink($rawMp3);
-                    $finalMp3 = $speedMp3;
-                    $ttsDuration = $this->getAudioDuration($finalMp3);
+                if ($tempo !== null) {
+                    $adjustedMp3 = "{$tmpDir}/seg_{$this->index}_adj.mp3";
+                    $result = Process::timeout(15)->run([
+                        'ffmpeg', '-y', '-i', $rawMp3,
+                        '-filter:a', "atempo={$tempo}",
+                        '-codec:a', 'libmp3lame', '-b:a', '128k',
+                        $adjustedMp3,
+                    ]);
+
+                    if ($result->successful() && file_exists($adjustedMp3) && filesize($adjustedMp3) > 200) {
+                        @unlink($rawMp3);
+                        $finalMp3 = $adjustedMp3;
+                        $ttsDuration = $this->getAudioDuration($finalMp3);
+                    }
                 }
             }
 
