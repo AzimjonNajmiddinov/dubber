@@ -499,6 +499,12 @@ class InstantDubController extends Controller
             ]);
         }
 
+        Log::warning("[DUB] Segment {$index} pre-gen AAC missing, using fallback", [
+            'session' => $sessionId,
+            'exists' => file_exists($aacFile),
+            'size' => file_exists($aacFile) ? filesize($aacFile) : 'N/A',
+        ]);
+
         // Fallback: generate on-demand if pre-gen missed (e.g. race condition, old session)
         $chunkJson = Redis::get("instant-dub:{$sessionId}:chunk:{$index}");
         if (!$chunkJson) {
