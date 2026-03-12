@@ -20,7 +20,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     public int $timeout = 90;
-    public int $tries = 1; // Retries handled internally with fallback voices
+    public int $tries = 2; // Allow 1 retry (covers horizon restart killing in-flight jobs)
 
     public function __construct(
         public string $sessionId,
@@ -154,6 +154,39 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
 
             $this->incrementReady();
         }
+    }
+
+    public function failed(\Throwable $exception): void
+    {
+        // Queue worker killed the job (timeout/max attempts) — bypassed our try/catch.
+        // Still increment ready counter so the session can reach "complete".
+        $sessionKey = "instant-dub:{$this->sessionId}";
+
+        $chunkKey = "{$sessionKey}:chunk:{$this->index}";
+        if (!Redis::exists($chunkKey)) {
+            Redis::setex($chunkKey, 50400, json_encode([
+                'index' => $this->index,
+                'start_time' => $this->startTime,
+                'end_time' => $this->endTime,
+                'text' => $this->text,
+                'speaker' => $this->speaker,
+                'audio_base64' => null,
+                'audio_duration' => 0,
+                'error' => 'Job killed: ' . Str::limit($exception->getMessage(), 100),
+            ]));
+        }
+
+        $sessionJson = Redis::get($sessionKey);
+        if ($sessionJson) {
+            $session = json_decode($sessionJson, true);
+            $this->generateBackgroundOnlyAac($session);
+        }
+
+        $this->incrementReady();
+
+        Log::error("[DUB] Segment #{$this->index} killed by worker: " . Str::limit($exception->getMessage(), 100), [
+            'session' => $this->sessionId,
+        ]);
     }
 
     private function generateWithEdgeTts(string $outputMp3, string $tmpDir, array $speakerEntry = []): void
