@@ -30,6 +30,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         public float  $endTime,
         public string $language,
         public string $speaker = 'M1',
+        public ?float $slotEnd = null,
     ) {}
 
     public function handle(): void
@@ -317,7 +318,9 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         $originalAudioPath = $session['original_audio_path'] ?? null;
         $hasBg = $originalAudioPath && file_exists($originalAudioPath);
 
-        $slotDuration = round(max(0.1, $this->endTime - $this->startTime), 3);
+        $slotStart = $this->index === 0 ? 0.0 : $this->startTime;
+        $slotEnd = $this->slotEnd ?? $this->endTime;
+        $slotDuration = round(max(0.1, $slotEnd - $slotStart), 3);
 
         $aacDir = storage_path("app/instant-dub/{$this->sessionId}/aac");
         $aacFile = "{$aacDir}/{$this->index}.aac";
@@ -330,7 +333,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             if ($hasBg) {
                 Process::timeout(15)->run([
                     'ffmpeg', '-y',
-                    '-ss', (string) round($this->startTime, 3),
+                    '-ss', (string) round($slotStart, 3),
                     '-t', (string) $slotDuration,
                     '-i', $originalAudioPath,
                     '-af', 'volume=0.2',
@@ -353,14 +356,9 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         $originalAudioPath = $session['original_audio_path'] ?? null;
         $hasBg = $originalAudioPath && file_exists($originalAudioPath);
 
-        // Compute slot bounds: segment absorbs surrounding silence
-        $sessionKey = "instant-dub:{$this->sessionId}";
+        // Compute slot bounds: segment absorbs surrounding silence until next segment starts
         $slotStart = $this->index === 0 ? 0.0 : $this->startTime;
-
-        $nextJson = Redis::get("{$sessionKey}:chunk:" . ($this->index + 1));
-        $slotEnd = $nextJson
-            ? (float) (json_decode($nextJson, true)['start_time'] ?? $this->endTime)
-            : $this->endTime;
+        $slotEnd = $this->slotEnd ?? $this->endTime;
 
         $slotDuration = round(max(0.1, $slotEnd - $slotStart), 3);
         $preGap = max(0, $this->startTime - $slotStart);

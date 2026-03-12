@@ -135,10 +135,13 @@ class PrepareInstantDubJob implements ShouldQueue
                 $text = str_replace('`', '\'', $text);
                 if ($text === '') continue;
 
+                $slotEnd = isset($segments[$i + 1]) ? $segments[$i + 1]['start'] : null;
+
                 ProcessInstantDubSegmentJob::dispatch(
                     $this->sessionId, $i, $text,
                     $seg['start'], $seg['end'], $this->language,
                     $seg['speaker'] ?? 'M1',
+                    $slotEnd,
                 )->onQueue('segment-generation');
                 $dispatched++;
             }

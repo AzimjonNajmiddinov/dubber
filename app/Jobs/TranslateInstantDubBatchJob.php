@@ -93,11 +93,27 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         $this->updateSession(['progress' => "Generating audio ({$batchNum}/{$this->totalBatches})..."]);
         $globalOffset = $this->batchIndex * 15;
 
+        // Peek at next batch's first segment to get slotEnd for this batch's last segment
+        $nextBatchFirstStart = null;
+        $nextBatchIdx = $this->batchIndex + 1;
+        if ($nextBatchIdx < $this->totalBatches) {
+            $nextBatchJson = Redis::get("instant-dub:{$this->sessionId}:batch:{$nextBatchIdx}");
+            if ($nextBatchJson) {
+                $nextBatch = json_decode($nextBatchJson, true);
+                $nextBatchFirstStart = (float) ($nextBatch[0]['start'] ?? 0);
+            }
+        }
+
         foreach ($batch as $localIdx => $seg) {
             $text = trim($seg['text']);
             $text = trim(preg_replace('/\[[^\]]*\]\s*/', '', $text));
             $text = str_replace('`', '\'', $text);
             if ($text === '') continue;
+
+            // slotEnd = next segment's start (within batch or from next batch)
+            $slotEnd = isset($batch[$localIdx + 1])
+                ? (float) $batch[$localIdx + 1]['start']
+                : $nextBatchFirstStart; // null for last segment of last batch
 
             ProcessInstantDubSegmentJob::dispatch(
                 $this->sessionId,
@@ -107,6 +123,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
                 $seg['end'],
                 $this->language,
                 $seg['speaker'] ?? 'M1',
+                $slotEnd,
             )->onQueue('segment-generation');
         }
 
