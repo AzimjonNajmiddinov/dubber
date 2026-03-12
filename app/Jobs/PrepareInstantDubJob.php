@@ -445,7 +445,7 @@ class PrepareInstantDubJob implements ShouldQueue
             $tmpDir = storage_path("app/instant-dub/{$this->sessionId}");
             @mkdir($tmpDir, 0755, true);
             $localPlaylist = "{$tmpDir}/audio_playlist.m3u8";
-            $outputPath = "{$tmpDir}/original_audio.m4a";
+            $outputPath = "{$tmpDir}/original_audio.aac";
 
             file_put_contents($localPlaylist, $rewritten);
 
@@ -455,16 +455,26 @@ class PrepareInstantDubJob implements ShouldQueue
                 '-i', $localPlaylist,
                 '-vn', '-ac', '1', '-ar', '44100',
                 '-c:a', 'aac', '-b:a', '96k',
+                '-f', 'adts',
                 $outputPath,
             ]);
 
             @unlink($localPlaylist);
 
             if ($result->successful() && file_exists($outputPath) && filesize($outputPath) > 1000) {
-                Log::info("[DUB] Original audio downloaded (" . round(filesize($outputPath) / 1024) . " KB)", [
+                // Verify the file is actually readable
+                $probe = Process::timeout(10)->run(['ffprobe', '-hide_banner', '-loglevel', 'error', $outputPath]);
+                if ($probe->successful()) {
+                    Log::info("[DUB] Original audio downloaded (" . round(filesize($outputPath) / 1024) . " KB)", [
+                        'session' => $this->sessionId,
+                    ]);
+                    return $outputPath;
+                }
+                Log::warning("[DUB] Original audio file corrupt, deleting", [
                     'session' => $this->sessionId,
+                    'error' => Str::limit($probe->errorOutput(), 200),
                 ]);
-                return $outputPath;
+                @unlink($outputPath);
             }
 
             Log::warning("[DUB] Original audio download failed", [

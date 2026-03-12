@@ -405,9 +405,11 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         }
 
         try {
+            $delayFilter = $preGapMs > 0 ? "adelay={$preGapMs}|{$preGapMs}," : '';
+            $mixed = false;
+
             if ($hasBg) {
-                $delayFilter = $preGapMs > 0 ? "adelay={$preGapMs}|{$preGapMs}," : '';
-                Process::timeout(20)->run([
+                $result = Process::timeout(20)->run([
                     'ffmpeg', '-y',
                     '-i', $ttsMp3,
                     '-ss', (string) round($slotStart, 3),
@@ -418,8 +420,16 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                     '-t', (string) $slotDuration,
                     '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
                 ]);
-            } else {
-                $delayFilter = $preGapMs > 0 ? "adelay={$preGapMs}|{$preGapMs}," : '';
+                $mixed = $result->successful() && file_exists($aacFile) && filesize($aacFile) > 100;
+                if (!$mixed) {
+                    Log::warning("[DUB] Segment #{$this->index} bg mix failed, falling back to TTS-only", [
+                        'session' => $this->sessionId,
+                        'error' => Str::limit($result->errorOutput(), 200),
+                    ]);
+                }
+            }
+
+            if (!$mixed) {
                 Process::timeout(15)->run([
                     'ffmpeg', '-y', '-i', $ttsMp3,
                     '-af', "aresample=44100,{$delayFilter}apad=whole_dur={$slotDuration}",
