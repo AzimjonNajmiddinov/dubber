@@ -255,7 +255,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
                 'anthropic-version' => '2023-06-01',
                 'content-type' => 'application/json',
             ])->timeout(60)->post('https://api.anthropic.com/v1/messages', [
-                'model' => 'claude-sonnet-4-5-20250514',
+                'model' => 'claude-sonnet-4-6-20250819',
                 'max_tokens' => 4096,
                 'system' => $system,
                 'messages' => $anthropicMessages,
@@ -311,7 +311,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
                     ->withHeaders($headers)
                     ->timeout(60)
                     ->post('https://api.anthropic.com/v1/messages', [
-                        'model' => 'claude-sonnet-4-5-20250514',
+                        'model' => 'claude-sonnet-4-6-20250819',
                         'max_tokens' => 4096,
                         'system' => $analysisSystem,
                         'messages' => $analysisUserMessages,
@@ -320,7 +320,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
                     ->withHeaders($headers)
                     ->timeout(90)
                     ->post('https://api.anthropic.com/v1/messages', [
-                        'model' => 'claude-sonnet-4-5-20250514',
+                        'model' => 'claude-sonnet-4-6-20250819',
                         'max_tokens' => 4096,
                         'system' => $translationSystem,
                         'messages' => $translationUserMessages,
