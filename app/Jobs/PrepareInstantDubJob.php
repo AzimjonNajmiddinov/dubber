@@ -232,8 +232,14 @@ class PrepareInstantDubJob implements ShouldQueue
 
             $master = $masterResp->body();
             $baseUrl = preg_replace('#/[^/]+$#', '/', $url);
+            $query = parse_url($url, PHP_URL_QUERY);
+            $resolve = function ($base, $rel) use ($query) {
+                if (str_starts_with($rel, 'http')) return $rel;
+                $r = rtrim($base, '/') . '/' . $rel;
+                return $query ? "{$r}?{$query}" : $r;
+            };
 
-            // Parse all subtitle tracks: find each EXT-X-MEDIA line with TYPE=SUBTITLES
+            // Parse all subtitle tracks
             preg_match_all('/^#EXT-X-MEDIA:.*TYPE=SUBTITLES.*$/m', $master, $subLines);
             $tracks = [];
             foreach ($subLines[0] ?? [] as $line) {
@@ -243,13 +249,10 @@ class PrepareInstantDubJob implements ShouldQueue
             }
 
             if (empty($tracks)) {
-                // Fallback: try simpler match for any subtitle URI
                 if (!preg_match('/TYPE=SUBTITLES.*?URI="([^"]+)"/', $master, $m)) return null;
                 $tracks = [['lang' => 'unknown', 'uri' => $m[1]]];
             }
 
-            // Priority: ru > uz > en/tr > first track
-            // Russian→Uzbek translation is highest quality, prefer it over raw Uzbek subs
             $langPriority = ['ru', 'uz', 'en', 'tr'];
             $langPatterns = [
                 'ru' => ['ru', 'rus', 'russian'],
@@ -258,95 +261,127 @@ class PrepareInstantDubJob implements ShouldQueue
                 'tr' => ['tr', 'tur', 'turkish'],
             ];
 
-            $selectedUri = $tracks[0]['uri'];
-            $detectedLang = 'unknown';
-
-            // Try to detect language of first track as fallback
-            $firstLang = strtolower($tracks[0]['lang']);
-            foreach ($langPatterns as $code => $patterns) {
-                foreach ($patterns as $p) {
-                    if (str_contains($firstLang, $p)) {
-                        $detectedLang = $code;
-                        break 2;
+            // Classify each track by language code
+            foreach ($tracks as &$track) {
+                $track['langCode'] = 'unknown';
+                $rawLang = strtolower($track['lang']);
+                foreach ($langPatterns as $code => $patterns) {
+                    foreach ($patterns as $p) {
+                        if (str_contains($rawLang, $p)) {
+                            $track['langCode'] = $code;
+                            break 2;
+                        }
                     }
                 }
             }
+            unset($track);
 
-            // Now pick best track by priority
+            // Build priority-ordered candidates
+            $candidates = [];
             foreach ($langPriority as $preferred) {
                 foreach ($tracks as $track) {
-                    $lang = strtolower($track['lang']);
-                    $matched = false;
-                    foreach ($langPatterns[$preferred] as $p) {
-                        if (str_contains($lang, $p)) { $matched = true; break; }
-                    }
-                    if ($matched) {
-                        $selectedUri = $track['uri'];
-                        $detectedLang = $preferred;
-                        break 2;
+                    if ($track['langCode'] === $preferred) {
+                        $candidates[] = $track;
+                        break; // one per language
                     }
                 }
             }
+            // Add any unmatched tracks at the end
+            foreach ($tracks as $track) {
+                $dominated = false;
+                foreach ($candidates as $c) {
+                    if ($c['uri'] === $track['uri']) { $dominated = true; break; }
+                }
+                if (!$dominated) $candidates[] = $track;
+            }
 
-            Log::info("[DUB] Subtitle track selected: {$detectedLang}", [
+            if (empty($candidates)) return null;
+
+            // Fetch the top priority track first
+            $bestResult = $this->fetchSubtitleTrack($candidates[0], $baseUrl, $resolve);
+
+            // If only 1 track or the best has enough cues, use it
+            if (count($candidates) <= 1 || $bestResult['cues'] >= 30) {
+                Log::info("[DUB] Subtitle track selected: {$candidates[0]['langCode']} ({$bestResult['cues']} cues)", [
+                    'session' => $this->sessionId,
+                    'available' => array_map(fn($t) => "{$t['lang']}({$t['langCode']})", $tracks),
+                ]);
+                return $bestResult['srt'] ? ['srt' => $bestResult['srt'], 'language' => $candidates[0]['langCode']] : null;
+            }
+
+            // Sparse track — check alternatives
+            Log::info("[DUB] Priority track {$candidates[0]['langCode']} has only {$bestResult['cues']} cues, checking alternatives", [
                 'session' => $this->sessionId,
-                'uri' => $selectedUri,
-                'available' => array_map(fn($t) => $t['lang'], $tracks),
             ]);
 
-            $query = parse_url($url, PHP_URL_QUERY);
-            $resolve = function ($base, $rel) use ($url, $query) {
-                if (str_starts_with($rel, 'http')) return $rel;
-                $r = rtrim($base, '/') . '/' . $rel;
-                return $query ? "{$r}?{$query}" : $r;
-            };
+            $bestCues = $bestResult['cues'];
+            $bestIdx = 0;
 
-            $subsUrl = $resolve($baseUrl, $selectedUri);
-            $subsResp = Http::timeout(10)->get($subsUrl);
-            if ($subsResp->failed()) return null;
-
-            $subsBase = preg_replace('#/[^/]+$#', '/', $subsUrl);
-            preg_match_all('/^(\S+\.vtt)$/m', $subsResp->body(), $vttFiles);
-            if (empty($vttFiles[1])) return null;
-
-            // Fetch VTT segments concurrently via pool
-            $allVtt = '';
-            $pool = Http::pool(function ($pool) use ($vttFiles, $subsBase, $resolve) {
-                foreach ($vttFiles[1] as $i => $vttFile) {
-                    $pool->as((string) $i)->timeout(8)->get($resolve($subsBase, $vttFile));
-                }
-            });
-
-            foreach ($pool as $resp) {
-                if ($resp instanceof \Illuminate\Http\Client\Response && $resp->successful()) {
-                    $allVtt .= "\n" . $resp->body();
+            for ($i = 1; $i < count($candidates) && $i < 4; $i++) {
+                $altResult = $this->fetchSubtitleTrack($candidates[$i], $baseUrl, $resolve);
+                if ($altResult['cues'] > $bestCues * 2) {
+                    // Alternative has 2x+ more cues — it's clearly more complete
+                    $bestResult = $altResult;
+                    $bestCues = $altResult['cues'];
+                    $bestIdx = $i;
                 }
             }
 
-            // Parse VTT → SRT (inline for speed)
-            preg_match_all(
-                '/(\d+)\n(\d{2}:\d{2}:\d{2}\.\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}\.\d{3})\n((?:(?!\n\n|\nWEBVTT).)+)/s',
-                $allVtt, $matches, PREG_SET_ORDER
-            );
+            $selected = $candidates[$bestIdx];
+            Log::info("[DUB] Subtitle track selected: {$selected['langCode']} ({$bestCues} cues)", [
+                'session' => $this->sessionId,
+                'available' => array_map(fn($t) => "{$t['lang']}({$t['langCode']})", $tracks),
+            ]);
 
-            $seen = [];
-            $srt = '';
-            $num = 0;
-            foreach ($matches as $m) {
-                $key = "{$m[1]}|{$m[2]}|{$m[3]}";
-                if (isset($seen[$key])) continue;
-                $seen[$key] = true;
-                $text = trim($m[4]);
-                if ($text === '' || preg_match('/^\[.*\]$/', $text) || preg_match('/^♪/', $text)) continue;
-                $num++;
-                $srt .= "{$num}\n" . str_replace('.', ',', $m[2]) . ' --> ' . str_replace('.', ',', $m[3]) . "\n{$text}\n\n";
-            }
-
-            return $srt ? ['srt' => $srt, 'language' => $detectedLang] : null;
+            return $bestResult['srt'] ? ['srt' => $bestResult['srt'], 'language' => $selected['langCode']] : null;
         } catch (\Throwable $e) {
             Log::error("[DUB] HLS sub fetch failed", ['session' => $this->sessionId, 'error' => $e->getMessage()]);
             return null;
         }
+    }
+
+    private function fetchSubtitleTrack(array $track, string $baseUrl, callable $resolve): array
+    {
+        $subsUrl = $resolve($baseUrl, $track['uri']);
+        $subsResp = Http::timeout(10)->get($subsUrl);
+        if ($subsResp->failed()) return ['srt' => '', 'cues' => 0];
+
+        $subsBase = preg_replace('#/[^/]+$#', '/', $subsUrl);
+        preg_match_all('/^(\S+\.vtt)$/m', $subsResp->body(), $vttFiles);
+        if (empty($vttFiles[1])) return ['srt' => '', 'cues' => 0];
+
+        $allVtt = '';
+        $pool = Http::pool(function ($pool) use ($vttFiles, $subsBase, $resolve) {
+            foreach ($vttFiles[1] as $i => $vttFile) {
+                $pool->as((string) $i)->timeout(8)->get($resolve($subsBase, $vttFile));
+            }
+        });
+
+        foreach ($pool as $resp) {
+            if ($resp instanceof \Illuminate\Http\Client\Response && $resp->successful()) {
+                $allVtt .= "\n" . $resp->body();
+            }
+        }
+
+        preg_match_all(
+            '/(\d+)\n(\d{2}:\d{2}:\d{2}\.\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}\.\d{3})\n((?:(?!\n\n|\nWEBVTT).)+)/s',
+            $allVtt, $matches, PREG_SET_ORDER
+        );
+
+        $seen = [];
+        $srt = '';
+        $num = 0;
+        foreach ($matches as $m) {
+            $key = "{$m[1]}|{$m[2]}|{$m[3]}";
+            if (isset($seen[$key])) continue;
+            $seen[$key] = true;
+            $text = trim($m[4]);
+            if ($text === '' || preg_match('/^\[.*\]$/', $text) || preg_match('/^♪/', $text)) continue;
+            $num++;
+            $srt .= "{$num}\n" . str_replace('.', ',', $m[2]) . ' --> ' . str_replace('.', ',', $m[3]) . "\n{$text}\n\n";
+        }
+
+        return ['srt' => $srt, 'cues' => $num];
     }
 
     private function downloadOriginalAudio(): ?string
