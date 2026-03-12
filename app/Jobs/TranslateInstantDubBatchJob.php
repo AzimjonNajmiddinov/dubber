@@ -21,6 +21,8 @@ class TranslateInstantDubBatchJob implements ShouldQueue
     public int $timeout = 240;
     public int $tries = 1; // Retries handled internally; chain must not break
 
+    private string $title = 'Untitled';
+
     public function __construct(
         public string $sessionId,
         public int    $batchIndex,
@@ -36,8 +38,10 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         $sessionJson = Redis::get($sessionKey);
         if (!$sessionJson) return;
         $session = json_decode($sessionJson, true);
+        $this->title = $session['title'] ?? 'Untitled';
+
         if (($session['status'] ?? '') === 'stopped') {
-            Log::info('Batch translation stopped', ['session' => $this->sessionId, 'batch' => $this->batchIndex]);
+            Log::info("[DUB] [{$this->title}] Batch {$this->batchIndex} translation stopped", ['session' => $this->sessionId]);
             return;
         }
 
@@ -48,7 +52,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         $batchKey = "instant-dub:{$this->sessionId}:batch:{$this->batchIndex}";
         $batchJson = Redis::get($batchKey);
         if (!$batchJson) {
-            Log::error('Batch data missing from Redis', ['session' => $this->sessionId, 'batch' => $this->batchIndex]);
+            Log::error("[DUB] [{$this->title}] Batch {$this->batchIndex} data missing from Redis", ['session' => $this->sessionId]);
             return;
         }
         $batch = json_decode($batchJson, true);
@@ -79,10 +83,8 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         } catch (\Throwable $e) {
             // Translation failed — dispatch segments with original (untranslated) text
             // This is better than no audio at all
-            Log::error('Batch translation failed, dispatching with original text', [
+            Log::error("[DUB] [{$this->title}] Batch {$this->batchIndex} translation failed, using original text: " . Str::limit($e->getMessage(), 100), [
                 'session' => $this->sessionId,
-                'batch' => $this->batchIndex,
-                'error' => $e->getMessage(),
             ]);
             $this->updateSession(['last_warning' => "Batch {$batchNum} translation failed, using original text"]);
         }
@@ -127,9 +129,8 @@ class TranslateInstantDubBatchJob implements ShouldQueue
                 "instant-dub:{$this->sessionId}:full-dialogue",
                 "instant-dub:{$this->sessionId}:all-segments",
             );
-            Log::info('All translation batches complete', [
+            Log::info("[DUB] [{$this->title}] All {$this->totalBatches} translation batches complete", [
                 'session' => $this->sessionId,
-                'totalBatches' => $this->totalBatches,
             ]);
         }
     }
@@ -152,7 +153,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
 
             if ($results['analysis'] !== null) {
                 $characterContext = $results['analysis'];
-                Log::info('Character analysis (Claude)', ['session' => $this->sessionId, 'result' => Str::limit($characterContext, 200)]);
+                Log::info("[DUB] [{$this->title}] Character analysis (Claude): " . Str::limit($characterContext, 200), ['session' => $this->sessionId]);
             }
 
             if ($results['translation'] !== null) {
@@ -162,7 +163,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
                 return $batch;
             }
 
-            Log::warning('Claude failed for batch 0, falling back to GPT-4o', ['session' => $this->sessionId]);
+            Log::warning("[DUB] [{$this->title}] Claude failed for batch 0, falling back to GPT-4o", ['session' => $this->sessionId]);
         }
 
         // Fallback: GPT-4o parallel
@@ -185,13 +186,13 @@ class TranslateInstantDubBatchJob implements ShouldQueue
 
             if (isset($pool['analysis']) && $pool['analysis'] instanceof \Illuminate\Http\Client\Response && $pool['analysis']->successful()) {
                 $characterContext = trim($pool['analysis']->json('choices.0.message.content') ?? '');
-                Log::info('Character analysis (GPT)', ['session' => $this->sessionId, 'result' => Str::limit($characterContext, 200)]);
+                Log::info("[DUB] [{$this->title}] Character analysis (GPT): " . Str::limit($characterContext, 200), ['session' => $this->sessionId]);
             }
 
             if (isset($pool['translation']) && $pool['translation'] instanceof \Illuminate\Http\Client\Response && $pool['translation']->successful()) {
                 $batch = $this->parseTranslationResponse($batch, $pool['translation']->json('choices.0.message.content') ?? '');
             } else {
-                Log::warning('Batch 0 GPT translation also failed', ['session' => $this->sessionId]);
+                Log::warning("[DUB] [{$this->title}] Batch 0 GPT translation also failed", ['session' => $this->sessionId]);
             }
         }
 
@@ -247,17 +248,13 @@ class TranslateInstantDubBatchJob implements ShouldQueue
                 return trim($response->json('content.0.text') ?? '');
             }
 
-            Log::warning('Anthropic API error', [
+            Log::warning("[DUB] Anthropic API error (batch {$this->batchIndex}): HTTP " . $response->status(), [
                 'session' => $this->sessionId,
-                'batch' => $this->batchIndex,
-                'status' => $response->status(),
                 'body' => Str::limit($response->body(), 200),
             ]);
         } catch (\Throwable $e) {
-            Log::warning('Anthropic API exception', [
+            Log::warning("[DUB] Anthropic API exception (batch {$this->batchIndex}): " . $e->getMessage(), [
                 'session' => $this->sessionId,
-                'batch' => $this->batchIndex,
-                'error' => $e->getMessage(),
             ]);
         }
 
@@ -321,9 +318,8 @@ class TranslateInstantDubBatchJob implements ShouldQueue
                 $results['translation'] = trim($pool['translation']->json('content.0.text') ?? '');
             }
         } catch (\Throwable $e) {
-            Log::warning('Anthropic parallel failed', [
+            Log::warning("[DUB] Anthropic parallel call failed: " . $e->getMessage(), [
                 'session' => $this->sessionId,
-                'error' => $e->getMessage(),
             ]);
         }
 
@@ -349,11 +345,8 @@ class TranslateInstantDubBatchJob implements ShouldQueue
                     return $this->parseTranslationResponse($batch, $response->json('choices.0.message.content') ?? '');
                 }
 
-                Log::warning('Batch translation API error', [
+                Log::warning("[DUB] Batch {$this->batchIndex} translation API error (attempt {$attempt}): HTTP " . $response->status(), [
                     'session' => $this->sessionId,
-                    'batch' => $this->batchIndex,
-                    'attempt' => $attempt,
-                    'status' => $response->status(),
                     'body' => Str::limit($response->body(), 200),
                 ]);
 
@@ -366,11 +359,8 @@ class TranslateInstantDubBatchJob implements ShouldQueue
 
                 $this->updateSession(['last_warning' => "Translation API error {$response->status()}, retrying..."]);
             } catch (\Throwable $e) {
-                Log::warning('Batch translation failed', [
+                Log::warning("[DUB] Batch {$this->batchIndex} translation failed (attempt {$attempt}): " . $e->getMessage(), [
                     'session' => $this->sessionId,
-                    'batch' => $this->batchIndex,
-                    'attempt' => $attempt,
-                    'error' => $e->getMessage(),
                 ]);
                 $this->updateSession(['last_warning' => "Translation error: " . Str::limit($e->getMessage(), 100)]);
             }
@@ -431,15 +421,12 @@ class TranslateInstantDubBatchJob implements ShouldQueue
                     $voiceId = $client->addVoice("dub-{$this->sessionId}-{$tag}", [$samplePath]);
                     $voiceMap[$tag] = ['driver' => 'elevenlabs', 'voice_id' => $voiceId];
                     $clonedVoiceIds[] = $voiceId;
-                    Log::info('ElevenLabs voice cloned for speaker (translation path)', [
+                    Log::info("[DUB] [{$this->title}] ElevenLabs voice cloned: {$tag} → {$voiceId}", [
                         'session' => $this->sessionId,
-                        'speaker' => $tag,
-                        'voice_id' => $voiceId,
                     ]);
                 } catch (\Throwable $e) {
-                    Log::warning('ElevenLabs clone failed for speaker, keeping fallback', [
+                    Log::warning("[DUB] [{$this->title}] ElevenLabs clone failed for {$tag}, keeping fallback", [
                         'session' => $this->sessionId,
-                        'speaker' => $tag,
                         'error' => $e->getMessage(),
                     ]);
                 } finally {
@@ -452,7 +439,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
                 Redis::setex("instant-dub:{$this->sessionId}:elevenlabs-voices", 50400, json_encode($clonedVoiceIds));
             }
         } catch (\Throwable $e) {
-            Log::warning('ElevenLabs voice cloning failed entirely (translation path)', [
+            Log::warning("[DUB] [{$this->title}] ElevenLabs voice cloning failed entirely", [
                 'session' => $this->sessionId,
                 'error' => $e->getMessage(),
             ]);
@@ -531,11 +518,8 @@ class TranslateInstantDubBatchJob implements ShouldQueue
 
         Redis::setex($voiceKey, 50400, json_encode($voiceMap));
 
-        Log::info('Voice map merged', [
+        Log::info("[DUB] [{$this->title}] Voice map merged (batch {$this->batchIndex}): new=" . implode(',', array_keys($newSpeakers)) . " total=" . implode(',', array_keys($voiceMap)), [
             'session' => $this->sessionId,
-            'batch' => $this->batchIndex,
-            'newSpeakers' => array_keys($newSpeakers),
-            'totalSpeakers' => array_keys($voiceMap),
         ]);
     }
 
@@ -698,10 +682,14 @@ class TranslateInstantDubBatchJob implements ShouldQueue
 
     public function failed(\Throwable $exception): void
     {
-        Log::error('TranslateInstantDubBatchJob failed permanently', [
+        $title = 'Untitled';
+        $sessionJson = Redis::get("instant-dub:{$this->sessionId}");
+        if ($sessionJson) {
+            $title = json_decode($sessionJson, true)['title'] ?? 'Untitled';
+        }
+
+        Log::error("[DUB] [{$title}] Batch {$this->batchIndex} failed permanently: " . $exception->getMessage(), [
             'session' => $this->sessionId,
-            'batch' => $this->batchIndex,
-            'error' => $exception->getMessage(),
         ]);
 
         // Don't set status to 'error' — let remaining batches continue

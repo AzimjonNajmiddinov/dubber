@@ -46,6 +46,8 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             return;
         }
 
+        $title = $session['title'] ?? 'Untitled';
+
         try {
             $slotDuration = $this->endTime - $this->startTime;
 
@@ -114,19 +116,13 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             // 5. Increment ready counter
             $this->incrementReady();
 
-            Log::info('Instant dub segment ready', [
+            Log::info("[DUB] [{$title}] Segment #{$this->index} ready ({$this->speaker}, " . round($ttsDuration, 2) . "s): " . Str::limit($this->text, 60), [
                 'session' => $this->sessionId,
-                'index' => $this->index,
-                'speaker' => $this->speaker,
-                'text' => Str::limit($this->text, 60),
-                'duration' => round($ttsDuration, 2),
             ]);
 
         } catch (\Throwable $e) {
-            Log::error('Instant dub segment failed', [
+            Log::error("[DUB] [{$title}] Segment #{$this->index} FAILED: " . $e->getMessage(), [
                 'session' => $this->sessionId,
-                'index' => $this->index,
-                'error' => $e->getMessage(),
             ]);
 
             // Store error chunk so polling doesn't stall
@@ -209,11 +205,8 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             $lastError = Str::limit($result->errorOutput() ?: $result->output(), 300);
             @unlink($outputMp3);
 
-            Log::warning('Edge TTS attempt failed, retrying', [
+            Log::warning("[DUB] Segment #{$this->index} Edge TTS attempt " . ($i + 1) . " failed ({$attempt['voice']}), retrying", [
                 'session' => $this->sessionId,
-                'index' => $this->index,
-                'attempt' => $i + 1,
-                'voice' => $attempt['voice'],
             ]);
         }
 
@@ -394,10 +387,8 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                 ]);
             }
         } catch (\Throwable $e) {
-            Log::warning('HLS AAC pre-generation failed', [
+            Log::warning("[DUB] Segment #{$this->index} HLS AAC pre-generation failed: " . $e->getMessage(), [
                 'session' => $this->sessionId,
-                'index' => $this->index,
-                'error' => $e->getMessage(),
             ]);
         }
     }

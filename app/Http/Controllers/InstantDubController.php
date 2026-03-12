@@ -21,6 +21,7 @@ class InstantDubController extends Controller
             'language' => 'required|string|max:10',
             'video_url' => 'nullable|string',
             'translate_from' => 'nullable|string|max:10',
+            'title' => 'nullable|string|max:255',
         ]);
 
         $sessionId = Str::uuid()->toString();
@@ -28,6 +29,7 @@ class InstantDubController extends Controller
         $videoUrl = $request->input('video_url', '');
         $translateFrom = $request->input('translate_from', '');
         $srt = $request->input('srt', '');
+        $title = $request->input('title', 'Untitled');
 
         // Parse video URL components for HLS
         $urlWithoutQuery = strtok($videoUrl, '?');
@@ -37,6 +39,7 @@ class InstantDubController extends Controller
         // Create session immediately so polling works right away
         $session = [
             'id' => $sessionId,
+            'title' => $title,
             'language' => $language,
             'video_url' => $videoUrl,
             'video_base_url' => $videoBaseUrl,
@@ -54,7 +57,7 @@ class InstantDubController extends Controller
             $sessionId, $videoUrl, $language, $translateFrom, $srt,
         )->onQueue('segment-generation');
 
-        Log::info('Instant dub session created', ['session_id' => $sessionId]);
+        Log::info("[DUB] Session created", ['session' => $sessionId, 'title' => $title, 'language' => $language, 'translate_from' => $translateFrom]);
 
         return response()->json([
             'session_id' => $sessionId,
@@ -104,8 +107,11 @@ class InstantDubController extends Controller
         }
 
         $session = json_decode($sessionJson, true);
+        $title = $session['title'] ?? 'Untitled';
         $session['status'] = 'stopped';
         Redis::setex("instant-dub:{$sessionId}", 300, json_encode($session));
+
+        Log::info("[DUB] [{$title}] Session stopped", ['session' => $sessionId]);
 
         // Clean up original audio file
         if (!empty($session['original_audio_path'])) {

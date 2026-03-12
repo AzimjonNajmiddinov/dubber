@@ -35,6 +35,13 @@ class PrepareInstantDubJob implements ShouldQueue
     {
         $sessionKey = "instant-dub:{$this->sessionId}";
 
+        // Read title from session for logging context
+        $title = 'Untitled';
+        $sessionJson = Redis::get($sessionKey);
+        if ($sessionJson) {
+            $title = json_decode($sessionJson, true)['title'] ?? 'Untitled';
+        }
+
         // 1. Get subtitles — from SRT or fetch from HLS
         $srt = $this->srt;
 
@@ -59,7 +66,7 @@ class PrepareInstantDubJob implements ShouldQueue
         // Override translateFrom with auto-detected language when set to 'auto'
         if ($detectedLang && ($this->translateFrom === 'auto' || $this->translateFrom === '')) {
             $this->translateFrom = $detectedLang;
-            Log::info('Auto-detected subtitle language', ['language' => $detectedLang, 'session' => $this->sessionId]);
+            Log::info("[DUB] [{$title}] Auto-detected subtitle language: {$detectedLang}", ['session' => $this->sessionId]);
         }
 
         // 2. Parse SRT
@@ -136,9 +143,8 @@ class PrepareInstantDubJob implements ShouldQueue
                 $dispatched++;
             }
 
-            Log::info('Instant dub prepared (no translation)', [
+            Log::info("[DUB] [{$title}] Prepared (no translation), {$dispatched} segments dispatched", [
                 'session' => $this->sessionId,
-                'segments' => $dispatched,
             ]);
             return;
         }
@@ -164,13 +170,8 @@ class PrepareInstantDubJob implements ShouldQueue
             $this->translateFrom,
         )->onQueue('default');
 
-        Log::info('Instant dub prepared, translation chain started', [
+        Log::info("[DUB] [{$title}] Prepared, translation chain started: " . count($segments) . " segments, {$totalBatches} batches, {$this->translateFrom}→{$this->language}", [
             'session' => $this->sessionId,
-            'totalSegments' => count($segments),
-            'totalBatches' => $totalBatches,
-            'needsTranslation' => true,
-            'translateFrom' => $this->translateFrom,
-            'detectedLang' => $detectedLang,
         ]);
     }
 
@@ -214,9 +215,8 @@ class PrepareInstantDubJob implements ShouldQueue
         $voiceKey = "instant-dub:{$this->sessionId}:voices";
         Redis::setex($voiceKey, 50400, json_encode($voiceMap));
 
-        Log::info('Voice map built', [
+        Log::info("[DUB] Voice map built: " . implode(', ', array_keys($speakers)), [
             'session' => $this->sessionId,
-            'speakers' => array_keys($speakers),
             'map' => $voiceMap,
         ]);
     }
@@ -285,8 +285,8 @@ class PrepareInstantDubJob implements ShouldQueue
                 }
             }
 
-            Log::info('Subtitle track selected', [
-                'language' => $detectedLang,
+            Log::info("[DUB] Subtitle track selected: {$detectedLang}", [
+                'session' => $this->sessionId,
                 'uri' => $selectedUri,
                 'available' => array_map(fn($t) => $t['lang'], $tracks),
             ]);
@@ -341,7 +341,7 @@ class PrepareInstantDubJob implements ShouldQueue
 
             return $srt ? ['srt' => $srt, 'language' => $detectedLang] : null;
         } catch (\Throwable $e) {
-            Log::error('HLS sub fetch failed', ['error' => $e->getMessage()]);
+            Log::error("[DUB] HLS sub fetch failed", ['session' => $this->sessionId, 'error' => $e->getMessage()]);
             return null;
         }
     }
@@ -419,19 +419,18 @@ class PrepareInstantDubJob implements ShouldQueue
             @unlink($localPlaylist);
 
             if ($result->successful() && file_exists($outputPath) && filesize($outputPath) > 1000) {
-                Log::info('Original audio downloaded', [
+                Log::info("[DUB] Original audio downloaded (" . round(filesize($outputPath) / 1024) . " KB)", [
                     'session' => $this->sessionId,
-                    'size' => filesize($outputPath),
                 ]);
                 return $outputPath;
             }
 
-            Log::warning('Original audio download failed', [
+            Log::warning("[DUB] Original audio download failed", [
                 'session' => $this->sessionId,
                 'error' => Str::limit($result->errorOutput(), 300),
             ]);
         } catch (\Throwable $e) {
-            Log::warning('Original audio download error', [
+            Log::warning("[DUB] Original audio download error", [
                 'session' => $this->sessionId,
                 'error' => $e->getMessage(),
             ]);
@@ -450,7 +449,7 @@ class PrepareInstantDubJob implements ShouldQueue
             $samples = $extractor->extractSamples($originalAudioPath, $segments);
 
             if (empty($samples)) {
-                Log::info('No speaker samples extracted, skipping ElevenLabs cloning', ['session' => $this->sessionId]);
+                Log::info("[DUB] No speaker samples extracted, skipping ElevenLabs cloning", ['session' => $this->sessionId]);
                 return;
             }
 
@@ -464,15 +463,12 @@ class PrepareInstantDubJob implements ShouldQueue
                     $voiceId = $client->addVoice("dub-{$this->sessionId}-{$tag}", [$samplePath]);
                     $voiceMap[$tag] = ['driver' => 'elevenlabs', 'voice_id' => $voiceId];
                     $clonedVoiceIds[] = $voiceId;
-                    Log::info('ElevenLabs voice cloned for speaker', [
+                    Log::info("[DUB] ElevenLabs voice cloned: {$tag} → {$voiceId}", [
                         'session' => $this->sessionId,
-                        'speaker' => $tag,
-                        'voice_id' => $voiceId,
                     ]);
                 } catch (\Throwable $e) {
-                    Log::warning('ElevenLabs clone failed for speaker, keeping fallback', [
+                    Log::warning("[DUB] ElevenLabs clone failed for {$tag}, keeping fallback", [
                         'session' => $this->sessionId,
-                        'speaker' => $tag,
                         'error' => $e->getMessage(),
                     ]);
                 } finally {
@@ -485,7 +481,7 @@ class PrepareInstantDubJob implements ShouldQueue
                 Redis::setex("instant-dub:{$this->sessionId}:elevenlabs-voices", 50400, json_encode($clonedVoiceIds));
             }
         } catch (\Throwable $e) {
-            Log::warning('ElevenLabs voice cloning failed entirely', [
+            Log::warning("[DUB] ElevenLabs voice cloning failed entirely", [
                 'session' => $this->sessionId,
                 'error' => $e->getMessage(),
             ]);
@@ -514,7 +510,7 @@ class PrepareInstantDubJob implements ShouldQueue
 
     public function failed(\Throwable $exception): void
     {
-        Log::error('PrepareInstantDubJob failed', [
+        Log::error("[DUB] PrepareInstantDubJob failed", [
             'session' => $this->sessionId,
             'error' => $exception->getMessage(),
         ]);
