@@ -448,6 +448,7 @@ class InstantDubController extends Controller
 
         $total = (int) ($session['total_segments'] ?? 0);
         $status = $session['status'] ?? 'preparing';
+        $isComplete = in_array($status, ['complete', 'stopped']);
 
         // Batch fetch all chunks in one Redis call (eliminates N+1)
         $chunkKeys = [];
@@ -456,32 +457,59 @@ class InstantDubController extends Controller
         }
         $chunkValues = $total > 0 ? Redis::mget($chunkKeys) : [];
 
-        // Parse chunks, stop at first missing
+        // Parse all available chunks — skip gaps instead of stopping at first missing.
+        // Stopping at gaps caused playlist length to jump suddenly when gaps filled,
+        // confusing AVPlayer into restarting audio from the beginning.
         $allChunks = [];
-        foreach ($chunkValues as $chunkJson) {
-            if (!$chunkJson) break;
-            $allChunks[] = json_decode($chunkJson, true);
+        $lastValidIndex = -1;
+        foreach ($chunkValues as $i => $chunkJson) {
+            if ($chunkJson) {
+                $allChunks[$i] = json_decode($chunkJson, true);
+                $lastValidIndex = $i;
+            }
         }
 
         // Each segment covers its full "slot" — from its start to the next segment's start.
         // Segment 0 also absorbs leading silence from time 0.
         $entries = [];
+        $runningTime = 0.0;
 
-        foreach ($allChunks as $i => $chunk) {
+        for ($i = 0; $i <= $lastValidIndex; $i++) {
+            if (!isset($allChunks[$i])) {
+                // Gap: missing chunk — insert a short silent placeholder segment
+                // so the playlist structure stays stable and AVPlayer doesn't lose position
+                $entries[] = [
+                    'uri' => "dub-segment/{$i}.aac",
+                    'duration' => 0.5,
+                    'programDateTime' => gmdate('Y-m-d\TH:i:s.v\Z', (int) $runningTime),
+                ];
+                $runningTime += 0.5;
+                continue;
+            }
+
+            $chunk = $allChunks[$i];
             $startTime = (float) ($chunk['start_time'] ?? 0);
             $endTime = (float) ($chunk['end_time'] ?? 0);
 
             $slotStart = $i === 0 ? 0.0 : $startTime;
-            $slotEnd = isset($allChunks[$i + 1])
-                ? (float) ($allChunks[$i + 1]['start_time'] ?? $endTime)
-                : $endTime;
+
+            // Find next chunk's start (may skip gaps)
+            $slotEnd = $endTime;
+            for ($j = $i + 1; $j <= $lastValidIndex; $j++) {
+                if (isset($allChunks[$j])) {
+                    $slotEnd = (float) ($allChunks[$j]['start_time'] ?? $endTime);
+                    break;
+                }
+            }
 
             $slotDur = round(max(0.1, $slotEnd - $slotStart), 3);
 
             $entries[] = [
                 'uri' => "dub-segment/{$i}.aac",
                 'duration' => $slotDur,
+                'programDateTime' => gmdate('Y-m-d\TH:i:s.v\Z', (int) $slotStart),
             ];
+            $runningTime = $slotStart + $slotDur;
         }
 
         // TARGETDURATION must be >= max(EXTINF) per HLS spec; AVPlayer rejects otherwise (-12642).
@@ -495,20 +523,24 @@ class InstantDubController extends Controller
         $m3u8 .= "#EXT-X-MEDIA-SEQUENCE:0\n";
         $m3u8 .= "#EXT-X-INDEPENDENT-SEGMENTS\n";
 
-        if ($status !== 'complete') {
+        if (!$isComplete) {
             $m3u8 .= "#EXT-X-PLAYLIST-TYPE:EVENT\n";
         }
 
         foreach ($entries as $entry) {
+            // Program-date-time anchors help AVPlayer maintain position across playlist reloads
+            $m3u8 .= "#EXT-X-PROGRAM-DATE-TIME:{$entry['programDateTime']}\n";
             $m3u8 .= "#EXTINF:{$entry['duration']},\n";
             $m3u8 .= "{$entry['uri']}\n";
         }
 
-        if ($status === 'complete' && count($entries) > 0) {
+        if ($isComplete && count($entries) > 0) {
             $m3u8 .= "#EXT-X-ENDLIST\n";
         }
 
-        $cacheControl = $status === 'complete' ? 'max-age=3600' : 'no-cache';
+        // Use short cache for in-progress playlists instead of no-cache.
+        // no-cache caused AVPlayer to reload too frequently, losing position.
+        $cacheControl = $isComplete ? 'max-age=3600' : 'max-age=3';
 
         return response($m3u8, 200, [
             'Content-Type' => 'application/vnd.apple.mpegurl',
@@ -539,7 +571,8 @@ class InstantDubController extends Controller
         // Fallback: generate on-demand if pre-gen missed (e.g. race condition, old session)
         $chunkJson = Redis::get("instant-dub:{$sessionId}:chunk:{$index}");
         if (!$chunkJson) {
-            return response('Segment not ready', 404);
+            // Return a short silent AAC frame so HLS playback doesn't break on gaps
+            return $this->silentAacResponse();
         }
 
         $session = $this->getSession($sessionId);
@@ -707,6 +740,36 @@ class InstantDubController extends Controller
     }
 
     // ── Private helpers ──
+
+    /**
+     * Return a minimal silent AAC ADTS frame for gap/missing segments.
+     * Prevents HLS playback from breaking on missing chunks.
+     */
+    private function silentAacResponse()
+    {
+        $silentFile = storage_path('app/silent.aac');
+        if (!file_exists($silentFile)) {
+            // Generate a 0.5s silent AAC ADTS file
+            Process::timeout(5)->run([
+                'ffmpeg', '-y', '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=mono',
+                '-t', '0.5', '-c:a', 'aac', '-b:a', '32k', '-f', 'adts', $silentFile,
+            ]);
+        }
+
+        if (file_exists($silentFile)) {
+            return response()->file($silentFile, [
+                'Content-Type' => 'audio/aac',
+                'Access-Control-Allow-Origin' => '*',
+                'Cache-Control' => 'max-age=86400',
+            ]);
+        }
+
+        // Absolute fallback: empty response
+        return response('', 200, [
+            'Content-Type' => 'audio/aac',
+            'Access-Control-Allow-Origin' => '*',
+        ]);
+    }
 
     private function getSession(string $sessionId): ?array
     {
