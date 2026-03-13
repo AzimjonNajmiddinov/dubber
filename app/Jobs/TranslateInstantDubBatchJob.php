@@ -573,7 +573,11 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         }
 
         $titleHint = ($this->title && $this->title !== 'Untitled')
-            ? "\nFILM/SERIES TITLE: \"{$this->title}\" — use your knowledge of this title (plot, characters, relationships, setting) to improve accuracy.\n"
+            ? "\nFILM/SERIES TITLE: \"{$this->title}\" — use your knowledge of this title to:\n"
+            . "- Identify the exact scene based on the dialogue lines and their order in the plot timeline\n"
+            . "- Know which characters appear in this scene and who says what\n"
+            . "- Use character names, genders, ages, and relationships from your knowledge of the film\n"
+            . "- Match dialogue lines to the correct characters based on plot context, not just grammar\n"
             : '';
 
         $prompt = "You are analyzing a film/series dialogue to identify speakers. This is CRITICAL for voice dubbing — wrong gender = wrong voice actor.\n"
