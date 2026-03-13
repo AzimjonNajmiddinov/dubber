@@ -457,50 +457,32 @@ class InstantDubController extends Controller
         }
         $chunkValues = $total > 0 ? Redis::mget($chunkKeys) : [];
 
-        // Parse all available chunks — skip gaps instead of stopping at first missing.
-        // Stopping at gaps caused playlist length to jump suddenly when gaps filled,
-        // confusing AVPlayer into restarting audio from the beginning.
-        $allChunks = [];
-        $lastValidIndex = -1;
+        // Sequential-only: include segments 0..horizon where ALL are present.
+        // EVENT playlists must only append — never modify existing entries.
+        // This prevents player restarts caused by gap placeholders mutating into real segments.
+        $chunks = [];
+        $horizon = -1;
         foreach ($chunkValues as $i => $chunkJson) {
-            if ($chunkJson) {
-                $allChunks[$i] = json_decode($chunkJson, true);
-                $lastValidIndex = $i;
-            }
+            if (!$chunkJson) break; // stop at first gap
+            $chunks[$i] = json_decode($chunkJson, true);
+            $horizon = $i;
         }
 
         // Each segment covers its full "slot" — from its start to the next segment's start.
         // Segment 0 also absorbs leading silence from time 0.
         $entries = [];
-        $runningTime = 0.0;
 
-        for ($i = 0; $i <= $lastValidIndex; $i++) {
-            if (!isset($allChunks[$i])) {
-                // Gap: missing chunk — insert a short silent placeholder segment
-                // so the playlist structure stays stable and AVPlayer doesn't lose position
-                $entries[] = [
-                    'uri' => "dub-segment/{$i}.aac",
-                    'duration' => 0.5,
-                    'programDateTime' => gmdate('Y-m-d\TH:i:s.v\Z', (int) $runningTime),
-                ];
-                $runningTime += 0.5;
-                continue;
-            }
-
-            $chunk = $allChunks[$i];
+        for ($i = 0; $i <= $horizon; $i++) {
+            $chunk = $chunks[$i];
             $startTime = (float) ($chunk['start_time'] ?? 0);
             $endTime = (float) ($chunk['end_time'] ?? 0);
 
             $slotStart = $i === 0 ? 0.0 : $startTime;
 
-            // Find next chunk's start (may skip gaps)
-            $slotEnd = $endTime;
-            for ($j = $i + 1; $j <= $lastValidIndex; $j++) {
-                if (isset($allChunks[$j])) {
-                    $slotEnd = (float) ($allChunks[$j]['start_time'] ?? $endTime);
-                    break;
-                }
-            }
+            // slotEnd = next chunk's start, or this chunk's end for the last one
+            $slotEnd = isset($chunks[$i + 1])
+                ? (float) ($chunks[$i + 1]['start_time'] ?? $endTime)
+                : $endTime;
 
             $slotDur = round(max(0.1, $slotEnd - $slotStart), 3);
 
@@ -509,17 +491,13 @@ class InstantDubController extends Controller
                 'duration' => $slotDur,
                 'programDateTime' => gmdate('Y-m-d\TH:i:s.v\Z', (int) $slotStart),
             ];
-            $runningTime = $slotStart + $slotDur;
         }
 
-        // TARGETDURATION must be >= max(EXTINF) per HLS spec; AVPlayer rejects otherwise (-12642).
-        $maxDur = 1;
-        foreach ($entries as $entry) {
-            $maxDur = max($maxDur, (int) ceil($entry['duration']));
-        }
+        // Fixed TARGETDURATION — must never change between reloads or players restart.
+        // 10s covers all realistic segment durations (most are 2-5s, max ~8s).
         $m3u8 = "#EXTM3U\n";
         $m3u8 .= "#EXT-X-VERSION:3\n";
-        $m3u8 .= "#EXT-X-TARGETDURATION:{$maxDur}\n";
+        $m3u8 .= "#EXT-X-TARGETDURATION:10\n";
         $m3u8 .= "#EXT-X-MEDIA-SEQUENCE:0\n";
         $m3u8 .= "#EXT-X-INDEPENDENT-SEGMENTS\n";
 
@@ -528,7 +506,6 @@ class InstantDubController extends Controller
         }
 
         foreach ($entries as $entry) {
-            // Program-date-time anchors help AVPlayer maintain position across playlist reloads
             $m3u8 .= "#EXT-X-PROGRAM-DATE-TIME:{$entry['programDateTime']}\n";
             $m3u8 .= "#EXTINF:{$entry['duration']},\n";
             $m3u8 .= "{$entry['uri']}\n";
@@ -538,8 +515,6 @@ class InstantDubController extends Controller
             $m3u8 .= "#EXT-X-ENDLIST\n";
         }
 
-        // Use short cache for in-progress playlists instead of no-cache.
-        // no-cache caused AVPlayer to reload too frequently, losing position.
         $cacheControl = $isComplete ? 'max-age=3600' : 'max-age=3';
 
         return response($m3u8, 200, [
