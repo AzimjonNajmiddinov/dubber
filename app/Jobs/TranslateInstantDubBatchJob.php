@@ -170,6 +170,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
 
             if ($results['analysis'] !== null) {
                 $characterContext = $results['analysis'];
+                $this->extractAndStoreTitle($characterContext);
                 Log::info("[DUB] [{$this->title}] Character analysis (Claude): " . Str::limit($characterContext, 200), ['session' => $this->sessionId]);
             }
 
@@ -203,6 +204,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
 
             if (isset($pool['analysis']) && $pool['analysis'] instanceof \Illuminate\Http\Client\Response && $pool['analysis']->successful()) {
                 $characterContext = trim($pool['analysis']->json('choices.0.message.content') ?? '');
+                $this->extractAndStoreTitle($characterContext);
                 Log::info("[DUB] [{$this->title}] Character analysis (GPT): " . Str::limit($characterContext, 200), ['session' => $this->sessionId]);
             }
 
@@ -463,6 +465,24 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         }
     }
 
+    private function extractAndStoreTitle(string $analysisText): void
+    {
+        if (preg_match('/^TITLE:\s*(.+)/m', $analysisText, $m)) {
+            $detected = trim($m[1]);
+            if ($detected && strtolower($detected) !== 'unknown' && $this->title === 'Untitled') {
+                $this->title = $detected;
+                $sessionKey = "instant-dub:{$this->sessionId}";
+                $sessionJson = Redis::get($sessionKey);
+                if ($sessionJson) {
+                    $session = json_decode($sessionJson, true);
+                    $session['title'] = $detected;
+                    Redis::setex($sessionKey, 50400, json_encode($session));
+                }
+                Log::info("[DUB] [{$this->title}] Auto-detected title from dialogue", ['session' => $this->sessionId]);
+            }
+        }
+    }
+
     private function mergeVoiceMap(array $newSpeakers): void
     {
         $voiceKey = "instant-dub:{$this->sessionId}:voices";
@@ -595,7 +615,8 @@ class TranslateInstantDubBatchJob implements ShouldQueue
             . '- A dash "-" at the start of a line often indicates a different speaker from the previous line.' . "\n"
             . "- If someone is addressed by name, that person is the LISTENER, not the speaker.\n"
             . "\nFormat your response EXACTLY like this:\n"
-            . "CHARACTERS:\n"
+            . "TITLE: [identified film/series title, or \"Unknown\" if you can't tell]\n"
+            . "\nCHARACTERS:\n"
             . "M1: [name/role], [age category], [relationship to others]\n"
             . "F1: [name/role], [age category], [relationship to others]\n"
             . "\nLINES:\n"
