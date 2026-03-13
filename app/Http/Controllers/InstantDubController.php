@@ -73,6 +73,27 @@ class InstantDubController extends Controller
         }
 
         $session = json_decode($sessionJson, true);
+        $status = $session['status'] ?? 'preparing';
+        $ready = (int) ($session['segments_ready'] ?? 0);
+        $total = (int) ($session['total_segments'] ?? 0);
+
+        // Auto-complete stale sessions: if status is not complete/stopped but no progress for 2 min
+        if ($total > 0 && $ready > 0 && !in_array($status, ['complete', 'stopped', 'error'])) {
+            $lastProgress = $session['last_progress_at'] ?? null;
+            $now = now()->timestamp;
+
+            if ($lastProgress && ($now - $lastProgress) > 120) {
+                // No progress for 2 minutes — force complete
+                $session['status'] = 'complete';
+                $session['playable'] = true;
+                Redis::setex("instant-dub:{$sessionId}", 50400, json_encode($session));
+                Log::warning("[DUB] Session auto-completed (stale): {$ready}/{$total} segments", [
+                    'session' => $sessionId,
+                    'stale_seconds' => $now - $lastProgress,
+                ]);
+            }
+        }
+
         $after = (int) $request->query('after', -1);
 
         // Batch fetch up to 20 chunks in one Redis call

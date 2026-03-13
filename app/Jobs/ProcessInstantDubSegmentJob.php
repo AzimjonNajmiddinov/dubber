@@ -455,6 +455,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             if not data then return 0 end
             local session = cjson.decode(data)
             session['segments_ready'] = (session['segments_ready'] or 0) + 1
+            session['last_progress_at'] = tonumber(ARGV[1])
             local total = session['total_segments'] or 999999
             if session['segments_ready'] >= total then
                 session['status'] = 'complete'
@@ -466,6 +467,6 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             return session['segments_ready']
         LUA;
 
-        Redis::eval($lua, 1, $sessionKey);
+        Redis::eval($lua, 1, $sessionKey, now()->timestamp);
     }
 }
