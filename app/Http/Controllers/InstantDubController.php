@@ -139,7 +139,15 @@ class InstantDubController extends Controller
             "instant-dub:{$sessionId}:master-playlist",
             "instant-dub:{$sessionId}:vtt-cache",
             "instant-dub:{$sessionId}:voices",
+            "instant-dub:{$sessionId}:full-dialogue",
+            "instant-dub:{$sessionId}:all-segments",
+            "instant-dub:{$sessionId}:character-context",
         ];
+        // Clean up batch keys
+        $totalBatches = (int) ceil($total / 15);
+        for ($i = 0; $i < $totalBatches; $i++) {
+            $keysToDelete[] = "instant-dub:{$sessionId}:batch:{$i}";
+        }
         for ($i = 0; $i < $total; $i++) {
             $keysToDelete[] = "instant-dub:{$sessionId}:chunk:{$i}";
         }
