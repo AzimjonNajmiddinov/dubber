@@ -29,6 +29,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         public int    $totalBatches,
         public string $language,
         public string $translateFrom,
+        public int    $segmentOffset = 0,
     ) {}
 
     public function handle(): void
@@ -91,7 +92,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
 
         // Dispatch TTS for this batch's segments — ALWAYS runs, even if translation failed
         $this->updateSession(['progress' => "Generating audio ({$batchNum}/{$this->totalBatches})..."]);
-        $globalOffset = $this->batchIndex * 15;
+        $globalOffset = $this->segmentOffset + $this->batchIndex * 15;
 
         // Peek at next batch's first segment to get slotEnd for this batch's last segment
         $nextBatchFirstStart = null;
@@ -139,6 +140,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
                 $this->totalBatches,
                 $this->language,
                 $this->translateFrom,
+                $this->segmentOffset,
             )->onQueue('default');
         } else {
             // Last batch — clean up
@@ -158,58 +160,102 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         $allSegmentsJson = Redis::get("instant-dub:{$this->sessionId}:all-segments");
         $allSegments = $allSegmentsJson ? json_decode($allSegmentsJson, true) : [];
 
-        // Step 1: Run analysis FIRST to detect title + characters before translation
+        // Build prompts for both analysis and translation
         $analysisPrompt = $this->buildAnalysisPrompt($allSegments);
-        $characterContext = '';
+        // Translate WITHOUT character context (will be available for batch 1+)
+        $translationMessages = $this->buildTranslationMessages($batch, '', $fullDialogueText);
 
-        // Try Claude for analysis
+        // Run analysis + translation in PARALLEL via Http::pool()
         $anthropicKey = config('services.anthropic.key');
-        $claudeWorking = false;
+        $openaiKey = config('services.openai.key');
+
+        $analysisSystem = '';
+        $analysisUserMessages = [];
+        $translationSystem = '';
+        $translationUserMessages = [];
+
+        foreach ($analysisPrompt as $msg) {
+            if ($msg['role'] === 'system') $analysisSystem = $msg['content'];
+            else $analysisUserMessages[] = $msg;
+        }
+        foreach ($translationMessages as $msg) {
+            if ($msg['role'] === 'system') $translationSystem = $msg['content'];
+            else $translationUserMessages[] = $msg;
+        }
+
+        $characterContext = '';
+        $translationResult = null;
+
         if ($anthropicKey) {
-            $analysisResult = $this->callAnthropic($analysisPrompt);
-            if ($analysisResult !== null) {
-                $characterContext = $analysisResult;
-                $claudeWorking = true;
+            // Fire both requests to Claude in parallel
+            $responses = Http::pool(function ($pool) use ($anthropicKey, $analysisSystem, $analysisUserMessages, $translationSystem, $translationUserMessages) {
+                $pool->as('analysis')
+                    ->withHeaders([
+                        'x-api-key' => $anthropicKey,
+                        'anthropic-version' => '2023-06-01',
+                        'content-type' => 'application/json',
+                    ])
+                    ->timeout(60)
+                    ->post('https://api.anthropic.com/v1/messages', [
+                        'model' => 'claude-sonnet-4-6',
+                        'max_tokens' => 4096,
+                        'system' => $analysisSystem,
+                        'messages' => $analysisUserMessages,
+                    ]);
+
+                $pool->as('translation')
+                    ->withHeaders([
+                        'x-api-key' => $anthropicKey,
+                        'anthropic-version' => '2023-06-01',
+                        'content-type' => 'application/json',
+                    ])
+                    ->timeout(60)
+                    ->post('https://api.anthropic.com/v1/messages', [
+                        'model' => 'claude-sonnet-4-6',
+                        'max_tokens' => 4096,
+                        'system' => $translationSystem,
+                        'messages' => $translationUserMessages,
+                    ]);
+            });
+
+            // Process analysis result
+            if (isset($responses['analysis']) && $responses['analysis'] instanceof \Illuminate\Http\Client\Response && $responses['analysis']->successful()) {
+                $characterContext = trim($responses['analysis']->json('content.0.text') ?? '');
                 $this->extractAndStoreTitle($characterContext);
-                Log::info("[DUB] [{$this->title}] Character analysis (Claude): " . Str::limit($characterContext, 200), ['session' => $this->sessionId]);
+                Log::info("[DUB] [{$this->title}] Character analysis (Claude, parallel): " . Str::limit($characterContext, 200), ['session' => $this->sessionId]);
+            }
+
+            // Process translation result
+            if (isset($responses['translation']) && $responses['translation'] instanceof \Illuminate\Http\Client\Response && $responses['translation']->successful()) {
+                $translationResult = trim($responses['translation']->json('content.0.text') ?? '');
             }
         }
 
-        // Fallback: GPT for analysis
-        if (!$characterContext) {
-            $openaiKey = config('services.openai.key');
-            if ($openaiKey) {
-                try {
-                    $resp = Http::withToken($openaiKey)->timeout(45)
-                        ->post('https://api.openai.com/v1/chat/completions', [
-                            'model' => 'gpt-4o',
-                            'temperature' => 0.1,
-                            'messages' => $analysisPrompt,
-                        ]);
-                    if ($resp->successful()) {
-                        $characterContext = trim($resp->json('choices.0.message.content') ?? '');
-                        $this->extractAndStoreTitle($characterContext);
-                        Log::info("[DUB] [{$this->title}] Character analysis (GPT): " . Str::limit($characterContext, 200), ['session' => $this->sessionId]);
-                    }
-                } catch (\Throwable $e) {
-                    Log::warning("[DUB] [{$this->title}] GPT analysis failed: " . $e->getMessage(), ['session' => $this->sessionId]);
+        // Fallback: GPT for analysis if Claude failed
+        if (!$characterContext && $openaiKey) {
+            try {
+                $resp = Http::withToken($openaiKey)->timeout(45)
+                    ->post('https://api.openai.com/v1/chat/completions', [
+                        'model' => 'gpt-4o',
+                        'temperature' => 0.1,
+                        'messages' => $analysisPrompt,
+                    ]);
+                if ($resp->successful()) {
+                    $characterContext = trim($resp->json('choices.0.message.content') ?? '');
+                    $this->extractAndStoreTitle($characterContext);
+                    Log::info("[DUB] [{$this->title}] Character analysis (GPT fallback): " . Str::limit($characterContext, 200), ['session' => $this->sessionId]);
                 }
+            } catch (\Throwable $e) {
+                Log::warning("[DUB] [{$this->title}] GPT analysis failed: " . $e->getMessage(), ['session' => $this->sessionId]);
             }
         }
 
         // Store character context for subsequent batches
         Redis::setex("instant-dub:{$this->sessionId}:character-context", 50400, $characterContext);
 
-        // Step 2: Now translate WITH the detected title and character context
-        $translationMessages = $this->buildTranslationMessages($batch, $characterContext, $fullDialogueText);
-
-        // Try Claude for translation
-        if ($claudeWorking) {
-            $translationResult = $this->callAnthropic($translationMessages);
-            if ($translationResult !== null) {
-                return $this->parseTranslationResponse($batch, $translationResult);
-            }
-            Log::warning("[DUB] [{$this->title}] Claude translation failed for batch 0, falling back to GPT-4o", ['session' => $this->sessionId]);
+        // Use parallel translation result if available
+        if ($translationResult) {
+            return $this->parseTranslationResponse($batch, $translationResult);
         }
 
         // Fallback: GPT-4o for translation
@@ -721,6 +767,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
                 $this->totalBatches,
                 $this->language,
                 $this->translateFrom,
+                $this->segmentOffset,
             )->onQueue('default');
         } else {
             Redis::del(

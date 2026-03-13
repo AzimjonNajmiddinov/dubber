@@ -2,8 +2,6 @@
 
 namespace App\Jobs;
 
-use App\Services\ElevenLabs\ElevenLabsClient;
-use App\Services\ElevenLabs\SpeakerSampleExtractor;
 use App\Services\SrtParser;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -12,7 +10,6 @@ use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Facades\Redis;
 use Illuminate\Support\Str;
 
@@ -84,12 +81,9 @@ class PrepareInstantDubJob implements ShouldQueue
         }
         $fullDialogueText = implode("\n", $fullDialogue);
 
-        // 2b. Download original audio track for background mixing (20% volume)
-        $this->updateSession(['progress' => 'Downloading background audio...']);
-        $originalAudioPath = $this->downloadOriginalAudio();
-        if ($originalAudioPath) {
-            $this->updateSession(['original_audio_path' => $originalAudioPath]);
-        }
+        // 2b. Dispatch background audio download in parallel (non-blocking)
+        DownloadOriginalAudioJob::dispatch($this->sessionId, $this->videoUrl)
+            ->onQueue('segment-generation');
 
         // 3. Filter to speakable segments
         $needsTranslation = $this->translateFrom && $this->translateFrom !== $this->language;
@@ -111,7 +105,6 @@ class PrepareInstantDubJob implements ShouldQueue
         unset($seg);
         $segments = array_values(array_filter($segments, fn($s) => trim($s['text']) !== ''));
 
-        $totalBatches = (int) ceil(count($segments) / 15);
         $this->updateSession(['total_segments' => count($segments), 'status' => 'processing']);
 
         if (!$needsTranslation) {
@@ -122,11 +115,6 @@ class PrepareInstantDubJob implements ShouldQueue
                 $allSpeakers[$tag] = true;
             }
             $this->buildVoiceMap($allSpeakers);
-
-            // Clone voices with ElevenLabs if driver is set to elevenlabs
-            if ($originalAudioPath && config('dubber.tts.default') === 'elevenlabs') {
-                $this->cloneVoicesWithElevenLabs(array_keys($allSpeakers), $segments, $originalAudioPath);
-            }
 
             $dispatched = 0;
             foreach ($segments as $i => $seg) {
@@ -152,28 +140,47 @@ class PrepareInstantDubJob implements ShouldQueue
             return;
         }
 
-        // 4. Store batches in Redis for per-batch translation jobs
-        $batches = array_chunk($segments, 15);
-        foreach ($batches as $batchIdx => $batch) {
-            $batchKey = "instant-dub:{$this->sessionId}:batch:{$batchIdx}";
-            Redis::setex($batchKey, 50400, json_encode(array_values($batch)));
-        }
-
         // Store all segments and full dialogue in Redis (avoids duplicating in every job payload)
         $allSegmentsKey = "instant-dub:{$this->sessionId}:all-segments";
         Redis::setex($allSegmentsKey, 50400, json_encode($allSegments));
         Redis::setex("instant-dub:{$this->sessionId}:full-dialogue", 50400, $fullDialogueText);
 
-        // 5. Dispatch first batch job — it chains the rest
-        TranslateInstantDubBatchJob::dispatch(
+        // 4. Micro-batch: dispatch first 3 segments for fast translation → immediate TTS
+        $microBatchSize = min(3, count($segments));
+        $microSegments = array_slice($segments, 0, $microBatchSize);
+        $remainingSegments = array_slice($segments, $microBatchSize);
+
+        $nextSegmentStart = !empty($remainingSegments) ? (float) $remainingSegments[0]['start'] : null;
+
+        TranslateInstantDubMicroBatchJob::dispatch(
             $this->sessionId,
-            0,
-            $totalBatches,
+            $microSegments,
             $this->language,
             $this->translateFrom,
+            $nextSegmentStart,
         )->onQueue('default');
 
-        Log::info("[DUB] [{$title}] Prepared, translation chain started: " . count($segments) . " segments, {$totalBatches} batches, {$this->translateFrom}→{$this->language}", [
+        // 5. Store remaining segments in batches for full translation chain
+        $batches = array_chunk($remainingSegments, 15);
+        $totalBatches = count($batches);
+        foreach ($batches as $batchIdx => $batch) {
+            $batchKey = "instant-dub:{$this->sessionId}:batch:{$batchIdx}";
+            Redis::setex($batchKey, 50400, json_encode(array_values($batch)));
+        }
+
+        // 6. Dispatch full translation chain (batch 0 starts from segment offset after micro-batch)
+        if ($totalBatches > 0) {
+            TranslateInstantDubBatchJob::dispatch(
+                $this->sessionId,
+                0,
+                $totalBatches,
+                $this->language,
+                $this->translateFrom,
+                $microBatchSize,
+            )->onQueue('default');
+        }
+
+        Log::info("[DUB] [{$title}] Prepared: {$microBatchSize} micro-batch + " . count($remainingSegments) . " remaining in {$totalBatches} batches, {$this->translateFrom}→{$this->language}", [
             'session' => $this->sessionId,
         ]);
     }
@@ -386,158 +393,6 @@ class PrepareInstantDubJob implements ShouldQueue
         }
 
         return ['srt' => $srt, 'cues' => $num];
-    }
-
-    private function downloadOriginalAudio(): ?string
-    {
-        $videoUrl = $this->videoUrl;
-        if (!str_contains($videoUrl, '.m3u8')) return null;
-
-        try {
-            $masterResp = Http::timeout(10)->get($videoUrl);
-            if ($masterResp->failed()) return null;
-
-            $master = $masterResp->body();
-            $urlWithoutQuery = strtok($videoUrl, '?');
-            $baseUrl = preg_replace('#/[^/]+$#', '/', $urlWithoutQuery);
-            $query = parse_url($videoUrl, PHP_URL_QUERY) ?? '';
-
-            // Find first audio track with URI
-            preg_match_all('/^#EXT-X-MEDIA:.*TYPE=AUDIO.*$/m', $master, $audioLines);
-            $audioUri = null;
-            foreach ($audioLines[0] ?? [] as $line) {
-                if (preg_match('/URI="([^"]+)"/', $line, $m)) {
-                    $audioUri = $m[1];
-                    break;
-                }
-            }
-
-            if (!$audioUri) return null;
-
-            // Resolve to absolute URL
-            $audioPlaylistUrl = str_starts_with($audioUri, 'http') ? $audioUri : $baseUrl . $audioUri;
-            if ($query) $audioPlaylistUrl .= (str_contains($audioPlaylistUrl, '?') ? '&' : '?') . $query;
-
-            // Fetch audio playlist and rewrite segment URIs to absolute (CDN may require auth tokens)
-            $audioResp = Http::timeout(10)->get($audioPlaylistUrl);
-            if ($audioResp->failed()) return null;
-
-            $audioPlaylist = $audioResp->body();
-            $audioBase = preg_replace('#/[^/]+$#', '/', strtok($audioPlaylistUrl, '?'));
-
-            $rewritten = '';
-            foreach (explode("\n", $audioPlaylist) as $pLine) {
-                $trimmed = trim($pLine);
-                if ($trimmed !== '' && !str_starts_with($trimmed, '#')) {
-                    if (!str_starts_with($trimmed, 'http')) {
-                        $trimmed = $audioBase . $trimmed;
-                    }
-                    if ($query && !str_contains($trimmed, '?')) {
-                        $trimmed .= '?' . $query;
-                    }
-                    $rewritten .= $trimmed . "\n";
-                } else {
-                    $rewritten .= $pLine . "\n";
-                }
-            }
-
-            // Save rewritten playlist and download via ffmpeg
-            $tmpDir = storage_path("app/instant-dub/{$this->sessionId}");
-            @mkdir($tmpDir, 0755, true);
-            $localPlaylist = "{$tmpDir}/audio_playlist.m3u8";
-            $outputPath = "{$tmpDir}/original_audio.aac";
-
-            file_put_contents($localPlaylist, $rewritten);
-
-            $result = Process::timeout(300)->run([
-                'ffmpeg', '-y',
-                '-protocol_whitelist', 'file,http,https,tcp,tls,crypto',
-                '-i', $localPlaylist,
-                '-vn', '-ac', '1', '-ar', '44100',
-                '-c:a', 'aac', '-b:a', '96k',
-                '-f', 'adts',
-                $outputPath,
-            ]);
-
-            @unlink($localPlaylist);
-
-            if ($result->successful() && file_exists($outputPath) && filesize($outputPath) > 1000) {
-                // Verify the file is actually readable
-                $probe = Process::timeout(10)->run(['ffprobe', '-hide_banner', '-loglevel', 'error', $outputPath]);
-                if ($probe->successful()) {
-                    Log::info("[DUB] Original audio downloaded (" . round(filesize($outputPath) / 1024) . " KB)", [
-                        'session' => $this->sessionId,
-                    ]);
-                    return $outputPath;
-                }
-                Log::warning("[DUB] Original audio file corrupt, deleting", [
-                    'session' => $this->sessionId,
-                    'error' => Str::limit($probe->errorOutput(), 200),
-                ]);
-                @unlink($outputPath);
-            }
-
-            Log::warning("[DUB] Original audio download failed", [
-                'session' => $this->sessionId,
-                'error' => Str::limit($result->errorOutput(), 300),
-            ]);
-        } catch (\Throwable $e) {
-            Log::warning("[DUB] Original audio download error", [
-                'session' => $this->sessionId,
-                'error' => $e->getMessage(),
-            ]);
-        }
-
-        return null;
-    }
-
-    private function cloneVoicesWithElevenLabs(array $speakers, array $segments, string $originalAudioPath): void
-    {
-        $apiKey = config('services.elevenlabs.api_key', '');
-        if ($apiKey === '') return;
-
-        try {
-            $extractor = new SpeakerSampleExtractor();
-            $samples = $extractor->extractSamples($originalAudioPath, $segments);
-
-            if (empty($samples)) {
-                Log::info("[DUB] No speaker samples extracted, skipping ElevenLabs cloning", ['session' => $this->sessionId]);
-                return;
-            }
-
-            $client = new ElevenLabsClient($apiKey);
-            $voiceKey = "instant-dub:{$this->sessionId}:voices";
-            $voiceMap = json_decode(Redis::get($voiceKey), true) ?? [];
-            $clonedVoiceIds = [];
-
-            foreach ($samples as $tag => $samplePath) {
-                try {
-                    $voiceId = $client->addVoice("dub-{$this->sessionId}-{$tag}", [$samplePath]);
-                    $voiceMap[$tag] = ['driver' => 'elevenlabs', 'voice_id' => $voiceId];
-                    $clonedVoiceIds[] = $voiceId;
-                    Log::info("[DUB] ElevenLabs voice cloned: {$tag} → {$voiceId}", [
-                        'session' => $this->sessionId,
-                    ]);
-                } catch (\Throwable $e) {
-                    Log::warning("[DUB] ElevenLabs clone failed for {$tag}, keeping fallback", [
-                        'session' => $this->sessionId,
-                        'error' => $e->getMessage(),
-                    ]);
-                } finally {
-                    @unlink($samplePath);
-                }
-            }
-
-            if (!empty($clonedVoiceIds)) {
-                Redis::setex($voiceKey, 50400, json_encode($voiceMap));
-                Redis::setex("instant-dub:{$this->sessionId}:elevenlabs-voices", 50400, json_encode($clonedVoiceIds));
-            }
-        } catch (\Throwable $e) {
-            Log::warning("[DUB] ElevenLabs voice cloning failed entirely", [
-                'session' => $this->sessionId,
-                'error' => $e->getMessage(),
-            ]);
-        }
     }
 
     private function updateStatus(string $status, string $error = ''): void
