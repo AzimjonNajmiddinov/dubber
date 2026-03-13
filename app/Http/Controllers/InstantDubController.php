@@ -94,6 +94,8 @@ class InstantDubController extends Controller
             'segments_ready' => (int) ($session['segments_ready'] ?? 0),
             'total_segments' => (int) ($session['total_segments'] ?? 0),
             'playable' => !empty($session['playable']),
+            'title' => $session['title'] ?? 'Untitled',
+            'speakers' => $session['speakers'] ?? null,
             'chunks' => $chunks,
         ]);
     }
