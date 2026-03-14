@@ -128,9 +128,24 @@ class DownloadOriginalAudioJob implements ShouldQueue
             @unlink($localPlaylist);
 
             if ($result->successful() && file_exists($outputPath) && filesize($outputPath) > 1000) {
-                $probe = Process::timeout(10)->run(['ffprobe', '-hide_banner', '-loglevel', 'error', $outputPath]);
+                $probe = Process::timeout(10)->run([
+                    'ffprobe', '-hide_banner', '-loglevel', 'error',
+                    '-show_entries', 'format=duration',
+                    '-of', 'default=nw=1:nk=1',
+                    $outputPath,
+                ]);
                 if ($probe->successful()) {
-                    Log::info("[DUB] Original audio downloaded (" . round(filesize($outputPath) / 1024) . " KB)", [
+                    $audioDuration = (float) trim($probe->output());
+                    // Store audio/video duration in session for trailing silence
+                    if ($audioDuration > 0) {
+                        $sJson = Redis::get("instant-dub:{$this->sessionId}");
+                        if ($sJson) {
+                            $s = json_decode($sJson, true);
+                            $s['video_duration'] = $audioDuration;
+                            Redis::setex("instant-dub:{$this->sessionId}", 50400, json_encode($s));
+                        }
+                    }
+                    Log::info("[DUB] Original audio downloaded (" . round(filesize($outputPath) / 1024) . " KB, " . round($audioDuration) . "s)", [
                         'session' => $this->sessionId,
                     ]);
                     return $outputPath;

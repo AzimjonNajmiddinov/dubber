@@ -526,7 +526,15 @@ class InstantDubController extends Controller
             $m3u8 .= "{$entry['uri']}\n";
         }
 
+        // Add trailing silent segment after last dialogue to prevent player pause
         if ($isComplete && count($entries) > 0) {
+            $tailStart = (float) ($session['tail_start'] ?? 0);
+            $tailDuration = (float) ($session['tail_duration'] ?? 0);
+            if ($tailDuration >= 5) {
+                $m3u8 .= "#EXT-X-PROGRAM-DATE-TIME:" . gmdate('Y-m-d\TH:i:s.v\Z', (int) $tailStart) . "\n";
+                $m3u8 .= "#EXTINF:{$tailDuration},\n";
+                $m3u8 .= "dub-segment/tail.aac\n";
+            }
             $m3u8 .= "#EXT-X-ENDLIST\n";
         }
 
@@ -553,6 +561,21 @@ class InstantDubController extends Controller
         }
 
         // Not ready yet — return short silent AAC (player will retry on next playlist reload)
+        return $this->silentAacResponse();
+    }
+
+    public function hlsTailSegment(string $sessionId)
+    {
+        $aacFile = storage_path("app/instant-dub/{$sessionId}/aac/tail.aac");
+
+        if (file_exists($aacFile) && filesize($aacFile) > 100) {
+            return response()->file($aacFile, [
+                'Content-Type' => 'audio/aac',
+                'Access-Control-Allow-Origin' => '*',
+                'Cache-Control' => 'max-age=86400',
+            ]);
+        }
+
         return $this->silentAacResponse();
     }
 

@@ -128,6 +128,11 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                 $this->generateLeadAac($session);
             }
 
+            // 4c. Pre-generate trailing silent segment for last segment
+            if ($this->slotEnd === null) {
+                $this->generateTailAac($session);
+            }
+
             @unlink($finalMp3);
 
             // 5. Increment ready counter
@@ -445,6 +450,68 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             }
         } catch (\Throwable $e) {
             Log::warning("[DUB] Segment #{$this->index} HLS AAC pre-generation failed: " . $e->getMessage(), [
+                'session' => $this->sessionId,
+            ]);
+        }
+    }
+
+    private function generateTailAac(array $session): void
+    {
+        // Re-read session to get video_duration (may have been set by DownloadOriginalAudioJob)
+        $sessionJson = Redis::get("instant-dub:{$this->sessionId}");
+        if ($sessionJson) {
+            $session = json_decode($sessionJson, true);
+        }
+
+        $videoDuration = (float) ($session['video_duration'] ?? 0);
+        $tailStart = $this->endTime;
+
+        // If we don't know video duration, add 3 minutes of padding
+        $tailEnd = $videoDuration > $tailStart ? $videoDuration : $tailStart + 180;
+        $tailDuration = round($tailEnd - $tailStart, 3);
+
+        if ($tailDuration < 5) return; // No significant tail needed
+
+        $originalAudioPath = $session['original_audio_path'] ?? null;
+        $hasBg = $originalAudioPath && file_exists($originalAudioPath);
+
+        $aacDir = storage_path("app/instant-dub/{$this->sessionId}/aac");
+        $aacFile = "{$aacDir}/tail.aac";
+
+        if (!is_dir($aacDir)) {
+            @mkdir($aacDir, 0755, true);
+        }
+
+        try {
+            if ($hasBg) {
+                Process::timeout(60)->run([
+                    'ffmpeg', '-y',
+                    '-ss', (string) round($tailStart, 3),
+                    '-t', (string) $tailDuration,
+                    '-i', $originalAudioPath,
+                    '-af', 'volume=0.2',
+                    '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
+                ]);
+            } else {
+                Process::timeout(30)->run([
+                    'ffmpeg', '-y', '-f', 'lavfi', '-t', (string) $tailDuration,
+                    '-i', 'anullsrc=r=44100:cl=mono',
+                    '-c:a', 'aac', '-b:a', '32k', '-f', 'adts', $aacFile,
+                ]);
+            }
+
+            if (file_exists($aacFile) && filesize($aacFile) > 100) {
+                // Store tail metadata in session for playlist generation
+                $sessionJson = Redis::get("instant-dub:{$this->sessionId}");
+                if ($sessionJson) {
+                    $s = json_decode($sessionJson, true);
+                    $s['tail_start'] = $tailStart;
+                    $s['tail_duration'] = $tailDuration;
+                    Redis::setex("instant-dub:{$this->sessionId}", 50400, json_encode($s));
+                }
+            }
+        } catch (\Throwable $e) {
+            Log::warning("[DUB] Tail AAC generation failed: " . $e->getMessage(), [
                 'session' => $this->sessionId,
             ]);
         }
