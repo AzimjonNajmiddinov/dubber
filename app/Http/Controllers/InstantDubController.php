@@ -469,7 +469,6 @@ class InstantDubController extends Controller
         }
 
         // Each segment covers its full "slot" — from its start to the next segment's start.
-        // Segment 0 also absorbs leading silence from time 0.
         $entries = [];
 
         for ($i = 0; $i <= $horizon; $i++) {
@@ -477,7 +476,7 @@ class InstantDubController extends Controller
             $startTime = (float) ($chunk['start_time'] ?? 0);
             $endTime = (float) ($chunk['end_time'] ?? 0);
 
-            $slotStart = $i === 0 ? 0.0 : $startTime;
+            $slotStart = $startTime;
 
             // slotEnd = next chunk's start, or this chunk's end for the last one
             $slotEnd = isset($chunks[$i + 1])
@@ -762,7 +761,7 @@ class InstantDubController extends Controller
         $startTime = (float) ($chunk['start_time'] ?? 0);
         $endTime = (float) ($chunk['end_time'] ?? 0);
 
-        $slotStart = $index === 0 ? 0.0 : $startTime;
+        $slotStart = $startTime;
 
         $nextJson = Redis::get("instant-dub:{$sessionId}:chunk:" . ($index + 1));
         if ($nextJson) {
