@@ -122,6 +122,12 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
 
             // 4. Pre-generate AAC with background audio for HLS
             $this->generateHlsAac($session, $finalMp3, $ttsDuration);
+
+            // 4b. Pre-generate lead-in silent segment for timeline alignment
+            if ($this->index === 0 && $this->startTime > 1.0) {
+                $this->generateLeadAac($session);
+            }
+
             @unlink($finalMp3);
 
             // 5. Increment ready counter
@@ -439,6 +445,45 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             }
         } catch (\Throwable $e) {
             Log::warning("[DUB] Segment #{$this->index} HLS AAC pre-generation failed: " . $e->getMessage(), [
+                'session' => $this->sessionId,
+            ]);
+        }
+    }
+
+    private function generateLeadAac(array $session): void
+    {
+        $originalAudioPath = $session['original_audio_path'] ?? null;
+        $hasBg = $originalAudioPath && file_exists($originalAudioPath);
+        $duration = round($this->startTime, 3);
+
+        $aacDir = storage_path("app/instant-dub/{$this->sessionId}/aac");
+        $aacFile = "{$aacDir}/lead.aac";
+
+        if (file_exists($aacFile)) return;
+
+        if (!is_dir($aacDir)) {
+            @mkdir($aacDir, 0755, true);
+        }
+
+        try {
+            if ($hasBg) {
+                Process::timeout(30)->run([
+                    'ffmpeg', '-y',
+                    '-ss', '0',
+                    '-t', (string) $duration,
+                    '-i', $originalAudioPath,
+                    '-af', 'volume=0.2',
+                    '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
+                ]);
+            } else {
+                Process::timeout(15)->run([
+                    'ffmpeg', '-y', '-f', 'lavfi', '-t', (string) $duration,
+                    '-i', 'anullsrc=r=44100:cl=mono',
+                    '-c:a', 'aac', '-b:a', '32k', '-f', 'adts', $aacFile,
+                ]);
+            }
+        } catch (\Throwable $e) {
+            Log::warning("[DUB] Lead-in AAC generation failed: " . $e->getMessage(), [
                 'session' => $this->sessionId,
             ]);
         }
