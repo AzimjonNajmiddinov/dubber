@@ -47,6 +47,7 @@ Route::prefix('instant-dub')->group(function () {
     // HLS endpoints for PlayerKit integration
     Route::get('/{sessionId}/master.m3u8', [InstantDubController::class, 'hlsMaster'])->name('api.instant-dub.master');
     Route::get('/{sessionId}/dub-audio.m3u8', [InstantDubController::class, 'hlsAudioPlaylist'])->name('api.instant-dub.dub-audio');
+    Route::get('/{sessionId}/dub-segment/lead.aac', [InstantDubController::class, 'hlsLeadSegment'])->name('api.instant-dub.dub-lead');
     Route::get('/{sessionId}/dub-segment/{index}.aac', [InstantDubController::class, 'hlsAudioSegment'])->name('api.instant-dub.dub-segment');
     Route::get('/{sessionId}/dub-subtitles.m3u8', [InstantDubController::class, 'hlsSubtitlePlaylist'])->name('api.instant-dub.dub-subtitles');
     Route::get('/{sessionId}/dub-subtitles.vtt', [InstantDubController::class, 'hlsSubtitleVtt'])->name('api.instant-dub.dub-subtitles-vtt');

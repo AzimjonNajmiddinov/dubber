@@ -471,6 +471,18 @@ class InstantDubController extends Controller
         // Each segment covers its full "slot" — from its start to the next segment's start.
         $entries = [];
 
+        // Add silent lead-in segment if first dialogue starts after time 0
+        if ($horizon >= 0) {
+            $firstStart = (float) ($chunks[0]['start_time'] ?? 0);
+            if ($firstStart > 1.0) {
+                $entries[] = [
+                    'uri' => 'dub-segment/lead.aac',
+                    'duration' => round($firstStart, 3),
+                    'programDateTime' => gmdate('Y-m-d\TH:i:s.v\Z', 0),
+                ];
+            }
+        }
+
         for ($i = 0; $i <= $horizon; $i++) {
             $chunk = $chunks[$i];
             $startTime = (float) ($chunk['start_time'] ?? 0);
@@ -492,11 +504,15 @@ class InstantDubController extends Controller
             ];
         }
 
-        // Fixed TARGETDURATION — must never change between reloads or players restart.
-        // 10s covers all realistic segment durations (most are 2-5s, max ~8s).
+        // TARGETDURATION must be >= max segment duration and must never change between reloads.
+        // The lead-in silent segment can be large (e.g., 60s for movies with late dialogue).
+        $maxDur = 10;
+        foreach ($entries as $entry) {
+            $maxDur = max($maxDur, (int) ceil($entry['duration']));
+        }
         $m3u8 = "#EXTM3U\n";
         $m3u8 .= "#EXT-X-VERSION:3\n";
-        $m3u8 .= "#EXT-X-TARGETDURATION:10\n";
+        $m3u8 .= "#EXT-X-TARGETDURATION:{$maxDur}\n";
         $m3u8 .= "#EXT-X-MEDIA-SEQUENCE:0\n";
         $m3u8 .= "#EXT-X-INDEPENDENT-SEGMENTS\n";
 
@@ -521,6 +537,74 @@ class InstantDubController extends Controller
             'Access-Control-Allow-Origin' => '*',
             'Cache-Control' => $cacheControl,
         ]);
+    }
+
+    public function hlsLeadSegment(string $sessionId)
+    {
+        $session = $this->getSession($sessionId);
+        if (!$session) {
+            return response('Session not found', 404);
+        }
+
+        // Determine lead-in duration from first chunk's start_time
+        $chunkJson = Redis::get("instant-dub:{$sessionId}:chunk:0");
+        if (!$chunkJson) {
+            return $this->silentAacResponse();
+        }
+
+        $chunk = json_decode($chunkJson, true);
+        $duration = max(0.5, (float) ($chunk['start_time'] ?? 0));
+
+        // Check for cached lead AAC on disk
+        $aacFile = storage_path("app/instant-dub/{$sessionId}/aac/lead.aac");
+        if (file_exists($aacFile) && filesize($aacFile) > 100) {
+            return response()->file($aacFile, [
+                'Content-Type' => 'audio/aac',
+                'Access-Control-Allow-Origin' => '*',
+                'Cache-Control' => 'max-age=86400',
+            ]);
+        }
+
+        // Generate silent AAC of the right duration, optionally with background audio
+        $originalAudioPath = $session['original_audio_path'] ?? null;
+        $hasBg = $originalAudioPath && file_exists($originalAudioPath);
+
+        $aacDir = dirname($aacFile);
+        if (!is_dir($aacDir)) {
+            @mkdir($aacDir, 0755, true);
+        }
+
+        try {
+            if ($hasBg) {
+                Process::timeout(30)->run([
+                    'ffmpeg', '-y',
+                    '-ss', '0',
+                    '-t', (string) round($duration, 3),
+                    '-i', $originalAudioPath,
+                    '-af', 'volume=0.2',
+                    '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
+                ]);
+            } else {
+                Process::timeout(15)->run([
+                    'ffmpeg', '-y', '-f', 'lavfi', '-t', (string) round($duration, 3),
+                    '-i', 'anullsrc=r=44100:cl=mono',
+                    '-c:a', 'aac', '-b:a', '32k', '-f', 'adts', $aacFile,
+                ]);
+            }
+        } catch (\Throwable) {
+            // Fallback to short silent
+            return $this->silentAacResponse();
+        }
+
+        if (file_exists($aacFile) && filesize($aacFile) > 100) {
+            return response()->file($aacFile, [
+                'Content-Type' => 'audio/aac',
+                'Access-Control-Allow-Origin' => '*',
+                'Cache-Control' => 'max-age=86400',
+            ]);
+        }
+
+        return $this->silentAacResponse();
     }
 
     public function hlsAudioSegment(string $sessionId, int $index)
