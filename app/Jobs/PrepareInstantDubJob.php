@@ -82,8 +82,10 @@ class PrepareInstantDubJob implements ShouldQueue
         $fullDialogueText = implode("\n", $fullDialogue);
 
         // 2b. Dispatch background audio download in parallel (non-blocking)
+        // Must go on 'default' queue — NOT 'segment-generation' — so TTS jobs
+        // (which are on segment-generation with higher priority) aren't blocked.
         DownloadOriginalAudioJob::dispatch($this->sessionId, $this->videoUrl)
-            ->onQueue('segment-generation');
+            ->onQueue('default');
 
         // 3. Filter to speakable segments
         $needsTranslation = $this->translateFrom && $this->translateFrom !== $this->language;
