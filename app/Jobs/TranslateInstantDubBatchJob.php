@@ -9,6 +9,7 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Redis;
@@ -495,6 +496,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
     private function mergeVoiceMap(array $newSpeakers): void
     {
         $voiceKey = "instant-dub:{$this->sessionId}:voices";
+        $lockKey = "instant-dub:{$this->sessionId}:voices-lock";
         $driver = config('dubber.tts.default', 'edge');
 
         if ($driver === 'aisha') {
@@ -532,37 +534,41 @@ class TranslateInstantDubBatchJob implements ShouldQueue
             ];
         }
 
-        // Read existing voice map
-        $existingJson = Redis::get($voiceKey);
-        $voiceMap = $existingJson ? json_decode($existingJson, true) : [];
+        // Use Redis lock to prevent race condition with micro-batch's mergeVoiceMap
+        $lock = Cache::lock($lockKey, 5);
+        $voiceMap = [];
+        $lock->block(5, function () use ($voiceKey, $newSpeakers, $maleVariants, $femaleVariants, $childVariants, &$voiceMap) {
+            $existingJson = Redis::get($voiceKey);
+            $voiceMap = $existingJson ? json_decode($existingJson, true) : [];
 
-        // Count already-assigned variants per gender
-        $maleIdx = 0;
-        $femaleIdx = 0;
-        $childIdx = 0;
-        foreach ($voiceMap as $tag => $voice) {
-            if (str_starts_with($tag, 'C')) $childIdx++;
-            elseif (str_starts_with($tag, 'M')) $maleIdx++;
-            else $femaleIdx++;
-        }
-
-        // Only assign new speakers
-        foreach (array_keys($newSpeakers) as $tag) {
-            if (isset($voiceMap[$tag])) continue;
-
-            if (str_starts_with($tag, 'C')) {
-                $voiceMap[$tag] = $childVariants[$childIdx % count($childVariants)];
-                $childIdx++;
-            } elseif (str_starts_with($tag, 'M')) {
-                $voiceMap[$tag] = $maleVariants[$maleIdx % count($maleVariants)];
-                $maleIdx++;
-            } else {
-                $voiceMap[$tag] = $femaleVariants[$femaleIdx % count($femaleVariants)];
-                $femaleIdx++;
+            // Count already-assigned variants per gender
+            $maleIdx = 0;
+            $femaleIdx = 0;
+            $childIdx = 0;
+            foreach ($voiceMap as $tag => $voice) {
+                if (str_starts_with($tag, 'C')) $childIdx++;
+                elseif (str_starts_with($tag, 'M')) $maleIdx++;
+                else $femaleIdx++;
             }
-        }
 
-        Redis::setex($voiceKey, 50400, json_encode($voiceMap));
+            // Only assign new speakers
+            foreach (array_keys($newSpeakers) as $tag) {
+                if (isset($voiceMap[$tag])) continue;
+
+                if (str_starts_with($tag, 'C')) {
+                    $voiceMap[$tag] = $childVariants[$childIdx % count($childVariants)];
+                    $childIdx++;
+                } elseif (str_starts_with($tag, 'M')) {
+                    $voiceMap[$tag] = $maleVariants[$maleIdx % count($maleVariants)];
+                    $maleIdx++;
+                } else {
+                    $voiceMap[$tag] = $femaleVariants[$femaleIdx % count($femaleVariants)];
+                    $femaleIdx++;
+                }
+            }
+
+            Redis::setex($voiceKey, 50400, json_encode($voiceMap));
+        });
 
         Log::info("[DUB] [{$this->title}] Voice map merged (batch {$this->batchIndex}): new=" . implode(',', array_keys($newSpeakers)) . " total=" . implode(',', array_keys($voiceMap)), [
             'session' => $this->sessionId,

@@ -7,6 +7,7 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Redis;
@@ -199,6 +200,7 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
     private function mergeVoiceMap(array $speakers): void
     {
         $voiceKey = "instant-dub:{$this->sessionId}:voices";
+        $lockKey = "instant-dub:{$this->sessionId}:voices-lock";
         $driver = config('dubber.tts.default', 'edge');
 
         if ($driver === 'aisha') {
@@ -235,32 +237,36 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
             ];
         }
 
-        $existingJson = Redis::get($voiceKey);
-        $voiceMap = $existingJson ? json_decode($existingJson, true) : [];
+        // Use Redis lock to prevent race condition with batch 0's mergeVoiceMap
+        $lock = \Illuminate\Support\Facades\Cache::lock($lockKey, 5);
+        $lock->block(5, function () use ($voiceKey, $speakers, $maleVariants, $femaleVariants, $childVariants) {
+            $existingJson = Redis::get($voiceKey);
+            $voiceMap = $existingJson ? json_decode($existingJson, true) : [];
 
-        $maleIdx = $femaleIdx = $childIdx = 0;
-        foreach ($voiceMap as $tag => $voice) {
-            if (str_starts_with($tag, 'C')) $childIdx++;
-            elseif (str_starts_with($tag, 'M')) $maleIdx++;
-            else $femaleIdx++;
-        }
-
-        foreach (array_keys($speakers) as $tag) {
-            if (isset($voiceMap[$tag])) continue;
-
-            if (str_starts_with($tag, 'C')) {
-                $voiceMap[$tag] = $childVariants[$childIdx % count($childVariants)];
-                $childIdx++;
-            } elseif (str_starts_with($tag, 'M')) {
-                $voiceMap[$tag] = $maleVariants[$maleIdx % count($maleVariants)];
-                $maleIdx++;
-            } else {
-                $voiceMap[$tag] = $femaleVariants[$femaleIdx % count($femaleVariants)];
-                $femaleIdx++;
+            $maleIdx = $femaleIdx = $childIdx = 0;
+            foreach ($voiceMap as $tag => $voice) {
+                if (str_starts_with($tag, 'C')) $childIdx++;
+                elseif (str_starts_with($tag, 'M')) $maleIdx++;
+                else $femaleIdx++;
             }
-        }
 
-        Redis::setex($voiceKey, 50400, json_encode($voiceMap));
+            foreach (array_keys($speakers) as $tag) {
+                if (isset($voiceMap[$tag])) continue;
+
+                if (str_starts_with($tag, 'C')) {
+                    $voiceMap[$tag] = $childVariants[$childIdx % count($childVariants)];
+                    $childIdx++;
+                } elseif (str_starts_with($tag, 'M')) {
+                    $voiceMap[$tag] = $maleVariants[$maleIdx % count($maleVariants)];
+                    $maleIdx++;
+                } else {
+                    $voiceMap[$tag] = $femaleVariants[$femaleIdx % count($femaleVariants)];
+                    $femaleIdx++;
+                }
+            }
+
+            Redis::setex($voiceKey, 50400, json_encode($voiceMap));
+        });
     }
 
     public function failed(\Throwable $exception): void
