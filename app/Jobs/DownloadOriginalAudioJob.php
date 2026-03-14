@@ -45,7 +45,10 @@ class DownloadOriginalAudioJob implements ShouldQueue
                 $session['original_audio_path'] = $originalAudioPath;
                 Redis::setex($sessionKey, 50400, json_encode($session));
             }
-            Log::info("[DUB] [{$title}] Original audio ready, subsequent segments will use background mixing", [
+            // Regenerate lead.aac and early segments that were processed before audio was available
+            $this->remixEarlySegments($originalAudioPath);
+
+            Log::info("[DUB] [{$title}] Original audio ready, early segments remixed", [
                 'session' => $this->sessionId,
             ]);
         } else {
@@ -169,6 +172,105 @@ class DownloadOriginalAudioJob implements ShouldQueue
         }
 
         return null;
+    }
+
+    /**
+     * Regenerate lead.aac and early segments that were created before original audio was available.
+     */
+    private function remixEarlySegments(string $originalAudioPath): void
+    {
+        $sessionKey = "instant-dub:{$this->sessionId}";
+        $aacDir = storage_path("app/instant-dub/{$this->sessionId}/aac");
+
+        if (!is_dir($aacDir)) return;
+
+        try {
+            // Regenerate lead.aac with background audio
+            $leadFile = "{$aacDir}/lead.aac";
+            if (file_exists($leadFile)) {
+                // Get first segment start time from chunk 0
+                $chunk0Json = Redis::get("{$sessionKey}:chunk:0");
+                if ($chunk0Json) {
+                    $chunk0 = json_decode($chunk0Json, true);
+                    $firstStart = (float) ($chunk0['start_time'] ?? 0);
+                    if ($firstStart > 1.0) {
+                        Process::timeout(30)->run([
+                            'ffmpeg', '-y',
+                            '-ss', '0', '-t', (string) round($firstStart, 3),
+                            '-i', $originalAudioPath,
+                            '-af', 'volume=0.2',
+                            '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $leadFile,
+                        ]);
+                        Log::info("[DUB] Remixed lead.aac with background audio ({$firstStart}s)", [
+                            'session' => $this->sessionId,
+                        ]);
+                    }
+                }
+            }
+
+            // Regenerate early segments that have no background audio mixed in
+            // These are segments whose AAC was created before this job finished
+            $sessionJson = Redis::get($sessionKey);
+            if (!$sessionJson) return;
+            $session = json_decode($sessionJson, true);
+            $total = (int) ($session['total_segments'] ?? 0);
+
+            for ($i = 0; $i < min($total, 20); $i++) {
+                $aacFile = "{$aacDir}/{$i}.aac";
+                if (!file_exists($aacFile)) continue;
+
+                $chunkJson = Redis::get("{$sessionKey}:chunk:{$i}");
+                if (!$chunkJson) continue;
+
+                $chunk = json_decode($chunkJson, true);
+                $audioBase64 = $chunk['audio_base64'] ?? null;
+                if (!$audioBase64) continue; // Error chunk, skip
+
+                $startTime = (float) ($chunk['start_time'] ?? 0);
+                $endTime = (float) ($chunk['end_time'] ?? 0);
+
+                // Compute slot end (next segment's start)
+                $nextChunkJson = Redis::get("{$sessionKey}:chunk:" . ($i + 1));
+                $slotEnd = $nextChunkJson
+                    ? (float) (json_decode($nextChunkJson, true)['start_time'] ?? $endTime)
+                    : $endTime;
+
+                $slotDuration = round(max(0.1, $slotEnd - $startTime), 3);
+
+                // Decode TTS audio from Redis to temp file
+                $tmpMp3 = "/tmp/remix_{$this->sessionId}_{$i}.mp3";
+                file_put_contents($tmpMp3, base64_decode($audioBase64));
+
+                $result = Process::timeout(20)->run([
+                    'ffmpeg', '-y',
+                    '-i', $tmpMp3,
+                    '-ss', (string) round($startTime, 3),
+                    '-t', (string) $slotDuration,
+                    '-i', $originalAudioPath,
+                    '-filter_complex',
+                    "[0:a]aresample=44100,apad=whole_dur={$slotDuration}[tts];[1:a]volume=0.2[bg];[tts][bg]amix=inputs=2:duration=first:normalize=0",
+                    '-t', (string) $slotDuration,
+                    '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
+                ]);
+
+                @unlink($tmpMp3);
+
+                if (!$result->successful()) {
+                    Log::warning("[DUB] Remix segment #{$i} failed", [
+                        'session' => $this->sessionId,
+                        'error' => Str::limit($result->errorOutput(), 200),
+                    ]);
+                }
+            }
+
+            Log::info("[DUB] Early segments remixed with background audio", [
+                'session' => $this->sessionId,
+            ]);
+        } catch (\Throwable $e) {
+            Log::warning("[DUB] Remix early segments failed: " . $e->getMessage(), [
+                'session' => $this->sessionId,
+            ]);
+        }
     }
 
     public function failed(\Throwable $exception): void
