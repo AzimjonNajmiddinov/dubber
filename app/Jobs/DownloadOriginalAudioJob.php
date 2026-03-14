@@ -56,6 +56,31 @@ class DownloadOriginalAudioJob implements ShouldQueue
                 'session' => $this->sessionId,
             ]);
         }
+
+        // Clear audio_download_pending and set playable if enough segments are ready
+        $this->markAudioReady();
+    }
+
+    private function markAudioReady(): void
+    {
+        $lua = <<<'LUA'
+            local data = redis.call('GET', KEYS[1])
+            if not data then return 0 end
+            local session = cjson.decode(data)
+            session['audio_download_pending'] = nil
+            local ready = session['segments_ready'] or 0
+            local total = session['total_segments'] or 999999
+            if ready >= total then
+                session['status'] = 'complete'
+                session['playable'] = true
+            elseif not session['playable'] and ready >= math.min(3, total) then
+                session['playable'] = true
+            end
+            redis.call('SETEX', KEYS[1], 50400, cjson.encode(session))
+            return ready
+        LUA;
+
+        Redis::eval($lua, 1, "instant-dub:{$this->sessionId}");
     }
 
     private function downloadOriginalAudio(): ?string
@@ -275,6 +300,9 @@ class DownloadOriginalAudioJob implements ShouldQueue
 
     public function failed(\Throwable $exception): void
     {
+        // Clear pending flag so playback isn't blocked
+        $this->markAudioReady();
+
         Log::warning("[DUB] DownloadOriginalAudioJob failed (non-critical)", [
             'session' => $this->sessionId,
             'error' => $exception->getMessage(),

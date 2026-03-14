@@ -84,6 +84,16 @@ class PrepareInstantDubJob implements ShouldQueue
         // 2b. Dispatch background audio download in parallel (non-blocking)
         // Must go on 'default' queue — NOT 'segment-generation' — so TTS jobs
         // (which are on segment-generation with higher priority) aren't blocked.
+        $hasHlsAudio = str_contains($this->videoUrl, '.m3u8');
+        if ($hasHlsAudio) {
+            // Mark session as waiting for audio download — playable will be deferred
+            $sessionJson = Redis::get("instant-dub:{$this->sessionId}");
+            if ($sessionJson) {
+                $s = json_decode($sessionJson, true);
+                $s['audio_download_pending'] = true;
+                Redis::setex("instant-dub:{$this->sessionId}", 50400, json_encode($s));
+            }
+        }
         DownloadOriginalAudioJob::dispatch($this->sessionId, $this->videoUrl)
             ->onQueue('default');
 

@@ -553,14 +553,10 @@ class InstantDubController extends Controller
         $aacFile = storage_path("app/instant-dub/{$sessionId}/aac/lead.aac");
 
         if (file_exists($aacFile) && filesize($aacFile) > 100) {
-            $session = $this->getSession($sessionId);
-            $isComplete = in_array($session['status'] ?? '', ['complete', 'stopped']);
-            $cache = $isComplete ? 'max-age=86400' : 'no-cache';
-
             return response()->file($aacFile, [
                 'Content-Type' => 'audio/aac',
                 'Access-Control-Allow-Origin' => '*',
-                'Cache-Control' => $cache,
+                'Cache-Control' => 'max-age=86400',
             ]);
         }
 
@@ -589,16 +585,10 @@ class InstantDubController extends Controller
         $aacFile = storage_path("app/instant-dub/{$sessionId}/aac/{$index}.aac");
 
         if (file_exists($aacFile) && filesize($aacFile) > 10) {
-            // Short cache while session is processing (segments may be remixed with bg audio)
-            // Long cache once session is complete
-            $session = $this->getSession($sessionId);
-            $isComplete = in_array($session['status'] ?? '', ['complete', 'stopped']);
-            $cache = $isComplete ? 'max-age=86400' : 'no-cache';
-
             return response()->file($aacFile, [
                 'Content-Type' => 'audio/aac',
                 'Access-Control-Allow-Origin' => '*',
-                'Cache-Control' => $cache,
+                'Cache-Control' => 'max-age=86400',
             ]);
         }
 
