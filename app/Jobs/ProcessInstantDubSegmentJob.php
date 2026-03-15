@@ -81,8 +81,8 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                 $tempo = null;
 
                 if ($ratio > 1.05) {
-                    // Too long — speed up (cap 1.15x to avoid robotic sound)
-                    $tempo = min($ratio, 1.15);
+                    // Too long — speed up (cap 1.35x to keep words intelligible)
+                    $tempo = min($ratio, 1.35);
                 } elseif ($ratio < 0.9) {
                     // Too short — slow down to fill ~95% of slot (cap 0.8x to stay natural)
                     $targetDuration = $slotDuration * 0.95;

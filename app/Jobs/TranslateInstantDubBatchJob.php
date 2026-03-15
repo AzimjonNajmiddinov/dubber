@@ -697,18 +697,20 @@ class TranslateInstantDubBatchJob implements ShouldQueue
             ? "\nFILM/SERIES TITLE: \"{$this->title}\" — you know this title. Use your knowledge of the plot, characters, their relationships, and the tone of the story to produce accurate, contextually appropriate translations.\n"
             : '';
 
-        $systemPrompt = "You are an expert film/series dubbing translator. Your translations will be spoken aloud by TTS voice actors, so they must sound like natural spoken {$toLang} dialogue — not written subtitles.\n"
+        $systemPrompt = "You are an expert film/series dubbing translator who is fully fluent in both the source language and {$toLang}. Your task is to UNDERSTAND the original dialogue deeply — its meaning, subtext, humor, emotions, cultural references — and then EXPRESS that same meaning in natural spoken {$toLang} as if the film were originally made in {$toLang}.\n"
+            . "\nYou are NOT doing word-by-word translation. You are RE-EXPRESSING the dialogue. First comprehend what the character means and feels, then say it the way a native {$toLang} speaker would naturally say it in that situation.\n"
             . $titleHint
             . "\nCHARACTER ANALYSIS:\n{$characterContext}\n"
             . "\nFULL DIALOGUE (for context — do NOT translate this, only use for understanding the scene):\n{$fullDialogue}\n"
             . "{$uzbekRules}\n"
             . "\nTRANSLATION RULES:\n"
-            . "1. Each line has [Ns, max M chars]. Try to stay within the character limit, but NEVER sacrifice meaning to fit — keeping the full meaning is more important than the length limit.\n"
+            . "1. Each line has [Ns, max M chars]. The character limit is a SOFT guideline — try to be concise, but NEVER cut words, drop meaning, or leave sentences incomplete to fit. Every word and idea in the original MUST appear fully in the translation. Incomplete output is unacceptable.\n"
             . "2. Lines may contain annotations like [music], [laughing], [whispering], [door opens] etc. — use these to understand the scene mood and context, but translate ONLY the spoken dialogue part. Do not include the annotations in your translation.\n"
-            . "3. Translate meaning, not words. Rephrase freely to sound natural in {$toLang}. NEVER drop phrases, skip meaning, or oversimplify — every idea in the original must appear in the translation.\n"
-            . "4. Keep the emotional register: if someone is angry, scared, joking, whispering — the translation must convey that.\n"
+            . "3. First UNDERSTAND the full meaning, intent, and emotion of each line. Then EXPRESS it in {$toLang} the way a native speaker would naturally say it — use idioms, expressions, and phrasing that feel native to {$toLang}. NEVER drop phrases, skip meaning, or oversimplify — every idea in the original must appear in the translation.\n"
+            . "4. Keep the emotional register: if someone is angry, scared, joking, whispering — the translation must convey that same feeling.\n"
             . "5. Use the character analysis above to assign the correct speaker tag [M1], [F1], etc. to each line.\n"
             . "6. Preserve interruptions, hesitations, and conversational flow.\n"
+            . "7. Cultural adaptation: if a joke, idiom, or reference won't land in {$toLang}, adapt it to an equivalent that carries the same meaning and humor — don't translate it literally.\n"
             . "\n" . 'Format: "1. [M1] translated text"' . "\n"
             . "Do not include timing info. Do not skip or merge lines. Keep exact numbering.";
 

@@ -14,6 +14,14 @@ use Illuminate\Support\Str;
 
 class InstantDubController extends Controller
 {
+    /** Format seconds as HLS EXT-X-PROGRAM-DATE-TIME with millisecond precision. */
+    private function hlsDateTime(float $seconds): string
+    {
+        $whole = (int) floor($seconds);
+        $ms = (int) round(($seconds - $whole) * 1000);
+        return gmdate('Y-m-d\TH:i:s', $whole) . sprintf('.%03dZ', $ms);
+    }
+
     public function start(Request $request): JsonResponse
     {
         $request->validate([
@@ -478,7 +486,7 @@ class InstantDubController extends Controller
                 $entries[] = [
                     'uri' => 'dub-segment/lead.aac',
                     'duration' => round($firstStart, 3),
-                    'programDateTime' => gmdate('Y-m-d\TH:i:s.v\Z', 0),
+                    'programDateTime' => $this->hlsDateTime(0),
                 ];
             }
         }
@@ -500,16 +508,13 @@ class InstantDubController extends Controller
             $entries[] = [
                 'uri' => "dub-segment/{$i}.aac",
                 'duration' => $slotDur,
-                'programDateTime' => gmdate('Y-m-d\TH:i:s.v\Z', (int) $slotStart),
+                'programDateTime' => $this->hlsDateTime($slotStart),
             ];
         }
 
-        // TARGETDURATION must be >= max segment duration and must never change between reloads.
-        // The lead-in silent segment can be large (e.g., 60s for movies with late dialogue).
-        $maxDur = 10;
-        foreach ($entries as $entry) {
-            $maxDur = max($maxDur, (int) ceil($entry['duration']));
-        }
+        // TARGETDURATION must never change between playlist reloads (HLS EVENT playlist spec).
+        // Fixed at 120s to cover lead-in segments (~60s) and inter-segment gaps (~90s).
+        $maxDur = 120;
         $m3u8 = "#EXTM3U\n";
         $m3u8 .= "#EXT-X-VERSION:3\n";
         $m3u8 .= "#EXT-X-TARGETDURATION:{$maxDur}\n";
@@ -531,7 +536,7 @@ class InstantDubController extends Controller
             $tailStart = (float) ($session['tail_start'] ?? 0);
             $tailDuration = (float) ($session['tail_duration'] ?? 0);
             if ($tailDuration >= 5) {
-                $m3u8 .= "#EXT-X-PROGRAM-DATE-TIME:" . gmdate('Y-m-d\TH:i:s.v\Z', (int) $tailStart) . "\n";
+                $m3u8 .= "#EXT-X-PROGRAM-DATE-TIME:" . $this->hlsDateTime($tailStart) . "\n";
                 $m3u8 .= "#EXTINF:{$tailDuration},\n";
                 $m3u8 .= "dub-segment/tail.aac\n";
             }
