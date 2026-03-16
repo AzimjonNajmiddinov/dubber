@@ -111,6 +111,7 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
             . "2. Strip annotations like [music], [laughing] — translate only spoken dialogue.\n"
             . "3. Assign speaker tags: M1=first male, F1=first female, etc.\n"
             . "4. First comprehend the meaning, then re-express it naturally in {$toLang} using native idioms and phrasing. Adapt cultural references if needed.\n"
+            . "5. Use punctuation to express emotion (TTS reads these): ! for emphasis/anger, ... for hesitation, — for dramatic pauses, !! for strong emotion, short sentences with periods for stern tone.\n"
             . "\n" . 'Format: "1. [M1] translated text"';
 
         $messages = [
