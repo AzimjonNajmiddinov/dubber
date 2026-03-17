@@ -14,14 +14,6 @@ use Illuminate\Support\Str;
 
 class InstantDubController extends Controller
 {
-    /** Format seconds as HLS EXT-X-PROGRAM-DATE-TIME with millisecond precision. */
-    private function hlsDateTime(float $seconds): string
-    {
-        $whole = (int) floor($seconds);
-        $ms = (int) round(($seconds - $whole) * 1000);
-        return gmdate('Y-m-d\TH:i:s', $whole) . sprintf('.%03dZ', $ms);
-    }
-
     public function start(Request $request): JsonResponse
     {
         $request->validate([
@@ -486,7 +478,6 @@ class InstantDubController extends Controller
                 $entries[] = [
                     'uri' => 'dub-segment/lead.aac',
                     'duration' => round($firstStart, 3),
-                    'programDateTime' => $this->hlsDateTime(0),
                 ];
             }
         }
@@ -508,7 +499,6 @@ class InstantDubController extends Controller
             $entries[] = [
                 'uri' => "dub-segment/{$i}.aac",
                 'duration' => $slotDur,
-                'programDateTime' => $this->hlsDateTime($slotStart),
             ];
         }
 
@@ -526,7 +516,6 @@ class InstantDubController extends Controller
         }
 
         foreach ($entries as $entry) {
-            $m3u8 .= "#EXT-X-PROGRAM-DATE-TIME:{$entry['programDateTime']}\n";
             $m3u8 .= "#EXTINF:{$entry['duration']},\n";
             $m3u8 .= "{$entry['uri']}\n";
         }
@@ -536,7 +525,6 @@ class InstantDubController extends Controller
             $tailStart = (float) ($session['tail_start'] ?? 0);
             $tailDuration = (float) ($session['tail_duration'] ?? 0);
             if ($tailDuration >= 5) {
-                $m3u8 .= "#EXT-X-PROGRAM-DATE-TIME:" . $this->hlsDateTime($tailStart) . "\n";
                 $m3u8 .= "#EXTINF:{$tailDuration},\n";
                 $m3u8 .= "dub-segment/tail.aac\n";
             }
