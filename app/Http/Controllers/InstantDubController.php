@@ -273,6 +273,7 @@ class InstantDubController extends Controller
 
                 // Terminal states — close connection
                 if (in_array($status, ['complete', 'stopped', 'error'])) {
+                    $this->sseEvent('done', ['status' => $status]);
                     break;
                 }
 

@@ -73,7 +73,7 @@ class DownloadOriginalAudioJob implements ShouldQueue
             if ready >= total then
                 session['status'] = 'complete'
                 session['playable'] = true
-            elseif not session['playable'] and ready >= math.min(3, total) then
+            elseif not session['playable'] and ready >= math.ceil(total * 0.5) then
                 session['playable'] = true
             end
             redis.call('SETEX', KEYS[1], 50400, cjson.encode(session))
