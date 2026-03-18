@@ -57,7 +57,7 @@ class DownloadOriginalAudioJob implements ShouldQueue
             ]);
         }
 
-        // Clear audio_download_pending and set playable if enough segments are ready
+        // Clear legacy audio_download_pending flag
         $this->markAudioReady();
     }
 
@@ -68,16 +68,8 @@ class DownloadOriginalAudioJob implements ShouldQueue
             if not data then return 0 end
             local session = cjson.decode(data)
             session['audio_download_pending'] = nil
-            local ready = session['segments_ready'] or 0
-            local total = session['total_segments'] or 999999
-            if ready >= total then
-                session['status'] = 'complete'
-                session['playable'] = true
-            elseif not session['playable'] and ready >= math.ceil(total * 0.5) then
-                session['playable'] = true
-            end
             redis.call('SETEX', KEYS[1], 50400, cjson.encode(session))
-            return ready
+            return session['segments_ready'] or 0
         LUA;
 
         Redis::eval($lua, 1, "instant-dub:{$this->sessionId}");

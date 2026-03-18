@@ -449,6 +449,25 @@ class InstantDubController extends Controller
         $total = (int) ($session['total_segments'] ?? 0);
         $status = $session['status'] ?? 'preparing';
         $isComplete = in_array($status, ['complete', 'stopped']);
+        $playable = !empty($session['playable']);
+
+        // Before playable (50% segments ready), serve a minimal valid EVENT playlist.
+        // Native HLS players (iOS AVPlayer) may error on empty EVENT audio playlists,
+        // and serving segments one-by-one causes poor seek behavior.
+        // Wait until we have enough content for a good playback experience.
+        if (!$playable && !$isComplete) {
+            $m3u8 = "#EXTM3U\n";
+            $m3u8 .= "#EXT-X-VERSION:3\n";
+            $m3u8 .= "#EXT-X-TARGETDURATION:120\n";
+            $m3u8 .= "#EXT-X-MEDIA-SEQUENCE:0\n";
+            $m3u8 .= "#EXT-X-PLAYLIST-TYPE:EVENT\n";
+
+            return response($m3u8, 200, [
+                'Content-Type' => 'application/vnd.apple.mpegurl',
+                'Access-Control-Allow-Origin' => '*',
+                'Cache-Control' => 'max-age=2',
+            ]);
+        }
 
         // Batch fetch all chunks in one Redis call (eliminates N+1)
         $chunkKeys = [];
