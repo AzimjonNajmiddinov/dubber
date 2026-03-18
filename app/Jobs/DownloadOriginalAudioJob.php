@@ -17,7 +17,7 @@ class DownloadOriginalAudioJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public int $timeout = 300;
+    public int $timeout = 600;
     public int $tries = 1;
 
     public function __construct(
@@ -232,7 +232,8 @@ class DownloadOriginalAudioJob implements ShouldQueue
             $session = json_decode($sessionJson, true);
             $total = (int) ($session['total_segments'] ?? 0);
 
-            for ($i = 0; $i < min($total, 20); $i++) {
+            $remixed = 0;
+            for ($i = 0; $i < $total; $i++) {
                 $aacFile = "{$aacDir}/{$i}.aac";
                 if (!file_exists($aacFile)) continue;
 
@@ -272,7 +273,9 @@ class DownloadOriginalAudioJob implements ShouldQueue
 
                 @unlink($tmpMp3);
 
-                if (!$result->successful()) {
+                if ($result->successful()) {
+                    $remixed++;
+                } else {
                     Log::warning("[DUB] Remix segment #{$i} failed", [
                         'session' => $this->sessionId,
                         'error' => Str::limit($result->errorOutput(), 200),
@@ -280,7 +283,7 @@ class DownloadOriginalAudioJob implements ShouldQueue
                 }
             }
 
-            Log::info("[DUB] Early segments remixed with background audio", [
+            Log::info("[DUB] Remixed {$remixed}/{$total} segments with background audio", [
                 'session' => $this->sessionId,
             ]);
         } catch (\Throwable $e) {
