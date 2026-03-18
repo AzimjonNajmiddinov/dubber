@@ -2,6 +2,9 @@
 
 namespace App\Services;
 
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Process;
+
 class VoiceVariants
 {
     /**
@@ -62,7 +65,8 @@ class VoiceVariants
 
     private static function voicesByLanguage(string $language): array
     {
-        return match ($language) {
+        // Preferred voices for common languages (best quality picks)
+        $preferred = [
             'uz' => ['male' => 'uz-UZ-SardorNeural',   'female' => 'uz-UZ-MadinaNeural'],
             'ru' => ['male' => 'ru-RU-DmitryNeural',   'female' => 'ru-RU-SvetlanaNeural'],
             'en' => ['male' => 'en-US-GuyNeural',      'female' => 'en-US-JennyNeural'],
@@ -77,7 +81,57 @@ class VoiceVariants
             'pt' => ['male' => 'pt-BR-AntonioNeural',  'female' => 'pt-BR-FranciscaNeural'],
             'hi' => ['male' => 'hi-IN-MadhurNeural',   'female' => 'hi-IN-SwaraNeural'],
             'it' => ['male' => 'it-IT-DiegoNeural',    'female' => 'it-IT-ElsaNeural'],
-            default => ['male' => 'en-US-GuyNeural',   'female' => 'en-US-JennyNeural'],
-        };
+        ];
+
+        if (isset($preferred[$language])) {
+            return $preferred[$language];
+        }
+
+        // Dynamic: discover voices from edge-tts for any supported language
+        return self::discoverVoices($language);
+    }
+
+    /**
+     * Discover male/female Edge TTS voices for a language by running edge-tts --list-voices.
+     * Results are cached for 24 hours.
+     */
+    private static function discoverVoices(string $language): array
+    {
+        $cacheKey = "edge-tts-voices:{$language}";
+
+        return Cache::remember($cacheKey, 86400, function () use ($language) {
+            $result = Process::timeout(10)->run(['edge-tts', '--list-voices']);
+
+            if (!$result->successful()) {
+                return ['male' => 'en-US-GuyNeural', 'female' => 'en-US-JennyNeural'];
+            }
+
+            $male = null;
+            $female = null;
+
+            foreach (explode("\n", $result->output()) as $line) {
+                // Match voice lines: "az-AZ-BabekNeural   Male   ..."
+                if (!preg_match('/^(' . preg_quote($language, '/') . '-\S+Neural)\s+(Male|Female)/i', $line, $m)) {
+                    continue;
+                }
+
+                $voiceName = $m[1];
+                $gender = strtolower($m[2]);
+
+                if ($gender === 'male' && !$male) {
+                    $male = $voiceName;
+                } elseif ($gender === 'female' && !$female) {
+                    $female = $voiceName;
+                }
+
+                if ($male && $female) break;
+            }
+
+            // If only one gender found, use it for both
+            $male = $male ?? $female ?? 'en-US-GuyNeural';
+            $female = $female ?? $male;
+
+            return ['male' => $male, 'female' => $female];
+        });
     }
 }
