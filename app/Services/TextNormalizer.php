@@ -20,6 +20,12 @@ class TextNormalizer
         // Convert numbers to words AFTER abbreviations
         $text = self::convertNumbersToWords($text, $lang);
 
+        // Transliterate Cyrillic → Latin for Uzbek TTS (Edge TTS can't pronounce Cyrillic)
+        // This handles: untranslated Russian words, Cyrillic Uzbek, names left in Cyrillic
+        if (in_array($lang, ['uz', 'uzbek'])) {
+            $text = self::transliterateCyrillicToLatin($text);
+        }
+
         // Normalize Uzbek apostrophes LAST — after abbreviation/number expansion
         // which may introduce ASCII apostrophes (e.g. "to'rt", "Qo'shma")
         if (in_array($lang, ['uz', 'uzbek'])) {
@@ -27,6 +33,68 @@ class TextNormalizer
         }
 
         return $text;
+    }
+
+    /**
+     * Transliterate Cyrillic characters to Latin for Uzbek TTS.
+     * Handles both Uzbek Cyrillic (Ўўқғҳ) and Russian Cyrillic.
+     * Edge TTS uz-UZ voices only speak Latin — Cyrillic chars cause silence.
+     */
+    private static function transliterateCyrillicToLatin(string $text): string
+    {
+        // Quick check: skip if no Cyrillic characters present
+        if (!preg_match('/[\x{0400}-\x{04FF}]/u', $text)) {
+            return $text;
+        }
+
+        // Multi-char mappings must come first (Щ before Ш, etc.)
+        $map = [
+            // Uzbek-specific Cyrillic
+            'Ўў' => ['Oʻ', 'oʻ'], 'Ққ' => ['Q', 'q'], 'Ғғ' => ['Gʻ', 'gʻ'], 'Ҳҳ' => ['H', 'h'],
+        ];
+
+        // Single-char Cyrillic → Latin (uppercase, lowercase)
+        $single = [
+            'Щ' => 'Sh', 'щ' => 'sh',  // before Ш
+            'Ш' => 'Sh', 'ш' => 'sh',
+            'Ч' => 'Ch', 'ч' => 'ch',
+            'Ц' => 'Ts', 'ц' => 'ts',
+            'Ю' => 'Yu', 'ю' => 'yu',
+            'Я' => 'Ya', 'я' => 'ya',
+            'Ё' => 'Yo', 'ё' => 'yo',
+            'Ж' => 'J',  'ж' => 'j',
+            'Х' => 'X',  'х' => 'x',
+            'Ў' => 'Oʻ', 'ў' => 'oʻ',
+            'Қ' => 'Q',  'қ' => 'q',
+            'Ғ' => 'Gʻ', 'ғ' => 'gʻ',
+            'Ҳ' => 'H',  'ҳ' => 'h',
+            'А' => 'A',  'а' => 'a',
+            'Б' => 'B',  'б' => 'b',
+            'В' => 'V',  'в' => 'v',
+            'Г' => 'G',  'г' => 'g',
+            'Д' => 'D',  'д' => 'd',
+            'Е' => 'E',  'е' => 'e',
+            'З' => 'Z',  'з' => 'z',
+            'И' => 'I',  'и' => 'i',
+            'Й' => 'Y',  'й' => 'y',
+            'К' => 'K',  'к' => 'k',
+            'Л' => 'L',  'л' => 'l',
+            'М' => 'M',  'м' => 'm',
+            'Н' => 'N',  'н' => 'n',
+            'О' => 'O',  'о' => 'o',
+            'П' => 'P',  'п' => 'p',
+            'Р' => 'R',  'р' => 'r',
+            'С' => 'S',  'с' => 's',
+            'Т' => 'T',  'т' => 't',
+            'У' => 'U',  'у' => 'u',
+            'Ф' => 'F',  'ф' => 'f',
+            'Э' => 'E',  'э' => 'e',
+            'Ы' => 'I',  'ы' => 'i',
+            'Ъ' => 'ʻ',  'ъ' => 'ʻ',
+            'Ь' => '',   'ь' => '',   // soft sign — silent
+        ];
+
+        return str_replace(array_keys($single), array_values($single), $text);
     }
 
     /**
