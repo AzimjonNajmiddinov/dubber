@@ -20,9 +20,10 @@ class TextNormalizer
         // Convert numbers to words AFTER abbreviations
         $text = self::convertNumbersToWords($text, $lang);
 
-        // Transliterate Cyrillic → Latin for Uzbek TTS (Edge TTS can't pronounce Cyrillic)
-        // This handles: untranslated Russian words, Cyrillic Uzbek, names left in Cyrillic
-        if (in_array($lang, ['uz', 'uzbek'])) {
+        // Transliterate Cyrillic → Latin for non-Cyrillic target languages.
+        // TTS engines for Latin-script languages can't pronounce Cyrillic chars (go silent).
+        // Skip for Russian — Russian TTS needs Cyrillic.
+        if (!in_array($lang, ['ru', 'russian'])) {
             $text = self::transliterateCyrillicToLatin($text);
         }
 
