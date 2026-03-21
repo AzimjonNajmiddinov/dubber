@@ -18,7 +18,8 @@ class DownloadOriginalAudioJob implements ShouldQueue
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     public int $timeout = 600;
-    public int $tries = 1;
+    public int $tries = 2; // Allow 1 retry — Horizon may re-queue when timeout > retry_after
+    public int $backoff = 5;
 
     public function __construct(
         public string $sessionId,
