@@ -897,7 +897,7 @@ class InstantDubController extends Controller
                         '-ss', (string) round($slotStart, 3),
                         '-t', (string) $slotDuration,
                         '-i', $originalAudioPath,
-                        '-af', 'equalizer=f=800:t=o:w=2.5:g=-18,equalizer=f=2500:t=o:w=1.5:g=-15,volume=0.15',
+                        '-af', 'volume=0.2',
                         '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
                     ]);
                 } else {
@@ -919,7 +919,7 @@ class InstantDubController extends Controller
                         '-t', (string) $slotDuration,
                         '-i', $originalAudioPath,
                         '-filter_complex',
-                        "[0:a]aresample=44100,{$delayFilter}apad=whole_dur={$slotDuration}[tts];[1:a]equalizer=f=800:t=o:w=2.5:g=-18,equalizer=f=2500:t=o:w=1.5:g=-15,volume=0.15[bg];[tts][bg]amix=inputs=2:duration=first:normalize=0",
+                        "[0:a]aresample=44100,{$delayFilter}apad=whole_dur={$slotDuration}[tts];[1:a]volume=0.2[bg];[tts][bg]amix=inputs=2:duration=first:normalize=0",
                         '-t', (string) $slotDuration,
                         '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
                     ]);

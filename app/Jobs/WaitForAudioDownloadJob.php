@@ -19,7 +19,7 @@ class WaitForAudioDownloadJob implements ShouldQueue
     public int $timeout = 120;
     public int $tries = 2;
 
-    private const BG_FILTER = 'equalizer=f=800:t=o:w=2.5:g=-18,equalizer=f=2500:t=o:w=1.5:g=-15,volume=0.15';
+    private const BG_FILTER = 'volume=0.2';
 
     public function __construct(
         public string $sessionId,
