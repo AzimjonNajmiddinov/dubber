@@ -197,15 +197,30 @@ return [
     */
 
     'defaults' => [
-        'supervisor-1' => [
+        // Translation + orchestration (API-bound, not CPU heavy)
+        'supervisor-translation' => [
             'connection' => 'redis',
-            'queue' => ['segment-generation', 'default', 'chunks', 'segment-processing'],
+            'queue' => ['default'],
             'balance' => 'auto',
             'autoScalingStrategy' => 'time',
             'maxProcesses' => 1,
             'maxTime' => 0,
             'maxJobs' => 0,
-            'memory' => 512,
+            'memory' => 256,
+            'tries' => 2,
+            'timeout' => 600,
+            'nice' => 0,
+        ],
+        // TTS generation (CPU heavy — ffmpeg + edge-tts)
+        'supervisor-tts' => [
+            'connection' => 'redis',
+            'queue' => ['segment-generation', 'chunks', 'segment-processing'],
+            'balance' => 'auto',
+            'autoScalingStrategy' => 'time',
+            'maxProcesses' => 1,
+            'maxTime' => 0,
+            'maxJobs' => 0,
+            'memory' => 256,
             'tries' => 2,
             'timeout' => 600,
             'nice' => 0,
@@ -214,16 +229,24 @@ return [
 
     'environments' => [
         'production' => [
-            'supervisor-1' => [
-                'maxProcesses' => 8,
-                'balanceMaxShift' => 3,
+            'supervisor-translation' => [
+                'maxProcesses' => 4,
+                'balanceMaxShift' => 2,
+                'balanceCooldown' => 3,
+            ],
+            'supervisor-tts' => [
+                'maxProcesses' => 4,
+                'balanceMaxShift' => 2,
                 'balanceCooldown' => 3,
             ],
         ],
 
         'local' => [
-            'supervisor-1' => [
-                'maxProcesses' => 3,
+            'supervisor-translation' => [
+                'maxProcesses' => 2,
+            ],
+            'supervisor-tts' => [
+                'maxProcesses' => 2,
             ],
         ],
     ],
