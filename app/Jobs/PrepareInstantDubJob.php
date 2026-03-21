@@ -273,23 +273,22 @@ class PrepareInstantDubJob implements ShouldQueue
             }
             unset($track);
 
-            // Build priority-ordered candidates
+            // Build priority-ordered candidates — ALL tracks of priority languages first
             $candidates = [];
+            $added = [];
             foreach ($langPriority as $preferred) {
                 foreach ($tracks as $track) {
-                    if ($track['langCode'] === $preferred) {
+                    if ($track['langCode'] === $preferred && !isset($added[$track['uri']])) {
                         $candidates[] = $track;
-                        break; // one per language
+                        $added[$track['uri']] = true;
                     }
                 }
             }
             // Add any unmatched tracks at the end
             foreach ($tracks as $track) {
-                $dominated = false;
-                foreach ($candidates as $c) {
-                    if ($c['uri'] === $track['uri']) { $dominated = true; break; }
+                if (!isset($added[$track['uri']])) {
+                    $candidates[] = $track;
                 }
-                if (!$dominated) $candidates[] = $track;
             }
 
             if (empty($candidates)) return null;
