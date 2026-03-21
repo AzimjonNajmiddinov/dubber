@@ -531,17 +531,20 @@ class InstantDubController extends Controller
             ];
         }
 
-        // TARGETDURATION must never change between playlist reloads (HLS EVENT playlist spec).
-        // Fixed at 120s to cover lead-in segments (~60s) and inter-segment gaps (~90s).
-        $maxDur = 120;
+        // Calculate actual max duration from entries for TARGETDURATION
+        $maxDur = 10;
+        foreach ($entries as $entry) {
+            $maxDur = max($maxDur, (int) ceil($entry['duration']));
+        }
+
         $m3u8 = "#EXTM3U\n";
         $m3u8 .= "#EXT-X-VERSION:3\n";
         $m3u8 .= "#EXT-X-TARGETDURATION:{$maxDur}\n";
         $m3u8 .= "#EXT-X-MEDIA-SEQUENCE:0\n";
         $m3u8 .= "#EXT-X-INDEPENDENT-SEGMENTS\n";
 
-        if (!$isComplete) {
-            $m3u8 .= "#EXT-X-PLAYLIST-TYPE:EVENT\n";
+        if ($isComplete) {
+            $m3u8 .= "#EXT-X-PLAYLIST-TYPE:VOD\n";
         }
 
         foreach ($entries as $entry) {
