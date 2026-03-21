@@ -216,7 +216,7 @@ class DownloadOriginalAudioJob implements ShouldQueue
                             'ffmpeg', '-y',
                             '-ss', '0', '-t', (string) round($firstStart, 3),
                             '-i', $originalAudioPath,
-                            '-af', 'volume=0.2',
+                            '-af', 'volume=0.05',
                             '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $leadFile,
                         ]);
                         Log::info("[DUB] Remixed lead.aac with background audio ({$firstStart}s)", [
@@ -267,7 +267,7 @@ class DownloadOriginalAudioJob implements ShouldQueue
                     '-t', (string) $slotDuration,
                     '-i', $originalAudioPath,
                     '-filter_complex',
-                    "[0:a]aresample=44100,apad=whole_dur={$slotDuration}[tts];[1:a]volume=0.2[bg];[tts][bg]amix=inputs=2:duration=first:normalize=0",
+                    "[0:a]aresample=44100,apad=whole_dur={$slotDuration}[tts];[1:a]volume=0.05[bg];[tts][bg]amix=inputs=2:duration=first:normalize=0",
                     '-t', (string) $slotDuration,
                     '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
                 ]);
