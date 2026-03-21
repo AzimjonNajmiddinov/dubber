@@ -303,18 +303,28 @@ class PrepareInstantDubJob implements ShouldQueue
             }
 
             $maxCues = max(array_column($fetched, 'cues'));
-            $bestIdx = 0;
+            $bestIdx = null;
 
-            // Walk priority order, pick first track with >= 50% of the richest
+            // Walk priority order — prefer priority languages even with fewer cues
+            // Russian/Uzbek subs translate better to Uzbek than English
             foreach ($fetched as $i => $result) {
-                if ($result['cues'] >= $maxCues * 0.5 && $result['srt'] !== '') {
+                if ($result['cues'] < 10 || $result['srt'] === '') continue;
+
+                $langCode = $candidates[$i]['langCode'] ?? 'unknown';
+                $isPriority = in_array($langCode, ['ru', 'uz']);
+
+                // Priority languages: accept if >= 5% of richest (may have download issues)
+                // Other languages: accept if >= 30% of richest
+                $threshold = $isPriority ? 0.05 : 0.30;
+
+                if ($result['cues'] >= $maxCues * $threshold) {
                     $bestIdx = $i;
                     break;
                 }
             }
 
-            // If no track meets threshold, just use the richest
-            if ($fetched[$bestIdx]['cues'] < $maxCues * 0.5) {
+            // Fallback: use the richest track
+            if ($bestIdx === null) {
                 foreach ($fetched as $i => $result) {
                     if ($result['cues'] === $maxCues && $result['srt'] !== '') {
                         $bestIdx = $i;
@@ -322,6 +332,8 @@ class PrepareInstantDubJob implements ShouldQueue
                     }
                 }
             }
+
+            if ($bestIdx === null) return null;
 
             $bestResult = $fetched[$bestIdx];
             $selected = $candidates[$bestIdx];
