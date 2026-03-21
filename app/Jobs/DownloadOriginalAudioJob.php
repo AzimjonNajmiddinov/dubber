@@ -18,7 +18,7 @@ class DownloadOriginalAudioJob implements ShouldQueue
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     public int $timeout = 120;
-    public int $tries = 1;
+    public int $tries = 3;
 
     public function __construct(
         public string $sessionId,
