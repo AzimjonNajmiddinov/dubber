@@ -67,4 +67,10 @@ return [
     'elevenlabs' => [
         'api_key' => env('ELEVENLABS_API_KEY', ''),
     ],
+
+    'runpod' => [
+        'api_key' => env('RUNPOD_API_KEY', ''),
+        'whisperx_endpoint_id' => env('RUNPOD_WHISPERX_ENDPOINT_ID', ''),
+        'demucs_endpoint_id' => env('RUNPOD_DEMUCS_ENDPOINT_ID', ''),
+    ],
 ];

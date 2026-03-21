@@ -5,6 +5,7 @@ use App\Http\Controllers\StreamDubController;
 use App\Http\Controllers\SegmentPlayerController;
 use App\Http\Controllers\LiveDubController;
 use App\Http\Controllers\InstantDubController;
+use App\Http\Controllers\PremiumDubController;
 
 // URL-based video dubbing & streaming (no CSRF required)
 Route::prefix('stream')->group(function () {
@@ -53,4 +54,11 @@ Route::prefix('instant-dub')->group(function () {
     Route::get('/{sessionId}/dub-subtitles.m3u8', [InstantDubController::class, 'hlsSubtitlePlaylist'])->name('api.instant-dub.dub-subtitles');
     Route::get('/{sessionId}/dub-subtitles.vtt', [InstantDubController::class, 'hlsSubtitleVtt'])->name('api.instant-dub.dub-subtitles-vtt');
     Route::get('/{sessionId}/proxy/{path}', [InstantDubController::class, 'hlsProxy'])->where('path', '.*')->name('api.instant-dub.proxy');
+});
+
+// Premium dub API (full pipeline: Demucs + WhisperX + ElevenLabs)
+Route::prefix('premium-dub')->group(function () {
+    Route::post('/start', [PremiumDubController::class, 'start'])->name('api.premium-dub.start');
+    Route::get('/{dubId}/status', [PremiumDubController::class, 'status'])->name('api.premium-dub.status');
+    Route::get('/{dubId}/download', [PremiumDubController::class, 'download'])->name('api.premium-dub.download');
 });
