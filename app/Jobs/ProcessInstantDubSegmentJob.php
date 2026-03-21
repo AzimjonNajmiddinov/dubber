@@ -22,6 +22,20 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
     public int $timeout = 90;
     public int $tries = 4; // Allow retries to survive multiple horizon restarts during deploys
 
+    // Emotion → pitch/rate adjustments (layered on top of speaker base values)
+    private const EMOTION_ADJUSTMENTS = [
+        'neutral'    => ['pitch' => 0,   'rate' => 0],
+        'happy'      => ['pitch' => 4,   'rate' => 5],
+        'angry'      => ['pitch' => 6,   'rate' => 8],
+        'sad'        => ['pitch' => -3,  'rate' => -8],
+        'fearful'    => ['pitch' => 5,   'rate' => 6],
+        'surprised'  => ['pitch' => 8,   'rate' => 5],
+        'whispering' => ['pitch' => -4,  'rate' => -12],
+        'serious'    => ['pitch' => -2,  'rate' => -3],
+        'sarcastic'  => ['pitch' => 3,   'rate' => -3],
+        'disgusted'  => ['pitch' => -2,  'rate' => -3],
+    ];
+
     public function __construct(
         public string $sessionId,
         public int    $index,
@@ -58,18 +72,25 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
 
             $rawMp3 = "{$tmpDir}/seg_{$this->index}.mp3";
 
+            // Parse emotion from speaker tag (e.g. "M1:angry" → speaker="M1", emotion="angry")
+            $speakerTag = $this->speaker;
+            $emotion = 'neutral';
+            if (str_contains($speakerTag, ':')) {
+                [$speakerTag, $emotion] = explode(':', $speakerTag, 2);
+            }
+
             // Read per-speaker driver from voice map
             $voiceKey = "instant-dub:{$this->sessionId}:voices";
             $voiceMap = json_decode(Redis::get($voiceKey), true) ?? [];
-            $speakerEntry = $voiceMap[$this->speaker] ?? [];
+            $speakerEntry = $voiceMap[$speakerTag] ?? [];
             $driver = $speakerEntry['driver'] ?? config('dubber.tts.default', 'edge');
 
             if ($driver === 'elevenlabs' && !empty($speakerEntry['voice_id'])) {
                 $this->generateWithElevenLabs($rawMp3, $speakerEntry['voice_id']);
             } elseif ($driver === 'aisha') {
-                $this->generateWithAisha($rawMp3, $speakerEntry);
+                $this->generateWithAisha($rawMp3, $speakerEntry, $emotion);
             } else {
-                $this->generateWithEdgeTts($rawMp3, $tmpDir, $speakerEntry);
+                $this->generateWithEdgeTts($rawMp3, $tmpDir, $speakerEntry, $emotion);
             }
 
             // 2. Adjust tempo so TTS fills the timeslot naturally
@@ -200,7 +221,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         ]);
     }
 
-    private function generateWithEdgeTts(string $outputMp3, string $tmpDir, array $speakerEntry = []): void
+    private function generateWithEdgeTts(string $outputMp3, string $tmpDir, array $speakerEntry = [], string $emotion = 'neutral'): void
     {
         if (!empty($speakerEntry['voice'])) {
             $voice = $speakerEntry['voice'];
@@ -210,6 +231,16 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             $voice = $this->getDefaultEdgeVoice();
             $pitch = '+0Hz';
             $rate = '+0%';
+        }
+
+        // Apply emotion adjustments on top of speaker base values
+        $adj = self::EMOTION_ADJUSTMENTS[$emotion] ?? self::EMOTION_ADJUSTMENTS['neutral'];
+        if ($adj['pitch'] !== 0 || $adj['rate'] !== 0) {
+            $basePitch = (int) str_replace('Hz', '', $pitch);
+            $pitch = sprintf('%+dHz', $basePitch + $adj['pitch']);
+
+            $baseRate = (int) str_replace('%', '', $rate);
+            $rate = sprintf('%+d%%', $baseRate + $adj['rate']);
         }
 
         $text = TextNormalizer::normalize($this->text, $this->language);
@@ -282,10 +313,12 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         }
     }
 
-    private function generateWithAisha(string $outputMp3, array $speakerEntry = []): void
+    private function generateWithAisha(string $outputMp3, array $speakerEntry = [], string $emotion = 'neutral'): void
     {
-        $model = $speakerEntry['voice'] ?? (str_starts_with($this->speaker, 'F') ? 'gulnoza' : 'jaxongir');
-        $mood = $speakerEntry['mood'] ?? 'neutral';
+        $speakerTag = explode(':', $this->speaker, 2)[0];
+        $model = $speakerEntry['voice'] ?? (str_starts_with($speakerTag, 'F') ? 'gulnoza' : 'jaxongir');
+        // Use detected emotion if available, fall back to speaker mood variant
+        $mood = ($emotion !== 'neutral') ? $emotion : ($speakerEntry['mood'] ?? 'neutral');
 
         $text = TextNormalizer::normalize($this->text, $this->language);
 

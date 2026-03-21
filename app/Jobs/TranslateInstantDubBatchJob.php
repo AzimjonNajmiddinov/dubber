@@ -71,9 +71,10 @@ class TranslateInstantDubBatchJob implements ShouldQueue
             }
 
             // Merge voice map (additive — don't overwrite existing speakers)
+            // Strip emotion from speaker tag (e.g. "M1:angry" → "M1") for voice map
             $speakers = [];
             foreach ($batch as $seg) {
-                $tag = $seg['speaker'] ?? 'M1';
+                $tag = explode(':', $seg['speaker'] ?? 'M1', 2)[0];
                 $speakers[$tag] = true;
             }
             $this->mergeVoiceMap($speakers);
@@ -692,7 +693,11 @@ class TranslateInstantDubBatchJob implements ShouldQueue
             . "5. Use the character analysis above to assign the correct speaker tag [M1], [F1], etc. to each line.\n"
             . "6. Preserve interruptions, hesitations, and conversational flow.\n"
             . "7. Cultural adaptation: if a joke, idiom, or reference won't land in {$toLang}, adapt it to an equivalent that carries the same meaning and humor — don't translate it literally.\n"
-            . "\n" . 'Format: "1. [M1] translated text"' . "\n"
+            . "\nEMOTION TAGS — pick the most fitting delivery for each line:\n"
+            . "neutral, happy, angry, sad, fearful, surprised, whispering, serious, sarcastic\n"
+            . "The emotion should reflect HOW the character says the line, not what they're talking about.\n"
+            . "\n" . 'Format: "1. [M1:emotion] translated text"' . "\n"
+            . 'Example: "1. [M1:angry] Get out of here!" or "2. [F1:sad] I never wanted this..."' . "\n"
             . "Do not include timing info. Do not skip or merge lines. Keep exact numbering.";
 
         return [
@@ -705,11 +710,12 @@ class TranslateInstantDubBatchJob implements ShouldQueue
     {
         $translated = trim($content);
         foreach (preg_split('/\n+/', $translated) as $line) {
-            if (preg_match('/^(\d+)\.\s*\[([MFC]\d+)\]\s*(.+)/', $line, $lm)) {
+            if (preg_match('/^(\d+)\.\s*\[([MFC]\d+)(?::(\w+))?\]\s*(.+)/', $line, $lm)) {
                 $idx = (int) $lm[1] - 1;
                 if (isset($batch[$idx])) {
-                    $batch[$idx]['speaker'] = $lm[2];
-                    $batch[$idx]['text'] = trim($lm[3]);
+                    $emotion = $lm[3] ?? '';
+                    $batch[$idx]['speaker'] = $lm[2] . ($emotion ? ':' . $emotion : '');
+                    $batch[$idx]['text'] = trim($lm[4]);
                 }
             } elseif (preg_match('/^(\d+)\.\s*(.+)/', $line, $lm)) {
                 $idx = (int) $lm[1] - 1;
