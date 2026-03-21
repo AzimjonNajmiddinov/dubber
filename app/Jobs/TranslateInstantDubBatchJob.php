@@ -635,6 +635,17 @@ class TranslateInstantDubBatchJob implements ShouldQueue
             $lines[] = ($i + 1) . '. [' . $duration . 's, max ' . $maxChars . ' chars] ' . $rawText;
         }
 
+        // Trim full dialogue to a window around current batch to avoid token limits
+        // For big movies (1000+ lines), sending all lines causes rate limiting
+        $dialogueLines = explode("\n", $fullDialogue);
+        if (count($dialogueLines) > 100) {
+            $globalOffset = $this->segmentOffset + $this->batchIndex * 15;
+            $windowStart = max(0, $globalOffset - 20);
+            $windowEnd = min(count($dialogueLines), $globalOffset + 35);
+            $trimmed = array_slice($dialogueLines, $windowStart, $windowEnd - $windowStart);
+            $fullDialogue = "(...earlier dialogue omitted...)\n" . implode("\n", $trimmed) . "\n(...later dialogue omitted...)";
+        }
+
         $uzbekRules = '';
         $fromLangHint = '';
         if ($this->language === 'uz') {
