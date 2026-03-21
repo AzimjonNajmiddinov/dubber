@@ -364,8 +364,15 @@ class PrepareInstantDubJob implements ShouldQueue
             }
         }
 
+        Log::debug("[DUB] VTT content sample (" . strlen($allVtt) . " bytes): " . substr($allVtt, 0, 500), [
+            'session' => $this->sessionId,
+            'vtt_files' => count($vttFiles[1] ?? []),
+        ]);
+
+        // Match VTT cues: optional numeric ID, then timestamp --> timestamp, then text
+        // Supports both "123\n00:00:01.000 --> ..." and "00:00:01.000 --> ..." formats
         preg_match_all(
-            '/(\d+)\n(\d{2}:\d{2}:\d{2}\.\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}\.\d{3})\n((?:(?!\n\n|\nWEBVTT).)+)/s',
+            '/(?:^|\n)(?:\d+\n)?(\d{2}:\d{2}:\d{2}\.\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}\.\d{3})[^\n]*\n((?:(?!\n\n|\nWEBVTT|\n\d{2}:\d{2}:\d{2}\.\d{3}\s*-->).)+)/s',
             $allVtt, $matches, PREG_SET_ORDER
         );
 
@@ -373,13 +380,16 @@ class PrepareInstantDubJob implements ShouldQueue
         $srt = '';
         $num = 0;
         foreach ($matches as $m) {
-            $key = "{$m[1]}|{$m[2]}|{$m[3]}";
+            $key = "{$m[1]}|{$m[2]}";
             if (isset($seen[$key])) continue;
             $seen[$key] = true;
-            $text = trim($m[4]);
+            $text = trim($m[3]);
+            // Strip VTT positioning tags like <c> and alignment tags
+            $text = preg_replace('/<[^>]+>/', '', $text);
+            $text = trim($text);
             if ($text === '' || preg_match('/^\[.*\]$/', $text) || preg_match('/^♪/', $text)) continue;
             $num++;
-            $srt .= "{$num}\n" . str_replace('.', ',', $m[2]) . ' --> ' . str_replace('.', ',', $m[3]) . "\n{$text}\n\n";
+            $srt .= "{$num}\n" . str_replace('.', ',', $m[1]) . ' --> ' . str_replace('.', ',', $m[2]) . "\n{$text}\n\n";
         }
 
         return ['srt' => $srt, 'cues' => $num];
