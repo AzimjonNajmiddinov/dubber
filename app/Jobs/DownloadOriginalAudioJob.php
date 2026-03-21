@@ -20,6 +20,9 @@ class DownloadOriginalAudioJob implements ShouldQueue
     public int $timeout = 120;
     public int $tries = 3;
 
+    // Download audio in chunks of this many seconds
+    private const CHUNK_DURATION = 300; // 5 minutes
+
     public function __construct(
         public string $sessionId,
         public string $videoUrl,
@@ -34,58 +37,62 @@ class DownloadOriginalAudioJob implements ShouldQueue
         $session = json_decode($sessionJson, true);
         if (($session['status'] ?? '') === 'stopped') return;
 
-        if (!str_contains($this->videoUrl, '.m3u8')) {
-            Log::info("[DUB] Not an HLS URL, skipping audio download", ['session' => $this->sessionId]);
+        if (!str_contains($this->videoUrl, '.m3u8')) return;
+
+        // Parse audio playlist to get segment URLs + durations
+        $segments = $this->parseAudioPlaylist();
+        if (empty($segments)) {
+            Log::warning("[DUB] No audio segments found in HLS", ['session' => $this->sessionId]);
             return;
         }
 
-        // Prepare the playlist file for ffmpeg
-        $playlistPath = $this->preparePlaylist();
-        if (!$playlistPath) {
-            Log::warning("[DUB] Could not prepare audio playlist", ['session' => $this->sessionId]);
-            return;
+        // Store segments info in Redis for chunked download jobs
+        $totalDuration = array_sum(array_column($segments, 'duration'));
+        Redis::setex("instant-dub:{$this->sessionId}:audio-segments", 86400, json_encode($segments));
+
+        // Update session with video duration
+        $sessionJson = Redis::get($sessionKey);
+        if ($sessionJson) {
+            $s = json_decode($sessionJson, true);
+            $s['video_duration'] = $totalDuration;
+            Redis::setex($sessionKey, 50400, json_encode($s));
         }
 
-        // Start ffmpeg as a detached background process — no timeout limits
-        $tmpDir = storage_path("app/instant-dub/{$this->sessionId}");
-        $outputPath = "{$tmpDir}/original_audio.aac";
-        $donePath = "{$tmpDir}/audio_download.done";
-        $logPath = "{$tmpDir}/ffmpeg_download.log";
+        // Split into time-based chunks and dispatch download jobs
+        $chunkStart = 0;
+        $chunkIndex = 0;
 
-        // Clean up any previous attempt
-        @unlink($outputPath);
-        @unlink($donePath);
+        while ($chunkStart < $totalDuration) {
+            $chunkEnd = min($chunkStart + self::CHUNK_DURATION, $totalDuration);
 
-        $cmd = sprintf(
-            'ffmpeg -y -protocol_whitelist file,http,https,tcp,tls,crypto -i %s -vn -ac 1 -ar 44100 -c:a aac -b:a 96k -f adts %s > %s 2>&1 && touch %s &',
-            escapeshellarg($playlistPath),
-            escapeshellarg($outputPath),
-            escapeshellarg($logPath),
-            escapeshellarg($donePath),
-        );
+            DownloadAudioChunkJob::dispatch(
+                $this->sessionId,
+                $chunkIndex,
+                $chunkStart,
+                $chunkEnd,
+            )->onQueue('default');
 
-        exec($cmd);
+            $chunkStart = $chunkEnd;
+            $chunkIndex++;
+        }
 
-        Log::info("[DUB] Audio download started as background process", ['session' => $this->sessionId]);
-
-        // Dispatch polling job to wait for completion and remix
-        WaitForAudioDownloadJob::dispatch($this->sessionId)
-            ->delay(now()->addSeconds(15))
-            ->onQueue('default');
+        Log::info("[DUB] Audio download split into {$chunkIndex} chunks ({$totalDuration}s total)", [
+            'session' => $this->sessionId,
+        ]);
     }
 
-    private function preparePlaylist(): ?string
+    private function parseAudioPlaylist(): array
     {
         try {
             $masterResp = Http::timeout(10)->get($this->videoUrl);
-            if ($masterResp->failed()) return null;
+            if ($masterResp->failed()) return [];
 
             $master = $masterResp->body();
             $urlWithoutQuery = strtok($this->videoUrl, '?');
             $baseUrl = preg_replace('#/[^/]+$#', '/', $urlWithoutQuery);
             $query = parse_url($this->videoUrl, PHP_URL_QUERY) ?? '';
 
-            // Find first audio track with URI
+            // Find first audio track
             preg_match_all('/^#EXT-X-MEDIA:.*TYPE=AUDIO.*$/m', $master, $audioLines);
             $audioUri = null;
             foreach ($audioLines[0] ?? [] as $line) {
@@ -94,52 +101,51 @@ class DownloadOriginalAudioJob implements ShouldQueue
                     break;
                 }
             }
-
-            if (!$audioUri) return null;
+            if (!$audioUri) return [];
 
             $audioPlaylistUrl = str_starts_with($audioUri, 'http') ? $audioUri : $baseUrl . $audioUri;
             if ($query) $audioPlaylistUrl .= (str_contains($audioPlaylistUrl, '?') ? '&' : '?') . $query;
 
             $audioResp = Http::timeout(10)->get($audioPlaylistUrl);
-            if ($audioResp->failed()) return null;
+            if ($audioResp->failed()) return [];
 
-            $audioPlaylist = $audioResp->body();
             $audioBase = preg_replace('#/[^/]+$#', '/', strtok($audioPlaylistUrl, '?'));
 
-            $rewritten = '';
-            foreach (explode("\n", $audioPlaylist) as $pLine) {
-                $trimmed = trim($pLine);
-                if ($trimmed !== '' && !str_starts_with($trimmed, '#')) {
-                    if (!str_starts_with($trimmed, 'http')) {
-                        $trimmed = $audioBase . $trimmed;
+            // Parse #EXTINF durations and segment URLs
+            $segments = [];
+            $lines = explode("\n", $audioResp->body());
+            $nextDuration = null;
+
+            foreach ($lines as $line) {
+                $trimmed = trim($line);
+                if (preg_match('/^#EXTINF:([\d.]+)/', $trimmed, $m)) {
+                    $nextDuration = (float) $m[1];
+                } elseif ($nextDuration !== null && $trimmed !== '' && !str_starts_with($trimmed, '#')) {
+                    $url = str_starts_with($trimmed, 'http') ? $trimmed : $audioBase . $trimmed;
+                    if ($query && !str_contains($url, '?')) {
+                        $url .= '?' . $query;
                     }
-                    if ($query && !str_contains($trimmed, '?')) {
-                        $trimmed .= '?' . $query;
-                    }
-                    $rewritten .= $trimmed . "\n";
-                } else {
-                    $rewritten .= $pLine . "\n";
+                    $segments[] = [
+                        'url' => $url,
+                        'duration' => $nextDuration,
+                    ];
+                    $nextDuration = null;
                 }
             }
 
-            $tmpDir = storage_path("app/instant-dub/{$this->sessionId}");
-            @mkdir($tmpDir, 0755, true);
-            $localPlaylist = "{$tmpDir}/audio_playlist.m3u8";
-            file_put_contents($localPlaylist, $rewritten);
-
-            return $localPlaylist;
+            return $segments;
         } catch (\Throwable $e) {
-            Log::warning("[DUB] Audio playlist preparation failed", [
+            Log::warning("[DUB] Audio playlist parsing failed", [
                 'session' => $this->sessionId,
                 'error' => $e->getMessage(),
             ]);
-            return null;
+            return [];
         }
     }
 
     public function failed(\Throwable $exception): void
     {
-        Log::warning("[DUB] DownloadOriginalAudioJob failed (non-critical)", [
+        Log::warning("[DUB] DownloadOriginalAudioJob failed", [
             'session' => $this->sessionId,
             'error' => $exception->getMessage(),
         ]);
