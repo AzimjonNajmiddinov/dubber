@@ -457,13 +457,16 @@ class InstantDubController extends Controller
         }
         $chunkValues = $total > 0 ? Redis::mget($chunkKeys) : [];
 
-        // Sequential-only: include segments 0..horizon where ALL are present.
+        // Sequential-only while in progress: include segments 0..horizon where ALL are present.
         // EVENT playlists must only append — never modify existing entries.
-        // This prevents player restarts caused by gap placeholders mutating into real segments.
+        // Once complete: include ALL segments, skipping gaps (use silent fallback for missing).
         $chunks = [];
         $horizon = -1;
         foreach ($chunkValues as $i => $chunkJson) {
-            if (!$chunkJson) break; // stop at first gap
+            if (!$chunkJson) {
+                if ($isComplete) continue; // skip gaps when complete
+                break; // stop at first gap while in progress
+            }
             $chunks[$i] = json_decode($chunkJson, true);
             $horizon = $i;
         }
@@ -494,6 +497,15 @@ class InstantDubController extends Controller
         }
 
         for ($i = 0; $i <= $horizon; $i++) {
+            if (!isset($chunks[$i])) {
+                // Gap: missing chunk — use silent fallback (served by hlsAudioSegment)
+                $entries[] = [
+                    'uri' => "dub-segment/{$i}.aac",
+                    'duration' => 3.0,
+                ];
+                continue;
+            }
+
             $chunk = $chunks[$i];
             $startTime = (float) ($chunk['start_time'] ?? 0);
             $endTime = (float) ($chunk['end_time'] ?? 0);
@@ -501,9 +513,15 @@ class InstantDubController extends Controller
             $slotStart = $startTime;
 
             // slotEnd = next chunk's start, or this chunk's end for the last one
-            $slotEnd = isset($chunks[$i + 1])
-                ? (float) ($chunks[$i + 1]['start_time'] ?? $endTime)
-                : $endTime;
+            // Find next existing chunk for accurate timing
+            $nextStart = null;
+            for ($j = $i + 1; $j <= $horizon; $j++) {
+                if (isset($chunks[$j])) {
+                    $nextStart = (float) ($chunks[$j]['start_time'] ?? 0);
+                    break;
+                }
+            }
+            $slotEnd = $nextStart ?? $endTime;
 
             $slotDur = round(max(0.1, $slotEnd - $slotStart), 3);
 
