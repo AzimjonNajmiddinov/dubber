@@ -351,17 +351,35 @@ class PrepareInstantDubJob implements ShouldQueue
         preg_match_all('/^(\S+\.vtt)$/m', $subsResp->body(), $vttFiles);
         if (empty($vttFiles[1])) return ['srt' => '', 'cues' => 0];
 
-        $allVtt = '';
-        $pool = Http::pool(function ($pool) use ($vttFiles, $subsBase, $resolve) {
-            foreach ($vttFiles[1] as $i => $vttFile) {
-                $pool->as((string) $i)->timeout(8)->get($resolve($subsBase, $vttFile));
-            }
-        });
+        Log::debug("[DUB] VTT playlist: " . count($vttFiles[1]) . " files, first URL: " . $resolve($subsBase, $vttFiles[1][0]), [
+            'session' => $this->sessionId,
+        ]);
 
-        foreach ($pool as $resp) {
-            if ($resp instanceof \Illuminate\Http\Client\Response && $resp->successful()) {
-                $allVtt .= "\n" . $resp->body();
+        // Download VTT segments in batches of 30 to avoid overwhelming CDN
+        $allVtt = '';
+        $failed = 0;
+        $batches = array_chunk($vttFiles[1], 30);
+
+        foreach ($batches as $batch) {
+            $pool = Http::pool(function ($pool) use ($batch, $subsBase, $resolve) {
+                foreach ($batch as $i => $vttFile) {
+                    $pool->as((string) $i)->timeout(15)->get($resolve($subsBase, $vttFile));
+                }
+            });
+
+            foreach ($pool as $resp) {
+                if ($resp instanceof \Illuminate\Http\Client\Response && $resp->successful()) {
+                    $allVtt .= "\n" . $resp->body();
+                } else {
+                    $failed++;
+                }
             }
+        }
+
+        if ($failed > 0) {
+            Log::debug("[DUB] VTT download: {$failed}/" . count($vttFiles[1]) . " segments failed", [
+                'session' => $this->sessionId,
+            ]);
         }
 
         Log::debug("[DUB] VTT content sample (" . strlen($allVtt) . " bytes): " . substr($allVtt, 0, 500), [
