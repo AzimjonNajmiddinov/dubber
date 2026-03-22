@@ -60,7 +60,11 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         $batch = json_decode($batchJson, true);
 
         $batchNum = $this->batchIndex + 1;
-        $this->updateSession(['status' => 'Translating...', 'progress' => "Translating ({$batchNum}/{$this->totalBatches})..."]);
+        // Don't overwrite 'complete' status — iOS app uses it to start playback
+        $currentSession = json_decode(Redis::get("instant-dub:{$this->sessionId}"), true);
+        if (($currentSession['status'] ?? '') !== 'complete') {
+            $this->updateSession(['status' => 'Translating...', 'progress' => "Translating ({$batchNum}/{$this->totalBatches})..."]);
+        }
 
         try {
             // Translate
