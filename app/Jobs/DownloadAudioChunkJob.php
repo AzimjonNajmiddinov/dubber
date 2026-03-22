@@ -130,12 +130,15 @@ class DownloadAudioChunkJob implements ShouldQueue
                 $firstStart = (float) ($chunk0['start_time'] ?? 0);
                 if ($firstStart > 1.0) {
                     $leadFile = "{$aacDir}/lead.aac";
+                    $leadDur = round($firstStart, 3);
+                    // Use anullsrc as base to guarantee exact duration (ADTS trims silence)
                     Process::timeout(30)->run([
                         'ffmpeg', '-y',
-                        '-i', $bgAudioPath,
-                        '-ss', '0', '-t', (string) round($firstStart, 3),
-                        '-af', 'volume=0.2',
-                        '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $leadFile,
+                        '-f', 'lavfi', '-t', (string) $leadDur, '-i', 'anullsrc=r=44100:cl=mono',
+                        '-ss', '0', '-t', (string) $leadDur, '-i', $bgAudioPath,
+                        '-filter_complex',
+                        "[1:a]volume=0.2[bg];[0:a][bg]amix=inputs=2:duration=first:normalize=0",
+                        '-ac', '1', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $leadFile,
                     ]);
                 }
             }
@@ -189,13 +192,14 @@ class DownloadAudioChunkJob implements ShouldQueue
                 if ($gapDuration >= 0.5) {
                     $gapFile = "{$aacDir}/gap-{$i}.aac";
                     $gapSeek = max(0, $segEnd - $this->startTime);
+                    // Use anullsrc base to guarantee exact duration
                     Process::timeout(15)->run([
                         'ffmpeg', '-y',
-                        '-i', $bgAudioPath,
-                        '-ss', (string) round($gapSeek, 3),
-                        '-t', (string) $gapDuration,
-                        '-af', 'volume=0.2',
-                        '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $gapFile,
+                        '-f', 'lavfi', '-t', (string) $gapDuration, '-i', 'anullsrc=r=44100:cl=mono',
+                        '-ss', (string) round($gapSeek, 3), '-t', (string) $gapDuration, '-i', $bgAudioPath,
+                        '-filter_complex',
+                        "[1:a]volume=0.2[bg];[0:a][bg]amix=inputs=2:duration=first:normalize=0",
+                        '-ac', '1', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $gapFile,
                     ]);
                 }
             }
