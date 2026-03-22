@@ -99,7 +99,8 @@ class PrepareInstantDubJob implements ShouldQueue
         // Clean bracket annotations for TTS (GPT sees the raw version)
         foreach ($segments as &$seg) {
             $seg['raw_text'] = $seg['text'];
-            $clean = preg_replace('/\[[^\]]*\]\s*/', '', $seg['text']);
+            $clean = preg_replace('/\{\\\\[^}]*\}\s*/', '', $seg['text']); // SSA/ASS tags like {\an8}
+            $clean = preg_replace('/\[[^\]]*\]\s*/', '', $clean);
             $clean = preg_replace('/^-\s*/', '', $clean);
             $clean = preg_replace('/\s+-\s+/', ' ', $clean);
             $seg['text'] = trim($clean);
@@ -405,6 +406,8 @@ class PrepareInstantDubJob implements ShouldQueue
             $text = trim($m[3]);
             // Strip VTT positioning tags like <c> and alignment tags
             $text = preg_replace('/<[^>]+>/', '', $text);
+            // Strip SSA/ASS override tags like {\an8}
+            $text = preg_replace('/\{\\\\[^}]*\}/', '', $text);
             $text = trim($text);
             if ($text === '' || preg_match('/^\[.*\]$/', $text) || preg_match('/^♪/', $text)) continue;
             $num++;

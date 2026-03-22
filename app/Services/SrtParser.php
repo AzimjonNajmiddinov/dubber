@@ -55,6 +55,10 @@ class SrtParser
             // These come from HLS WebVTT subtitles and cause TTS to pronounce tag names
             $text = strip_tags($text);
 
+            // Strip SSA/ASS override tags like {\an8}, {\pos(x,y)}, {\fad(1,2)}
+            $text = preg_replace('/\{\\\\[^}]*\}/', '', $text);
+            $text = trim($text);
+
             if ($text === '') {
                 continue;
             }
