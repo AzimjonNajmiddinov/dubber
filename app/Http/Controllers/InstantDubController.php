@@ -24,9 +24,6 @@ class InstantDubController extends Controller
             'title' => 'nullable|string|max:255',
         ]);
 
-        // Stop all active sessions before starting a new one
-        $this->stopActiveSessions();
-
         $sessionId = Str::uuid()->toString();
         $language = $request->input('language', 'uz');
         $videoUrl = $request->input('video_url', '');
@@ -823,55 +820,6 @@ class InstantDubController extends Controller
             'Access-Control-Allow-Origin' => '*',
             'Cache-Control' => 'max-age=60',
         ]);
-    }
-
-    /**
-     * Stop all active instant-dub sessions and clean up their resources.
-     */
-    private function stopActiveSessions(): void
-    {
-        $keys = Redis::keys('instant-dub:*');
-        $stopped = 0;
-
-        foreach ($keys as $key) {
-            $clean = str_replace(config('database.redis.options.prefix', ''), '', $key);
-
-            // Only process main session keys (not chunk/voice/etc sub-keys)
-            if (preg_match('/^instant-dub:[a-f0-9-]{36}$/', $clean) === 0) continue;
-
-            $json = Redis::get($clean);
-            if (!$json) continue;
-
-            $session = json_decode($json, true);
-            $status = $session['status'] ?? '';
-
-            if (in_array($status, ['stopped', 'error'])) continue;
-
-            $session['status'] = 'stopped';
-            Redis::setex($clean, 300, json_encode($session));
-
-            // Clean up files (suppress errors — files may be locked by workers)
-            $sessionId = $session['id'] ?? '';
-            if ($sessionId) {
-                @exec("rm -rf " . escapeshellarg(storage_path("app/instant-dub/{$sessionId}")) . " 2>/dev/null");
-                @exec("rm -rf " . escapeshellarg("/tmp/instant-dub-{$sessionId}") . " 2>/dev/null");
-            }
-
-            $stopped++;
-        }
-
-        // Kill any lingering ffmpeg background processes
-        @exec('pkill -f "ffmpeg.*instant-dub" 2>/dev/null');
-
-        // Clear all queues to remove orphaned jobs
-        try {
-            \Illuminate\Support\Facades\Artisan::call('queue:clear', ['connection' => 'redis', '--queue' => 'default', '--force' => true]);
-            \Illuminate\Support\Facades\Artisan::call('queue:clear', ['connection' => 'redis', '--queue' => 'segment-generation', '--force' => true]);
-        } catch (\Throwable) {}
-
-        if ($stopped > 0) {
-            Log::info("[DUB] Stopped {$stopped} active sessions before new session");
-        }
     }
 
     // ── Private helpers ──
