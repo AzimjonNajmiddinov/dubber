@@ -914,9 +914,9 @@ class InstantDubController extends Controller
                 if ($hasBg) {
                     Process::timeout(20)->run([
                         'ffmpeg', '-y',
+                        '-i', $originalAudioPath,
                         '-ss', (string) round($slotStart, 3),
                         '-t', (string) $slotDuration,
-                        '-i', $originalAudioPath,
                         '-af', 'volume=0.2',
                         '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
                     ]);
@@ -935,11 +935,9 @@ class InstantDubController extends Controller
                     Process::timeout(20)->run([
                         'ffmpeg', '-y',
                         '-i', $mp3File,
-                        '-ss', (string) round($slotStart, 3),
-                        '-t', (string) $slotDuration,
-                        '-i', $originalAudioPath,
+                        '-ss', (string) round($slotStart, 3), '-i', $originalAudioPath,
                         '-filter_complex',
-                        "[0:a]aresample=44100,{$delayFilter}apad=whole_dur={$slotDuration}[tts];[1:a]volume=0.2[bg];[tts][bg]amix=inputs=2:duration=first:normalize=0",
+                        "[0:a]aresample=44100,{$delayFilter}apad=whole_dur={$slotDuration}[tts];[1:a]atrim=duration={$slotDuration},volume=0.2[bg];[tts][bg]amix=inputs=2:duration=first:normalize=0",
                         '-t', (string) $slotDuration,
                         '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
                     ]);

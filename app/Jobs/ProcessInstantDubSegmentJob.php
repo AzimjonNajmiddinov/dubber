@@ -390,9 +390,9 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             if ($hasBg) {
                 Process::timeout(15)->run([
                     'ffmpeg', '-y',
+                    '-i', $originalAudioPath,
                     '-ss', (string) round($slotStart, 3),
                     '-t', (string) $slotDuration,
-                    '-i', $originalAudioPath,
                     '-af', 'volume=0.2',
                     '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
                 ]);
@@ -462,11 +462,9 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                 $result = Process::timeout(20)->run([
                     'ffmpeg', '-y',
                     '-i', $ttsMp3,
-                    '-ss', (string) round($slotStart, 3),
-                    '-t', (string) $slotDuration,
-                    '-i', $originalAudioPath,
+                    '-ss', (string) round($slotStart, 3), '-i', $originalAudioPath,
                     '-filter_complex',
-                    "[0:a]aresample=44100,{$delayFilter}apad=whole_dur={$slotDuration}[tts];[1:a]volume=0.2[bg];[tts][bg]amix=inputs=2:duration=first:normalize=0",
+                    "[0:a]aresample=44100,{$delayFilter}apad=whole_dur={$slotDuration}[tts];[1:a]atrim=duration={$slotDuration},volume=0.2[bg];[tts][bg]amix=inputs=2:duration=first:normalize=0",
                     '-t', (string) $slotDuration,
                     '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
                 ]);
@@ -525,9 +523,9 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             if ($hasBg) {
                 Process::timeout(60)->run([
                     'ffmpeg', '-y',
+                    '-i', $originalAudioPath,
                     '-ss', (string) round($tailStart, 3),
                     '-t', (string) $tailDuration,
-                    '-i', $originalAudioPath,
                     '-af', 'volume=0.2',
                     '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
                 ]);
@@ -575,9 +573,8 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             if ($hasBg) {
                 Process::timeout(30)->run([
                     'ffmpeg', '-y',
-                    '-ss', '0',
-                    '-t', (string) $duration,
                     '-i', $originalAudioPath,
+                    '-ss', '0', '-t', (string) $duration,
                     '-af', 'volume=0.2',
                     '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
                 ]);
