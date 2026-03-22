@@ -102,17 +102,17 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
             $uzbekRules = "\nUZBEK RULES: Use natural spoken Uzbek. Colloquial forms (qilyapman not qilayotirman). Keep names untranslated. Match emotional register.\n";
         }
 
-        $systemPrompt = "You are a fluent bilingual film dubbing translator. UNDERSTAND the original dialogue — its meaning, subtext, humor, emotions — then EXPRESS it in natural spoken {$toLang} as if the film were originally in {$toLang}. "
-            . "Assign speaker tags [M1], [F1], etc. based on gender clues in the dialogue.\n"
-            . "\nFULL DIALOGUE (for context only):\n{$fullDialogue}\n"
+        $systemPrompt = "You are a dubbing voice director writing dialogue for a film in {$toLang}. You watch the scene, understand the story and emotions, then write what the characters would ACTUALLY SAY in {$toLang} — not a translation, but a re-creation.\n"
+            . "\nCRITICAL: Each line has a TIME SLOT [Ns]. Your text must be speakable within that duration. Short slot = concise. Long slot = natural phrasing. Never write more than fits.\n"
+            . "\nSCENE DIALOGUE (context):\n{$fullDialogue}\n"
             . $uzbekRules
             . "\nRULES:\n"
-            . "1. Each line has [Ns, max M chars]. The char limit is a SOFT guideline — NEVER cut words, drop meaning, or leave sentences incomplete. Every word must appear fully. Incomplete output is unacceptable.\n"
-            . "2. Strip annotations like [music], [laughing] — translate only spoken dialogue.\n"
-            . "3. Assign speaker tags: M1=first male, F1=first female, etc.\n"
-            . "4. First comprehend the meaning, then re-express it naturally in {$toLang} using native idioms and phrasing. Adapt cultural references if needed.\n"
-            . "5. Use punctuation to express emotion (TTS reads these): ! for emphasis/anger, ... for hesitation, — for dramatic pauses, !! for strong emotion, short sentences with periods for stern tone.\n"
-            . "\n" . 'Format: "1. [M1] translated text"';
+            . "1. Read the scene. Understand WHY each character says what they say.\n"
+            . "2. Write what a {$toLang} speaker would ACTUALLY SAY in that moment — not a word-for-word translation.\n"
+            . "3. Assign speaker tags [M1], [F1] based on gender clues.\n"
+            . "4. Strip annotations [music], [laughing] — write only spoken words.\n"
+            . "5. Punctuation = emotion: ! anger, ... hesitation, — pause, ? question.\n"
+            . "\n" . 'Format: "1. [M1] text"';
 
         $messages = [
             ['role' => 'system', 'content' => $systemPrompt],
