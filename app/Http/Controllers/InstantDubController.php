@@ -600,7 +600,7 @@ class InstantDubController extends Controller
             $cacheControl = in_array($status, ['complete', 'stopped']) ? 'max-age=86400' : 'max-age=10';
 
             return response()->file($aacFile, [
-                'Content-Type' => 'audio/aac',
+                'Content-Type' => 'audio/mp4',
                 'Access-Control-Allow-Origin' => '*',
                 'Cache-Control' => $cacheControl,
             ]);
@@ -616,7 +616,7 @@ class InstantDubController extends Controller
 
         if (file_exists($aacFile) && filesize($aacFile) > 100) {
             return response()->file($aacFile, [
-                'Content-Type' => 'audio/aac',
+                'Content-Type' => 'audio/mp4',
                 'Access-Control-Allow-Origin' => '*',
                 'Cache-Control' => 'max-age=86400',
             ]);
@@ -639,7 +639,7 @@ class InstantDubController extends Controller
             $cacheControl = in_array($status, ['complete', 'stopped']) ? 'max-age=86400' : 'max-age=10';
 
             return response()->file($aacFile, [
-                'Content-Type' => 'audio/aac',
+                'Content-Type' => 'audio/mp4',
                 'Access-Control-Allow-Origin' => '*',
                 'Cache-Control' => $cacheControl,
             ]);
@@ -681,7 +681,7 @@ class InstantDubController extends Controller
         }
 
         return response($aacData, 200, [
-            'Content-Type' => 'audio/aac',
+            'Content-Type' => 'audio/mp4',
             'Content-Length' => strlen($aacData),
             'Access-Control-Allow-Origin' => '*',
             'Cache-Control' => 'max-age=86400',
@@ -830,18 +830,18 @@ class InstantDubController extends Controller
      */
     private function silentAacResponse()
     {
-        $silentFile = storage_path('app/silent.aac');
+        $silentFile = storage_path('app/silent.mp4');
         if (!file_exists($silentFile)) {
             // Generate a 0.5s silent AAC ADTS file
             Process::timeout(5)->run([
                 'ffmpeg', '-y', '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=mono',
-                '-t', '0.5', '-c:a', 'aac', '-b:a', '32k', '-f', 'adts', $silentFile,
+                '-t', '0.5', '-c:a', 'aac', '-b:a', '32k', '-f', 'mp4', '-movflags', '+frag_keyframe+empty_moov+default_base_moof', $silentFile,
             ]);
         }
 
         if (file_exists($silentFile)) {
             return response()->file($silentFile, [
-                'Content-Type' => 'audio/aac',
+                'Content-Type' => 'audio/mp4',
                 'Access-Control-Allow-Origin' => '*',
                 'Cache-Control' => 'max-age=86400',
             ]);
@@ -849,7 +849,7 @@ class InstantDubController extends Controller
 
         // Absolute fallback: empty response
         return response('', 200, [
-            'Content-Type' => 'audio/aac',
+            'Content-Type' => 'audio/mp4',
             'Access-Control-Allow-Origin' => '*',
         ]);
     }
@@ -918,13 +918,13 @@ class InstantDubController extends Controller
                         '-ss', (string) round($slotStart, 3),
                         '-t', (string) $slotDuration,
                         '-af', 'volume=0.2',
-                        '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
+                        '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'mp4', '-movflags', '+frag_keyframe+empty_moov+default_base_moof', $aacFile,
                     ]);
                 } else {
                     Process::timeout(15)->run([
                         'ffmpeg', '-y', '-f', 'lavfi', '-t', (string) $slotDuration,
                         '-i', 'anullsrc=r=44100:cl=mono',
-                        '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
+                        '-c:a', 'aac', '-b:a', '64k', '-f', 'mp4', '-movflags', '+frag_keyframe+empty_moov+default_base_moof', $aacFile,
                     ]);
                 }
             } else {
@@ -939,7 +939,7 @@ class InstantDubController extends Controller
                         '-filter_complex',
                         "[0:a]aresample=44100,{$delayFilter}apad=whole_dur={$slotDuration}[tts];[1:a]atrim=duration={$slotDuration},volume=0.2[bg];[tts][bg]amix=inputs=2:duration=first:normalize=0",
                         '-t', (string) $slotDuration,
-                        '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
+                        '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'mp4', '-movflags', '+frag_keyframe+empty_moov+default_base_moof', $aacFile,
                     ]);
                 } else {
                     $delayFilter = $preGapMs > 0 ? "adelay={$preGapMs}|{$preGapMs}," : '';
@@ -947,7 +947,7 @@ class InstantDubController extends Controller
                         'ffmpeg', '-y', '-i', $mp3File,
                         '-af', "aresample=44100,{$delayFilter}apad=whole_dur={$slotDuration}",
                         '-t', (string) $slotDuration,
-                        '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
+                        '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'mp4', '-movflags', '+frag_keyframe+empty_moov+default_base_moof', $aacFile,
                     ]);
                 }
             }

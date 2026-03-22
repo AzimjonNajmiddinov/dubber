@@ -76,7 +76,7 @@ class DownloadAudioChunkJob implements ShouldQueue
             '-i', $tmpPlaylist,
             '-vn', '-ac', '1', '-ar', '44100',
             '-c:a', 'aac', '-b:a', '96k',
-            '-f', 'adts', $chunkFile,
+            '-f', 'adts', $chunkFile,  // background chunk stays ADTS (no padding needed)
         ]);
 
         @unlink($tmpPlaylist);
@@ -147,7 +147,7 @@ class DownloadAudioChunkJob implements ShouldQueue
                         '-i', $bgAudioPath,
                         '-ss', '0', '-t', (string) round($firstStart, 3),
                         '-af', 'volume=0.2',
-                        '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $leadFile,
+                        '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'mp4', '-movflags', '+frag_keyframe+empty_moov+default_base_moof', $leadFile,
                     ]);
                 }
             }
@@ -206,7 +206,7 @@ class DownloadAudioChunkJob implements ShouldQueue
                 '-filter_complex',
                 "[0:a]aresample=44100,apad=whole_dur={$slotDuration}[tts];[1:a]atrim=duration={$slotDuration},volume=0.2[bg];[tts][bg]amix=inputs=2:duration=first:normalize=0",
                 '-t', (string) $slotDuration,
-                '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
+                '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'mp4', '-movflags', '+frag_keyframe+empty_moov+default_base_moof', $aacFile,
             ]);
 
             @unlink($tmpMp3);
