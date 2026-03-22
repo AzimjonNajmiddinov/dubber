@@ -525,7 +525,8 @@ class InstantDubController extends Controller
             $chunk = $chunks[$i];
             $startTime = (float) ($chunk['start_time'] ?? 0);
             $endTime = (float) ($chunk['end_time'] ?? 0);
-            $speechDur = round(max(0.1, $endTime - $startTime), 3);
+            // 0.3s buffer to avoid cutting off last word
+            $speechDur = round(max(0.1, $endTime - $startTime + 0.3), 3);
 
             // Speech segment
             $entries[] = [
@@ -542,7 +543,8 @@ class InstantDubController extends Controller
                 }
             }
             if ($nextStart !== null) {
-                $gapDur = round($nextStart - $endTime, 3);
+                // Subtract buffer from gap to keep total timeline correct
+                $gapDur = round($nextStart - $endTime - 0.3, 3);
                 if ($gapDur >= 0.5) {
                     $entries[] = [
                         'uri' => "dub-segment/gap-{$i}.aac",

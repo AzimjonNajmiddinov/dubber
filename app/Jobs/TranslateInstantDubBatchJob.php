@@ -582,11 +582,17 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         }
 
         $titleHint = ($this->title && $this->title !== 'Untitled')
-            ? "\nFILM/SERIES TITLE: \"{$this->title}\" — use your knowledge of this title to:\n"
-            . "- Identify the exact scene based on the dialogue lines and their order in the plot timeline\n"
-            . "- Know which characters appear in this scene and who says what\n"
-            . "- Use character names, genders, ages, and relationships from your knowledge of the film\n"
-            . "- Match dialogue lines to the correct characters based on plot context, not just grammar\n"
+            ? "\nFILM/SERIES TITLE: \"{$this->title}\"\n"
+            . "\nBEFORE analyzing the dialogue, recall everything you know about this film/series:\n"
+            . "- Full plot summary and timeline of events\n"
+            . "- ALL characters: their names, genders, ages, relationships, personalities\n"
+            . "- The emotional arc of the story — what happens in each act\n"
+            . "- Key scenes and who appears in them\n"
+            . "- How characters speak — formal/informal, their speech patterns, catchphrases\n"
+            . "\nNow match this dialogue to the EXACT SCENE in the plot timeline. Based on the dialogue content and order, identify:\n"
+            . "- Which scene this is (beginning, middle, climax, etc.)\n"
+            . "- Which characters are present in THIS specific scene\n"
+            . "- Who says each line based on plot context, character personality, and story logic\n"
             : '';
 
         $prompt = "You are analyzing a film/series dialogue to identify speakers. This is CRITICAL for voice dubbing — wrong gender = wrong voice actor.\n"
@@ -679,7 +685,12 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         }
 
         $titleHint = ($this->title && $this->title !== 'Untitled')
-            ? "\nFILM/SERIES TITLE: \"{$this->title}\" — you know this title. Use your knowledge of the plot, characters, their relationships, and the tone of the story to produce accurate, contextually appropriate translations.\n"
+            ? "\nFILM/SERIES TITLE: \"{$this->title}\"\n"
+            . "You KNOW this film. Before writing any dialogue, recall:\n"
+            . "- The full plot, story arc, and what happens in this scene\n"
+            . "- Each character's personality, speech style, emotional state at this point in the story\n"
+            . "- The relationships and tensions between characters in this moment\n"
+            . "Write the dialogue as if you've watched this film 10 times and know every character intimately.\n"
             : '';
 
         $systemPrompt = "You are a professional dubbing voice director. You watch a film scene, deeply understand what is happening — the story, relationships, emotions, subtext — and then write the dialogue in {$toLang} exactly as actors would say it if this film was ORIGINALLY MADE in {$toLang}.\n"
