@@ -373,19 +373,36 @@ class InstantDubController extends Controller
         $groupId = $existingAudioGroup ?? 'audio';
         $subsGroupId = $existingSubsGroup ?? 'subs';
         $output = [];
-        $injected = false;
+        $dubInjected = false;
 
         foreach ($lines as $line) {
             $trimmed = trim($line);
 
-            // Inject dub audio + subtitle tracks before the first STREAM-INF
-            if (!$injected && str_starts_with($trimmed, '#EXT-X-STREAM-INF')) {
+            // Inject dub audio track BEFORE existing audio tracks so iOS picks it first
+            if (!$dubInjected && str_starts_with($trimmed, '#EXT-X-MEDIA') && str_contains($trimmed, 'TYPE=AUDIO')) {
+                $output[] = "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"{$groupId}\",NAME=\"{$dubName}\",LANGUAGE=\"{$lang}\",URI=\"dub-audio.m3u8\",DEFAULT=YES,AUTOSELECT=YES";
+                $dubInjected = true;
+            }
+
+            // Inject before STREAM-INF if no existing audio tracks
+            if (!$dubInjected && str_starts_with($trimmed, '#EXT-X-STREAM-INF')) {
                 if (!$existingAudioGroup) {
                     $output[] = "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"{$groupId}\",NAME=\"Original\",DEFAULT=NO,AUTOSELECT=NO";
                 }
                 $output[] = "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"{$groupId}\",NAME=\"{$dubName}\",LANGUAGE=\"{$lang}\",URI=\"dub-audio.m3u8\",DEFAULT=YES,AUTOSELECT=YES";
                 $output[] = "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"{$subsGroupId}\",NAME=\"{$subName}\",LANGUAGE=\"{$lang}\",URI=\"dub-subtitles.m3u8\",DEFAULT=NO,AUTOSELECT=YES,FORCED=NO";
-                $injected = true;
+                $dubInjected = true;
+            }
+
+            // Inject subtitles before STREAM-INF
+            if (str_starts_with($trimmed, '#EXT-X-STREAM-INF') && !str_contains(implode("\n", $output), 'dub-subtitles')) {
+                $output[] = "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"{$subsGroupId}\",NAME=\"{$subName}\",LANGUAGE=\"{$lang}\",URI=\"dub-subtitles.m3u8\",DEFAULT=NO,AUTOSELECT=YES,FORCED=NO";
+            }
+
+            // Set existing audio tracks to DEFAULT=NO
+            if (str_starts_with($trimmed, '#EXT-X-MEDIA') && str_contains($trimmed, 'TYPE=AUDIO') && !str_contains($trimmed, 'dub-audio')) {
+                $line = preg_replace('/DEFAULT=YES/', 'DEFAULT=NO', $line);
+                $line = preg_replace('/AUTOSELECT=YES/', 'AUTOSELECT=NO', $line);
             }
 
             // Ensure STREAM-INF lines reference audio + subtitle groups
