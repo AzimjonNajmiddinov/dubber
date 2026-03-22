@@ -609,12 +609,10 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             session['last_progress_at'] = tonumber(ARGV[1])
             local total = session['total_segments'] or 999999
             if session['segments_ready'] >= total then
-                session['all_done'] = true
                 session['status'] = 'complete'
                 session['playable'] = true
             elseif not session['playable'] and session['segments_ready'] >= math.min(math.ceil(total * 0.1), 30) then
                 session['playable'] = true
-                session['status'] = 'complete'
             end
             redis.call('SETEX', KEYS[1], 50400, cjson.encode(session))
             return session['segments_ready']

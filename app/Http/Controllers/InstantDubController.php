@@ -89,7 +89,6 @@ class InstantDubController extends Controller
                 // No progress for 2 minutes — force complete
                 $session['status'] = 'complete';
                 $session['playable'] = true;
-                $session['all_done'] = true;
                 Redis::setex("instant-dub:{$sessionId}", 50400, json_encode($session));
                 Log::warning("[DUB] Session auto-completed (stale): {$ready}/{$total} segments", [
                     'session' => $sessionId,
@@ -469,7 +468,7 @@ class InstantDubController extends Controller
 
         $total = (int) ($session['total_segments'] ?? 0);
         $status = $session['status'] ?? 'preparing';
-        $allDone = !empty($session['all_done']) || $status === 'stopped';
+        $allDone = in_array($status, ['complete', 'stopped']);
 
         // Batch fetch all chunks in one Redis call (eliminates N+1)
         $chunkKeys = [];
@@ -601,8 +600,7 @@ class InstantDubController extends Controller
         if (file_exists($aacFile) && filesize($aacFile) > 100) {
             $session = $this->getSession($sessionId);
             $status = $session['status'] ?? 'processing';
-            $allDoneForCache = !empty($session['all_done']) || $status === 'stopped';
-            $cacheControl = $allDoneForCache ? 'max-age=86400' : 'max-age=10';
+            $cacheControl = in_array($status, ['complete', 'stopped']) ? 'max-age=86400' : 'max-age=10';
 
             return response()->file($aacFile, [
                 'Content-Type' => 'audio/aac',
@@ -641,8 +639,7 @@ class InstantDubController extends Controller
             // Only use long cache once session is complete.
             $session = $this->getSession($sessionId);
             $status = $session['status'] ?? 'processing';
-            $allDoneForCache = !empty($session['all_done']) || $status === 'stopped';
-            $cacheControl = $allDoneForCache ? 'max-age=86400' : 'max-age=10';
+            $cacheControl = in_array($status, ['complete', 'stopped']) ? 'max-age=86400' : 'max-age=10';
 
             return response()->file($aacFile, [
                 'Content-Type' => 'audio/aac',
