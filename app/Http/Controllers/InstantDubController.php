@@ -525,8 +525,9 @@ class InstantDubController extends Controller
             $chunk = $chunks[$i];
             $startTime = (float) ($chunk['start_time'] ?? 0);
             $endTime = (float) ($chunk['end_time'] ?? 0);
-            // 0.3s buffer to avoid cutting off last word
-            $speechDur = round(max(0.1, $endTime - $startTime + 0.3), 3);
+            // Use actual TTS duration from chunk if available, else use subtitle timing
+            $audioDuration = (float) ($chunk['audio_duration'] ?? 0);
+            $speechDur = round(max(0.1, $audioDuration > 0 ? max($audioDuration, $endTime - $startTime) : $endTime - $startTime), 3);
 
             // Speech segment
             $entries[] = [
@@ -543,8 +544,9 @@ class InstantDubController extends Controller
                 }
             }
             if ($nextStart !== null) {
-                // Subtract buffer from gap to keep total timeline correct
-                $gapDur = round($nextStart - $endTime - 0.3, 3);
+                // Adjust gap to account for speech that might overflow subtitle timing
+                $speechOverflow = max(0, $speechDur - ($endTime - $startTime));
+                $gapDur = round($nextStart - $endTime - $speechOverflow, 3);
                 if ($gapDur >= 0.5) {
                     $entries[] = [
                         'uri' => "dub-segment/gap-{$i}.aac",

@@ -498,8 +498,9 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         $bgChunkStart = $this->findBgChunkStart($session, $this->startTime);
         $seekInBg = max(0, $this->startTime - $bgChunkStart);
 
-        // Add 0.3s buffer so TTS doesn't get cut off at the end
-        $speechDuration = round($this->endTime - $this->startTime + 0.3, 3);
+        // Use the actual TTS duration (after tempo adjustment), not subtitle timing
+        // This ensures the full TTS plays without cutoff
+        $speechDuration = round(max($ttsDuration, $this->endTime - $this->startTime), 3);
 
         $aacDir = storage_path("app/instant-dub/{$this->sessionId}/aac");
         $aacFile = "{$aacDir}/{$this->index}.aac";
