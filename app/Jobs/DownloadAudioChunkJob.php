@@ -144,8 +144,8 @@ class DownloadAudioChunkJob implements ShouldQueue
                     $leadFile = "{$aacDir}/lead.aac";
                     Process::timeout(30)->run([
                         'ffmpeg', '-y',
-                        '-ss', '0', '-t', (string) round($firstStart, 3),
                         '-i', $bgAudioPath,
+                        '-ss', '0', '-t', (string) round($firstStart, 3),
                         '-af', 'volume=0.2',
                         '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $leadFile,
                     ]);
@@ -186,11 +186,9 @@ class DownloadAudioChunkJob implements ShouldQueue
             $result = Process::timeout(20)->run([
                 'ffmpeg', '-y',
                 '-i', $tmpMp3,
-                '-ss', (string) round($seekInBg, 3),
-                '-t', (string) $slotDuration,
-                '-i', $bgAudioPath,
+                '-ss', (string) round($seekInBg, 3), '-i', $bgAudioPath,
                 '-filter_complex',
-                "[0:a]aresample=44100,apad=whole_dur={$slotDuration}[tts];[1:a]volume=0.2[bg];[tts][bg]amix=inputs=2:duration=first:normalize=0",
+                "[0:a]aresample=44100,apad=whole_dur={$slotDuration}[tts];[1:a]atrim=duration={$slotDuration},volume=0.2[bg];[tts][bg]amix=inputs=2:duration=first:normalize=0",
                 '-t', (string) $slotDuration,
                 '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
             ]);
