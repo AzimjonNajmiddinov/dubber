@@ -106,6 +106,33 @@ class DownloadAudioChunkJob implements ShouldQueue
         ]);
 
         $this->remixSegmentsInRange($chunkFile);
+
+        // Check if all TTS segments are ready + bg is now available → set complete/playable
+        $this->checkAndSetComplete();
+    }
+
+    private function checkAndSetComplete(): void
+    {
+        $lua = <<<'LUA'
+            local data = redis.call('GET', KEYS[1])
+            if not data then return 0 end
+            local session = cjson.decode(data)
+            local ready = session['segments_ready'] or 0
+            local total = session['total_segments'] or 999999
+            local hasBg = session['bg_chunks'] ~= nil and next(session['bg_chunks']) ~= nil
+            if not hasBg then return ready end
+            if ready >= total and session['status'] ~= 'complete' then
+                session['status'] = 'complete'
+                session['playable'] = true
+                redis.call('SETEX', KEYS[1], 50400, cjson.encode(session))
+            elseif not session['playable'] and ready >= math.min(math.ceil(total * 0.1), 30) then
+                session['playable'] = true
+                redis.call('SETEX', KEYS[1], 50400, cjson.encode(session))
+            end
+            return ready
+        LUA;
+
+        Redis::eval($lua, 1, "instant-dub:{$this->sessionId}");
     }
 
     private function remixSegmentsInRange(string $bgAudioPath): void
