@@ -555,7 +555,7 @@ class InstantDubController extends Controller
         }
 
         $m3u8 = "#EXTM3U\n";
-        $m3u8 .= "#EXT-X-VERSION:3\n";
+        $m3u8 .= "#EXT-X-VERSION:7\n";
         $m3u8 .= "#EXT-X-TARGETDURATION:{$maxDur}\n";
         $m3u8 .= "#EXT-X-MEDIA-SEQUENCE:0\n";
         $m3u8 .= "#EXT-X-INDEPENDENT-SEGMENTS\n";
@@ -711,7 +711,7 @@ class InstantDubController extends Controller
         }
 
         $m3u8 = "#EXTM3U\n";
-        $m3u8 .= "#EXT-X-VERSION:3\n";
+        $m3u8 .= "#EXT-X-VERSION:7\n";
         $m3u8 .= "#EXT-X-TARGETDURATION:{$totalDuration}\n";
         $m3u8 .= "#EXT-X-MEDIA-SEQUENCE:0\n";
 
