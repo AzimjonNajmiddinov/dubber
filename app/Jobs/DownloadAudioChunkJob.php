@@ -158,20 +158,27 @@ class DownloadAudioChunkJob implements ShouldQueue
             if (!$audioBase64) continue;
 
             $aacFile = "{$aacDir}/{$i}.aac";
-            $speechDuration = round(max(0.1, $segEnd - $segStart), 3);
             $seekInBg = max(0, $segStart - $this->startTime);
+
+            // Compute full slot duration (speech + gap until next segment)
+            $nextChunkJson = Redis::get("{$sessionKey}:chunk:" . ($i + 1));
+            $nextStart = $nextChunkJson
+                ? (float) (json_decode($nextChunkJson, true)['start_time'] ?? $segEnd)
+                : $segEnd;
+            $slotDuration = round(max(0.1, $nextStart - $segStart), 3);
 
             $tmpMp3 = "/tmp/remix_{$this->sessionId}_{$i}.mp3";
             file_put_contents($tmpMp3, base64_decode($audioBase64));
 
-            // Speech segment: TTS + background (speech duration only)
+            // ONE segment: TTS overlaid on background for full slot duration
+            // Real background audio preserves ADTS duration (no silent trim issue)
             $result = Process::timeout(20)->run([
                 'ffmpeg', '-y',
+                '-ss', (string) round($seekInBg, 3), '-t', (string) $slotDuration, '-i', $bgAudioPath,
                 '-i', $tmpMp3,
-                '-ss', (string) round($seekInBg, 3), '-i', $bgAudioPath,
                 '-filter_complex',
-                "[0:a]aresample=44100[tts];[1:a]atrim=duration={$speechDuration},volume=0.2[bg];[tts][bg]amix=inputs=2:duration=longest:normalize=0",
-                '-t', (string) $speechDuration,
+                "[0:a]volume=0.2,aresample=44100[bg];[1:a]aresample=44100[tts];[bg][tts]amix=inputs=2:duration=first:normalize=0",
+                '-t', (string) $slotDuration,
                 '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
             ]);
 
@@ -179,29 +186,6 @@ class DownloadAudioChunkJob implements ShouldQueue
 
             if ($result->successful()) {
                 $remixed++;
-            }
-
-            // Gap segment: background audio between this speech and next
-            $nextChunkJson = Redis::get("{$sessionKey}:chunk:" . ($i + 1));
-            $nextStart = $nextChunkJson
-                ? (float) (json_decode($nextChunkJson, true)['start_time'] ?? null)
-                : null;
-
-            if ($nextStart !== null) {
-                $gapDuration = round($nextStart - $segEnd, 3);
-                if ($gapDuration >= 0.5) {
-                    $gapFile = "{$aacDir}/gap-{$i}.aac";
-                    $gapSeek = max(0, $segEnd - $this->startTime);
-                    // Use anullsrc base to guarantee exact duration
-                    Process::timeout(15)->run([
-                        'ffmpeg', '-y',
-                        '-f', 'lavfi', '-t', (string) $gapDuration, '-i', 'anullsrc=r=44100:cl=mono',
-                        '-ss', (string) round($gapSeek, 3), '-t', (string) $gapDuration, '-i', $bgAudioPath,
-                        '-filter_complex',
-                        "[1:a]volume=0.2[bg];[0:a][bg]amix=inputs=2:duration=first:normalize=0",
-                        '-ac', '1', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $gapFile,
-                    ]);
-                }
             }
         }
 

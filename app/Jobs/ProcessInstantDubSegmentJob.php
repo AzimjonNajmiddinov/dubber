@@ -494,13 +494,11 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         $originalAudioPath = $session['original_audio_path'] ?? null;
         $hasBg = $originalAudioPath && file_exists($originalAudioPath);
 
-        // Find the chunk's start time to calculate correct seek position
         $bgChunkStart = $this->findBgChunkStart($session, $this->startTime);
         $seekInBg = max(0, $this->startTime - $bgChunkStart);
 
-        // Use the actual TTS duration (after tempo adjustment), not subtitle timing
-        // This ensures the full TTS plays without cutoff
-        $speechDuration = round(max($ttsDuration, $this->endTime - $this->startTime), 3);
+        $slotEnd = $this->slotEnd ?? $this->endTime;
+        $slotDuration = round(max(0.1, $slotEnd - $this->startTime), 3);
 
         $aacDir = storage_path("app/instant-dub/{$this->sessionId}/aac");
         $aacFile = "{$aacDir}/{$this->index}.aac";
@@ -510,37 +508,24 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         }
 
         try {
-            // Speech segment: TTS mixed with background (speech duration only)
             if ($hasBg) {
+                // ONE segment for full slot: TTS overlaid on background audio
+                // Real background audio preserves ADTS duration (no silent trim)
                 $result = Process::timeout(20)->run([
                     'ffmpeg', '-y',
+                    '-ss', (string) round($seekInBg, 3), '-t', (string) $slotDuration, '-i', $originalAudioPath,
                     '-i', $ttsMp3,
-                    '-ss', (string) round($seekInBg, 3), '-i', $originalAudioPath,
                     '-filter_complex',
-                    "[0:a]aresample=44100[tts];[1:a]atrim=duration={$speechDuration},volume=0.2[bg];[tts][bg]amix=inputs=2:duration=longest:normalize=0",
-                    '-t', (string) $speechDuration,
+                    "[0:a]volume=0.2,aresample=44100[bg];[1:a]aresample=44100[tts];[bg][tts]amix=inputs=2:duration=first:normalize=0",
+                    '-t', (string) $slotDuration,
                     '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
                 ]);
                 if (!$result->successful() || !file_exists($aacFile) || filesize($aacFile) < 100) {
-                    // Fallback: TTS only
-                    Process::timeout(15)->run([
-                        'ffmpeg', '-y', '-i', $ttsMp3,
-                        '-af', 'aresample=44100',
-                        '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
-                    ]);
+                    $this->generateTtsOnlyAac($ttsMp3);
                 }
             } else {
-                // No background — just TTS
-                Process::timeout(15)->run([
-                    'ffmpeg', '-y', '-i', $ttsMp3,
-                    '-af', 'aresample=44100',
-                    '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
-                ]);
+                $this->generateTtsOnlyAac($ttsMp3);
             }
-
-            // Generate gap segment with background audio
-            $this->generateGapAacWithBg($session);
-
         } catch (\Throwable $e) {
             Log::warning("[DUB] Segment #{$this->index} HLS AAC failed: " . $e->getMessage(), [
                 'session' => $this->sessionId,
