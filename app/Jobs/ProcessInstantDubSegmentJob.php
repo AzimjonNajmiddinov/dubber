@@ -394,13 +394,13 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                     '-ss', (string) round($slotStart, 3),
                     '-t', (string) $slotDuration,
                     '-af', 'volume=0.2',
-                    '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'mp4', '-movflags', '+frag_keyframe+empty_moov+default_base_moof', $aacFile,
+                    '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
                 ]);
             } else {
                 Process::timeout(10)->run([
                     'ffmpeg', '-y', '-f', 'lavfi', '-t', (string) $slotDuration,
                     '-i', 'anullsrc=r=44100:cl=mono',
-                    '-c:a', 'aac', '-b:a', '64k', '-f', 'mp4', '-movflags', '+frag_keyframe+empty_moov+default_base_moof', $aacFile,
+                    '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
                 ]);
             }
         } catch (\Throwable) {
@@ -410,25 +410,48 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
 
     private function generateTtsOnlyAac(string $ttsMp3): void
     {
-        $slotStart = $this->startTime;
-        $slotEnd = $this->slotEnd ?? $this->endTime;
-        $slotDuration = round(max(0.1, $slotEnd - $slotStart), 3);
-
         $aacDir = storage_path("app/instant-dub/{$this->sessionId}/aac");
         $aacFile = "{$aacDir}/{$this->index}.aac";
         if (!is_dir($aacDir)) @mkdir($aacDir, 0755, true);
 
-        // TTS-only AAC — no background audio mixed in
-        // Will be overwritten by DownloadAudioChunkJob when background arrives
+        // Speech-only AAC — just the TTS duration, no padding
+        // ADTS format drops silent padding, so we generate gap segments separately
         try {
             Process::timeout(15)->run([
                 'ffmpeg', '-y', '-i', $ttsMp3,
-                '-af', "aresample=44100,apad=whole_dur={$slotDuration}",
-                '-t', (string) $slotDuration,
-                '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'mp4', '-movflags', '+frag_keyframe+empty_moov+default_base_moof', $aacFile,
+                '-af', 'aresample=44100',
+                '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
             ]);
         } catch (\Throwable $e) {
             Log::warning("[DUB] TTS-only AAC failed for segment #{$this->index}: " . $e->getMessage(), [
+                'session' => $this->sessionId,
+            ]);
+        }
+
+        // Generate gap segment (silence between this speech and next)
+        $this->generateGapAac();
+    }
+
+    private function generateGapAac(): void
+    {
+        $slotEnd = $this->slotEnd;
+        if ($slotEnd === null) return; // last segment, no gap
+
+        $gapStart = $this->endTime;
+        $gapDuration = round($slotEnd - $gapStart, 3);
+        if ($gapDuration < 0.5) return; // too short, skip
+
+        $aacDir = storage_path("app/instant-dub/{$this->sessionId}/aac");
+        $gapFile = "{$aacDir}/gap-{$this->index}.aac";
+
+        try {
+            Process::timeout(15)->run([
+                'ffmpeg', '-y', '-f', 'lavfi', '-t', (string) $gapDuration,
+                '-i', 'anullsrc=r=44100:cl=mono',
+                '-c:a', 'aac', '-b:a', '32k', '-f', 'adts', $gapFile,
+            ]);
+        } catch (\Throwable $e) {
+            Log::warning("[DUB] Gap AAC failed for segment #{$this->index}: " . $e->getMessage(), [
                 'session' => $this->sessionId,
             ]);
         }
@@ -439,13 +462,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         $originalAudioPath = $session['original_audio_path'] ?? null;
         $hasBg = $originalAudioPath && file_exists($originalAudioPath);
 
-        // Compute slot bounds: segment starts at its dialogue time, extends to next segment
-        $slotStart = $this->startTime;
-        $slotEnd = $this->slotEnd ?? $this->endTime;
-
-        $slotDuration = round(max(0.1, $slotEnd - $slotStart), 3);
-        $preGap = max(0, $this->startTime - $slotStart);
-        $preGapMs = (int) round($preGap * 1000);
+        $speechDuration = round($this->endTime - $this->startTime, 3);
 
         $aacDir = storage_path("app/instant-dub/{$this->sessionId}/aac");
         $aacFile = "{$aacDir}/{$this->index}.aac";
@@ -455,40 +472,78 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         }
 
         try {
-            $delayFilter = $preGapMs > 0 ? "adelay={$preGapMs}|{$preGapMs}," : '';
-            $mixed = false;
-
+            // Speech segment: TTS mixed with background (speech duration only)
             if ($hasBg) {
                 $result = Process::timeout(20)->run([
                     'ffmpeg', '-y',
                     '-i', $ttsMp3,
-                    '-ss', (string) round($slotStart, 3), '-i', $originalAudioPath,
+                    '-ss', (string) round($this->startTime, 3), '-i', $originalAudioPath,
                     '-filter_complex',
-                    "[0:a]aresample=44100,{$delayFilter}apad=whole_dur={$slotDuration}[tts];[1:a]atrim=duration={$slotDuration},volume=0.2[bg];[tts][bg]amix=inputs=2:duration=first:normalize=0",
-                    '-t', (string) $slotDuration,
-                    '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'mp4', '-movflags', '+frag_keyframe+empty_moov+default_base_moof', $aacFile,
+                    "[0:a]aresample=44100[tts];[1:a]atrim=duration={$speechDuration},volume=0.2[bg];[tts][bg]amix=inputs=2:duration=longest:normalize=0",
+                    '-t', (string) $speechDuration,
+                    '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
                 ]);
-                $mixed = $result->successful() && file_exists($aacFile) && filesize($aacFile) > 100;
-                if (!$mixed) {
-                    Log::warning("[DUB] Segment #{$this->index} bg mix failed, falling back to TTS-only", [
-                        'session' => $this->sessionId,
-                        'error' => Str::limit($result->errorOutput(), 200),
+                if (!$result->successful() || !file_exists($aacFile) || filesize($aacFile) < 100) {
+                    // Fallback: TTS only
+                    Process::timeout(15)->run([
+                        'ffmpeg', '-y', '-i', $ttsMp3,
+                        '-af', 'aresample=44100',
+                        '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
                     ]);
                 }
-            }
-
-            if (!$mixed) {
+            } else {
+                // No background — just TTS
                 Process::timeout(15)->run([
                     'ffmpeg', '-y', '-i', $ttsMp3,
-                    '-af', "aresample=44100,{$delayFilter}apad=whole_dur={$slotDuration}",
-                    '-t', (string) $slotDuration,
-                    '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'mp4', '-movflags', '+frag_keyframe+empty_moov+default_base_moof', $aacFile,
+                    '-af', 'aresample=44100',
+                    '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
+                ]);
+            }
+
+            // Generate gap segment with background audio
+            $this->generateGapAacWithBg($session);
+
+        } catch (\Throwable $e) {
+            Log::warning("[DUB] Segment #{$this->index} HLS AAC failed: " . $e->getMessage(), [
+                'session' => $this->sessionId,
+            ]);
+        }
+    }
+
+    private function generateGapAacWithBg(array $session): void
+    {
+        $slotEnd = $this->slotEnd;
+        if ($slotEnd === null) return;
+
+        $gapStart = $this->endTime;
+        $gapDuration = round($slotEnd - $gapStart, 3);
+        if ($gapDuration < 0.5) return;
+
+        $aacDir = storage_path("app/instant-dub/{$this->sessionId}/aac");
+        $gapFile = "{$aacDir}/gap-{$this->index}.aac";
+
+        $originalAudioPath = $session['original_audio_path'] ?? null;
+        $hasBg = $originalAudioPath && file_exists($originalAudioPath);
+
+        try {
+            if ($hasBg) {
+                Process::timeout(20)->run([
+                    'ffmpeg', '-y',
+                    '-i', $originalAudioPath,
+                    '-ss', (string) round($gapStart, 3),
+                    '-t', (string) $gapDuration,
+                    '-af', 'volume=0.2',
+                    '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $gapFile,
+                ]);
+            } else {
+                Process::timeout(15)->run([
+                    'ffmpeg', '-y', '-f', 'lavfi', '-t', (string) $gapDuration,
+                    '-i', 'anullsrc=r=44100:cl=mono',
+                    '-c:a', 'aac', '-b:a', '32k', '-f', 'adts', $gapFile,
                 ]);
             }
         } catch (\Throwable $e) {
-            Log::warning("[DUB] Segment #{$this->index} HLS AAC pre-generation failed: " . $e->getMessage(), [
-                'session' => $this->sessionId,
-            ]);
+            // Non-fatal
         }
     }
 
@@ -527,13 +582,13 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                     '-ss', (string) round($tailStart, 3),
                     '-t', (string) $tailDuration,
                     '-af', 'volume=0.2',
-                    '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'mp4', '-movflags', '+frag_keyframe+empty_moov+default_base_moof', $aacFile,
+                    '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
                 ]);
             } else {
                 Process::timeout(30)->run([
                     'ffmpeg', '-y', '-f', 'lavfi', '-t', (string) $tailDuration,
                     '-i', 'anullsrc=r=44100:cl=mono',
-                    '-c:a', 'aac', '-b:a', '32k', '-f', 'mp4', '-movflags', '+frag_keyframe+empty_moov+default_base_moof', $aacFile,
+                    '-c:a', 'aac', '-b:a', '32k', '-f', 'adts', $aacFile,
                 ]);
             }
 
@@ -576,13 +631,13 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                     '-i', $originalAudioPath,
                     '-ss', '0', '-t', (string) $duration,
                     '-af', 'volume=0.2',
-                    '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'mp4', '-movflags', '+frag_keyframe+empty_moov+default_base_moof', $aacFile,
+                    '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
                 ]);
             } else {
                 Process::timeout(15)->run([
                     'ffmpeg', '-y', '-f', 'lavfi', '-t', (string) $duration,
                     '-i', 'anullsrc=r=44100:cl=mono',
-                    '-c:a', 'aac', '-b:a', '32k', '-f', 'mp4', '-movflags', '+frag_keyframe+empty_moov+default_base_moof', $aacFile,
+                    '-c:a', 'aac', '-b:a', '32k', '-f', 'adts', $aacFile,
                 ]);
             }
         } catch (\Throwable $e) {

@@ -129,7 +129,7 @@ class WaitForAudioDownloadJob implements ShouldQueue
                             '-ss', '0', '-t', (string) round($firstStart, 3),
                             '-i', $originalAudioPath,
                             '-af', $bgFilter,
-                            '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'mp4', '-movflags', '+frag_keyframe+empty_moov+default_base_moof', $leadFile,
+                            '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $leadFile,
                         ]);
                         Log::info("[DUB] Remixed lead.aac with background audio ({$firstStart}s)", [
                             'session' => $this->sessionId,
@@ -178,7 +178,7 @@ class WaitForAudioDownloadJob implements ShouldQueue
                     '-filter_complex',
                     "[0:a]aresample=44100,apad=whole_dur={$slotDuration}[tts];[1:a]{$bgFilter}[bg];[tts][bg]amix=inputs=2:duration=first:normalize=0",
                     '-t', (string) $slotDuration,
-                    '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'mp4', '-movflags', '+frag_keyframe+empty_moov+default_base_moof', $aacFile,
+                    '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
                 ]);
 
                 @unlink($tmpMp3);

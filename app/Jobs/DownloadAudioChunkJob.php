@@ -35,13 +35,12 @@ class DownloadAudioChunkJob implements ShouldQueue
         $session = json_decode($sessionJson, true);
         if (($session['status'] ?? '') === 'stopped') return;
 
-        // Get all audio segments from Redis
         $segmentsJson = Redis::get("instant-dub:{$this->sessionId}:audio-segments");
         if (!$segmentsJson) return;
 
         $allSegments = json_decode($segmentsJson, true);
 
-        // Find which .ts segments fall within our time range
+        // Find .ts segments within our time range
         $currentTime = 0;
         $tsUrls = [];
         foreach ($allSegments as $seg) {
@@ -60,7 +59,6 @@ class DownloadAudioChunkJob implements ShouldQueue
 
         $chunkFile = "{$workDir}/bg_chunk_{$this->chunkIndex}.aac";
 
-        // Write a temporary playlist with just our segments
         $tmpPlaylist = "{$workDir}/chunk_{$this->chunkIndex}.m3u8";
         $m3u8 = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n#EXT-X-MEDIA-SEQUENCE:0\n";
         foreach ($tsUrls as $url) {
@@ -69,14 +67,13 @@ class DownloadAudioChunkJob implements ShouldQueue
         $m3u8 .= "#EXT-X-ENDLIST\n";
         file_put_contents($tmpPlaylist, $m3u8);
 
-        // Download and convert to AAC
         $result = Process::timeout(90)->run([
             'ffmpeg', '-y',
             '-protocol_whitelist', 'file,http,https,tcp,tls,crypto',
             '-i', $tmpPlaylist,
             '-vn', '-ac', '1', '-ar', '44100',
             '-c:a', 'aac', '-b:a', '96k',
-            '-f', 'adts', $chunkFile,  // background chunk stays ADTS (no padding needed)
+            '-f', 'adts', $chunkFile,
         ]);
 
         @unlink($tmpPlaylist);
@@ -89,34 +86,25 @@ class DownloadAudioChunkJob implements ShouldQueue
             return;
         }
 
-        // Get actual duration of downloaded chunk
-        $probe = Process::timeout(10)->run([
-            'ffprobe', '-hide_banner', '-loglevel', 'error',
-            '-show_entries', 'format=duration',
-            '-of', 'default=nw=1:nk=1', $chunkFile,
-        ]);
-        $chunkDuration = $probe->successful() ? (float) trim($probe->output()) : ($this->endTime - $this->startTime);
-
-        // Store chunk path in session
+        // Store chunk in session
         $sessionJson = Redis::get($sessionKey);
         if ($sessionJson) {
             $s = json_decode($sessionJson, true);
-            $s['original_audio_path'] = $chunkFile; // latest chunk path for new segments
+            $s['original_audio_path'] = $chunkFile;
             $bgChunks = $s['bg_chunks'] ?? [];
             $bgChunks[$this->chunkIndex] = [
                 'path' => $chunkFile,
                 'start' => $this->startTime,
-                'end' => $this->startTime + $chunkDuration,
+                'end' => $this->endTime,
             ];
             $s['bg_chunks'] = $bgChunks;
             Redis::setex($sessionKey, 50400, json_encode($s));
         }
 
-        Log::info("[DUB] Audio chunk {$this->chunkIndex} ready (" . round($this->startTime) . "-" . round($this->startTime + $chunkDuration) . "s, " . round(filesize($chunkFile) / 1024) . " KB)", [
+        Log::info("[DUB] Audio chunk {$this->chunkIndex} ready (" . round($this->startTime) . "-" . round($this->endTime) . "s, " . round(filesize($chunkFile) / 1024) . " KB)", [
             'session' => $this->sessionId,
         ]);
 
-        // Remix TTS segments that fall within this chunk's time range
         $this->remixSegmentsInRange($chunkFile);
     }
 
@@ -134,7 +122,7 @@ class DownloadAudioChunkJob implements ShouldQueue
 
         $remixed = 0;
 
-        // Also generate lead.aac if chunk 0 and first segment starts late
+        // Generate lead.aac for chunk 0
         if ($this->chunkIndex === 0) {
             $chunk0Json = Redis::get("{$sessionKey}:chunk:0");
             if ($chunk0Json) {
@@ -147,7 +135,7 @@ class DownloadAudioChunkJob implements ShouldQueue
                         '-i', $bgAudioPath,
                         '-ss', '0', '-t', (string) round($firstStart, 3),
                         '-af', 'volume=0.2',
-                        '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'mp4', '-movflags', '+frag_keyframe+empty_moov+default_base_moof', $leadFile,
+                        '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $leadFile,
                     ]);
                 }
             }
@@ -161,58 +149,55 @@ class DownloadAudioChunkJob implements ShouldQueue
             $segStart = (float) ($chunk['start_time'] ?? 0);
             $segEnd = (float) ($chunk['end_time'] ?? 0);
 
-            // Only remix segments within this chunk's time range
             if ($segStart < $this->startTime || $segStart >= $this->endTime) continue;
 
             $audioBase64 = $chunk['audio_base64'] ?? null;
             if (!$audioBase64) continue;
 
             $aacFile = "{$aacDir}/{$i}.aac";
-
-            // Use existing AAC duration as slot duration — it was generated by
-            // ProcessInstantDubSegmentJob with the correct slotEnd. Don't recompute
-            // from Redis because the next chunk may not exist yet.
-            $slotDuration = null;
-            if (file_exists($aacFile)) {
-                $probeDur = Process::timeout(5)->run([
-                    'ffprobe', '-hide_banner', '-loglevel', 'error',
-                    '-show_entries', 'format=duration',
-                    '-of', 'default=nw=1:nk=1', $aacFile,
-                ]);
-                if ($probeDur->successful()) {
-                    $slotDuration = round((float) trim($probeDur->output()), 3);
-                }
-            }
-            if (!$slotDuration || $slotDuration < 0.1) {
-                // Fallback: compute from next chunk
-                $nextChunkJson = Redis::get("{$sessionKey}:chunk:" . ($i + 1));
-                $slotEnd = $nextChunkJson
-                    ? (float) (json_decode($nextChunkJson, true)['start_time'] ?? $segEnd)
-                    : $segEnd;
-                $slotDuration = round(max(0.1, $slotEnd - $segStart), 3);
-            }
-
-            // The background audio chunk starts at $this->startTime
-            // We need to seek to (segStart - chunkStart) within the bg file
+            $speechDuration = round(max(0.1, $segEnd - $segStart), 3);
             $seekInBg = max(0, $segStart - $this->startTime);
 
             $tmpMp3 = "/tmp/remix_{$this->sessionId}_{$i}.mp3";
             file_put_contents($tmpMp3, base64_decode($audioBase64));
 
+            // Speech segment: TTS + background (speech duration only)
             $result = Process::timeout(20)->run([
                 'ffmpeg', '-y',
                 '-i', $tmpMp3,
                 '-ss', (string) round($seekInBg, 3), '-i', $bgAudioPath,
                 '-filter_complex',
-                "[0:a]aresample=44100,apad=whole_dur={$slotDuration}[tts];[1:a]atrim=duration={$slotDuration},volume=0.2[bg];[tts][bg]amix=inputs=2:duration=first:normalize=0",
-                '-t', (string) $slotDuration,
-                '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'mp4', '-movflags', '+frag_keyframe+empty_moov+default_base_moof', $aacFile,
+                "[0:a]aresample=44100[tts];[1:a]atrim=duration={$speechDuration},volume=0.2[bg];[tts][bg]amix=inputs=2:duration=longest:normalize=0",
+                '-t', (string) $speechDuration,
+                '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
             ]);
 
             @unlink($tmpMp3);
 
             if ($result->successful()) {
                 $remixed++;
+            }
+
+            // Gap segment: background audio between this speech and next
+            $nextChunkJson = Redis::get("{$sessionKey}:chunk:" . ($i + 1));
+            $nextStart = $nextChunkJson
+                ? (float) (json_decode($nextChunkJson, true)['start_time'] ?? null)
+                : null;
+
+            if ($nextStart !== null) {
+                $gapDuration = round($nextStart - $segEnd, 3);
+                if ($gapDuration >= 0.5) {
+                    $gapFile = "{$aacDir}/gap-{$i}.aac";
+                    $gapSeek = max(0, $segEnd - $this->startTime);
+                    Process::timeout(15)->run([
+                        'ffmpeg', '-y',
+                        '-i', $bgAudioPath,
+                        '-ss', (string) round($gapSeek, 3),
+                        '-t', (string) $gapDuration,
+                        '-af', 'volume=0.2',
+                        '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $gapFile,
+                    ]);
+                }
             }
         }
 
