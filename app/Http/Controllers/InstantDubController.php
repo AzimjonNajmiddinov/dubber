@@ -876,6 +876,12 @@ class InstantDubController extends Controller
         // Kill any lingering ffmpeg background processes
         @exec('pkill -f "ffmpeg.*instant-dub" 2>/dev/null');
 
+        // Clear all queues to remove orphaned jobs
+        try {
+            \Illuminate\Support\Facades\Artisan::call('queue:clear', ['connection' => 'redis', '--queue' => 'default', '--force' => true]);
+            \Illuminate\Support\Facades\Artisan::call('queue:clear', ['connection' => 'redis', '--queue' => 'segment-generation', '--force' => true]);
+        } catch (\Throwable) {}
+
         if ($stopped > 0) {
             Log::info("[DUB] Stopped {$stopped} active sessions before new session");
         }
