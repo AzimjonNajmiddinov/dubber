@@ -559,10 +559,7 @@ class InstantDubController extends Controller
         $m3u8 .= "#EXT-X-TARGETDURATION:{$maxDur}\n";
         $m3u8 .= "#EXT-X-MEDIA-SEQUENCE:0\n";
         $m3u8 .= "#EXT-X-INDEPENDENT-SEGMENTS\n";
-
-        if ($isComplete) {
-            $m3u8 .= "#EXT-X-PLAYLIST-TYPE:VOD\n";
-        }
+        $m3u8 .= "#EXT-X-PLAYLIST-TYPE:EVENT\n";
 
         foreach ($entries as $entry) {
             $m3u8 .= "#EXTINF:{$entry['duration']},\n";
