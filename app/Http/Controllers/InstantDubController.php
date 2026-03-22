@@ -86,6 +86,7 @@ class InstantDubController extends Controller
                 // No progress for 2 minutes — force complete
                 $session['status'] = 'complete';
                 $session['playable'] = true;
+                $session['all_done'] = true;
                 Redis::setex("instant-dub:{$sessionId}", 50400, json_encode($session));
                 Log::warning("[DUB] Session auto-completed (stale): {$ready}/{$total} segments", [
                     'session' => $sessionId,
@@ -465,7 +466,7 @@ class InstantDubController extends Controller
 
         $total = (int) ($session['total_segments'] ?? 0);
         $status = $session['status'] ?? 'preparing';
-        $isComplete = in_array($status, ['complete', 'stopped']);
+        $allDone = !empty($session['all_done']) || $status === 'stopped';
 
         // Batch fetch all chunks in one Redis call (eliminates N+1)
         $chunkKeys = [];
@@ -481,7 +482,7 @@ class InstantDubController extends Controller
         $horizon = -1;
         foreach ($chunkValues as $i => $chunkJson) {
             if (!$chunkJson) {
-                if ($isComplete) continue; // skip gaps when complete
+                if ($allDone) continue; // skip gaps when complete
                 break; // stop at first gap while in progress
             }
             $chunks[$i] = json_decode($chunkJson, true);
@@ -495,7 +496,7 @@ class InstantDubController extends Controller
         // is valid. iOS AVPlayer won't reload an empty EVENT playlist (no segments = no
         // reload interval reference). The 5s silent segment gives the player something to
         // play while it polls for new segments every 3s (Cache-Control: max-age=3).
-        if ($horizon < 0 && !$isComplete) {
+        if ($horizon < 0 && !$allDone) {
             $entries[] = [
                 'uri' => 'dub-segment/lead.aac',
                 'duration' => 5.0,
@@ -560,7 +561,7 @@ class InstantDubController extends Controller
         $m3u8 .= "#EXT-X-MEDIA-SEQUENCE:0\n";
         $m3u8 .= "#EXT-X-INDEPENDENT-SEGMENTS\n";
 
-        if (!$isComplete) {
+        if (!$allDone) {
             $m3u8 .= "#EXT-X-PLAYLIST-TYPE:EVENT\n";
         }
 
@@ -570,7 +571,7 @@ class InstantDubController extends Controller
         }
 
         // Add trailing silent segment after last dialogue to prevent player pause
-        if ($isComplete && count($entries) > 0) {
+        if ($allDone && count($entries) > 0) {
             $tailStart = (float) ($session['tail_start'] ?? 0);
             $tailDuration = (float) ($session['tail_duration'] ?? 0);
             if ($tailDuration >= 5) {
@@ -580,7 +581,7 @@ class InstantDubController extends Controller
             $m3u8 .= "#EXT-X-ENDLIST\n";
         }
 
-        $cacheControl = $isComplete ? 'max-age=3600' : 'max-age=3';
+        $cacheControl = $allDone ? 'max-age=3600' : 'max-age=3';
 
         return response($m3u8, 200, [
             'Content-Type' => 'application/vnd.apple.mpegurl',
@@ -597,7 +598,8 @@ class InstantDubController extends Controller
         if (file_exists($aacFile) && filesize($aacFile) > 100) {
             $session = $this->getSession($sessionId);
             $status = $session['status'] ?? 'processing';
-            $cacheControl = in_array($status, ['complete', 'stopped']) ? 'max-age=86400' : 'max-age=10';
+            $allDoneForCache = !empty($session['all_done']) || $status === 'stopped';
+            $cacheControl = $allDoneForCache ? 'max-age=86400' : 'max-age=10';
 
             return response()->file($aacFile, [
                 'Content-Type' => 'audio/aac',
@@ -636,7 +638,8 @@ class InstantDubController extends Controller
             // Only use long cache once session is complete.
             $session = $this->getSession($sessionId);
             $status = $session['status'] ?? 'processing';
-            $cacheControl = in_array($status, ['complete', 'stopped']) ? 'max-age=86400' : 'max-age=10';
+            $allDoneForCache = !empty($session['all_done']) || $status === 'stopped';
+            $cacheControl = $allDoneForCache ? 'max-age=86400' : 'max-age=10';
 
             return response()->file($aacFile, [
                 'Content-Type' => 'audio/aac',
