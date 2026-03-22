@@ -850,21 +850,11 @@ class InstantDubController extends Controller
             $session['status'] = 'stopped';
             Redis::setex($clean, 300, json_encode($session));
 
-            // Clean up files
+            // Clean up files (suppress errors — files may be locked by workers)
             $sessionId = $session['id'] ?? '';
             if ($sessionId) {
-                $aacDir = storage_path("app/instant-dub/{$sessionId}");
-                if (is_dir($aacDir)) {
-                    array_map('unlink', glob("{$aacDir}/aac/*.aac"));
-                    @rmdir("{$aacDir}/aac");
-                    array_map('unlink', glob("{$aacDir}/*"));
-                    @rmdir($aacDir);
-                }
-                $tmpDir = "/tmp/instant-dub-{$sessionId}";
-                if (is_dir($tmpDir)) {
-                    array_map('unlink', glob("{$tmpDir}/*"));
-                    @rmdir($tmpDir);
-                }
+                @exec("rm -rf " . escapeshellarg(storage_path("app/instant-dub/{$sessionId}")) . " 2>/dev/null");
+                @exec("rm -rf " . escapeshellarg("/tmp/instant-dub-{$sessionId}") . " 2>/dev/null");
             }
 
             $stopped++;
