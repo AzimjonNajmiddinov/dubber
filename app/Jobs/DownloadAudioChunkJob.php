@@ -165,7 +165,7 @@ class DownloadAudioChunkJob implements ShouldQueue
                         '-ss', '0', '-t', (string) $leadDur, '-i', $bgAudioPath,
                         '-filter_complex',
                         "[1:a]volume=0.2[bg];[0:a][bg]amix=inputs=2:duration=first:normalize=0",
-                        '-ac', '1', '-c:a', 'aac', '-b:a', '64k', '-f', 'mp4', '-movflags', '+frag_keyframe+empty_moov+default_base_moof', $leadFile,
+                        '-ac', '1', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $leadFile,
                     ]);
                 }
             }
@@ -206,7 +206,7 @@ class DownloadAudioChunkJob implements ShouldQueue
                 '-filter_complex',
                 "[0:a]volume=0.2,aresample=44100[bg];[1:a]aresample=44100[tts];[bg][tts]amix=inputs=2:duration=first:normalize=0",
                 '-t', (string) $slotDuration,
-                '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'mp4', '-movflags', '+frag_keyframe+empty_moov+default_base_moof', $aacFile,
+                '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
             ]);
 
             @unlink($tmpMp3);

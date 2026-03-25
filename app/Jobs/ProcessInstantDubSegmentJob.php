@@ -396,13 +396,13 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                     '-ss', (string) round($slotStart, 3),
                     '-t', (string) $slotDuration,
                     '-af', 'volume=0.2',
-                    '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'mp4', '-movflags', '+frag_keyframe+empty_moov+default_base_moof', $aacFile,
+                    '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
                 ]);
             } else {
                 Process::timeout(10)->run([
                     'ffmpeg', '-y', '-f', 'lavfi', '-t', (string) $slotDuration,
                     '-i', 'anullsrc=r=44100:cl=mono',
-                    '-c:a', 'aac', '-b:a', '64k', '-f', 'mp4', '-movflags', '+frag_keyframe+empty_moov+default_base_moof', $aacFile,
+                    '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
                 ]);
             }
         } catch (\Throwable) {
@@ -452,7 +452,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             Process::timeout(15)->run([
                 'ffmpeg', '-y', '-i', $ttsMp3,
                 '-af', 'aresample=44100',
-                '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'mp4', '-movflags', '+frag_keyframe+empty_moov+default_base_moof', $aacFile,
+                '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
             ]);
         } catch (\Throwable $e) {
             Log::warning("[DUB] TTS-only AAC failed for segment #{$this->index}: " . $e->getMessage(), [
@@ -518,7 +518,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                     '-filter_complex',
                     "[0:a]volume=0.2,aresample=44100[bg];[1:a]aresample=44100[tts];[bg][tts]amix=inputs=2:duration=first:normalize=0",
                     '-t', (string) $slotDuration,
-                    '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'mp4', '-movflags', '+frag_keyframe+empty_moov+default_base_moof', $aacFile,
+                    '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
                 ]);
                 if (!$result->successful() || !file_exists($aacFile) || filesize($aacFile) < 100) {
                     $this->generateTtsOnlyAac($ttsMp3);
@@ -611,13 +611,13 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                     '-ss', (string) round($tailStart, 3), '-t', (string) $tailDuration, '-i', $originalAudioPath,
                     '-filter_complex',
                     "[1:a]volume=0.2[bg];[0:a][bg]amix=inputs=2:duration=first:normalize=0",
-                    '-ac', '1', '-c:a', 'aac', '-b:a', '64k', '-f', 'mp4', '-movflags', '+frag_keyframe+empty_moov+default_base_moof', $aacFile,
+                    '-ac', '1', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
                 ]);
             } else {
                 Process::timeout(30)->run([
                     'ffmpeg', '-y', '-f', 'lavfi', '-t', (string) $tailDuration,
                     '-i', 'anullsrc=r=44100:cl=mono',
-                    '-c:a', 'aac', '-b:a', '32k', '-f', 'mp4', '-movflags', '+frag_keyframe+empty_moov+default_base_moof', $aacFile,
+                    '-c:a', 'aac', '-b:a', '32k', '-f', 'adts', $aacFile,
                 ]);
             }
 
@@ -662,13 +662,13 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                     '-ss', '0', '-t', (string) $duration, '-i', $originalAudioPath,
                     '-filter_complex',
                     "[1:a]volume=0.2[bg];[0:a][bg]amix=inputs=2:duration=first:normalize=0",
-                    '-ac', '1', '-c:a', 'aac', '-b:a', '64k', '-f', 'mp4', '-movflags', '+frag_keyframe+empty_moov+default_base_moof', $aacFile,
+                    '-ac', '1', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
                 ]);
             } else {
                 Process::timeout(15)->run([
                     'ffmpeg', '-y', '-f', 'lavfi', '-t', (string) $duration,
                     '-i', 'anullsrc=r=44100:cl=mono',
-                    '-c:a', 'aac', '-b:a', '32k', '-f', 'mp4', '-movflags', '+frag_keyframe+empty_moov+default_base_moof', $aacFile,
+                    '-c:a', 'aac', '-b:a', '32k', '-f', 'adts', $aacFile,
                 ]);
             }
         } catch (\Throwable $e) {
