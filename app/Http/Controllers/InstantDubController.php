@@ -544,10 +544,22 @@ class InstantDubController extends Controller
             ];
         }
 
+        // Prepare tail segment info before TARGETDURATION calculation
+        $tailDuration = 0.0;
+        if ($allDone && count($entries) > 0) {
+            $tailDuration = (float) ($session['tail_duration'] ?? 0);
+            if ($tailDuration < 5) {
+                $tailDuration = 0.0;
+            }
+        }
+
         // Calculate actual max duration from entries for TARGETDURATION
         $maxDur = 10;
         foreach ($entries as $entry) {
             $maxDur = max($maxDur, (int) ceil($entry['duration']));
+        }
+        if ($tailDuration > 0) {
+            $maxDur = max($maxDur, (int) ceil($tailDuration));
         }
 
         $m3u8 = "#EXTM3U\n";
@@ -566,13 +578,11 @@ class InstantDubController extends Controller
         }
 
         // Add trailing silent segment after last dialogue to prevent player pause
-        if ($allDone && count($entries) > 0) {
-            $tailStart = (float) ($session['tail_start'] ?? 0);
-            $tailDuration = (float) ($session['tail_duration'] ?? 0);
-            if ($tailDuration >= 5) {
-                $m3u8 .= "#EXTINF:{$tailDuration},\n";
-                $m3u8 .= "dub-segment/tail.aac\n";
-            }
+        if ($tailDuration > 0) {
+            $m3u8 .= "#EXTINF:{$tailDuration},\n";
+            $m3u8 .= "dub-segment/tail.aac\n";
+        }
+        if ($allDone) {
             $m3u8 .= "#EXT-X-ENDLIST\n";
         }
 
