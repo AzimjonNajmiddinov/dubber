@@ -506,13 +506,15 @@ class InstantDubController extends Controller
         if ($horizon >= 0) {
             $firstStart = (float) ($chunks[0]['start_time'] ?? 0);
             if ($firstStart > 1.0) {
-                // Use actual lead AAC duration if available
-                $leadFile = storage_path("app/instant-dub/{$sessionId}/aac/lead.aac");
                 $leadDur = round($firstStart, 3);
-                if (file_exists($leadFile)) {
-                    $probe = trim(shell_exec("ffprobe -v error -show_entries format=duration -of csv=p=0 " . escapeshellarg($leadFile) . " 2>/dev/null") ?? '');
-                    if ($probe && (float) $probe > 0.1) {
-                        $leadDur = round((float) $probe, 3);
+                // Use actual AAC duration only when complete
+                if ($allDone) {
+                    $leadFile = storage_path("app/instant-dub/{$sessionId}/aac/lead.aac");
+                    if (file_exists($leadFile)) {
+                        $probe = trim(shell_exec("ffprobe -v error -show_entries format=duration -of csv=p=0 " . escapeshellarg($leadFile) . " 2>/dev/null") ?? '');
+                        if ($probe && (float) $probe > 0.1) {
+                            $leadDur = round((float) $probe, 3);
+                        }
                     }
                 }
                 $entries[] = [
@@ -546,9 +548,15 @@ class InstantDubController extends Controller
             $slotEnd = $nextStart ?? $endTime;
             $slotDur = round(max(0.1, $slotEnd - $startTime), 3);
 
-            // Use actual AAC file duration if available (prevents cumulative drift)
-            $aacDur = (float) ($chunk['aac_duration'] ?? 0);
-            $duration = ($aacDur > 0.1) ? $aacDur : $slotDur;
+            // Use actual AAC duration only when complete (EVENT playlists must not
+            // change existing EXTINF values — AVPlayer drops the track if they change)
+            $duration = $slotDur;
+            if ($allDone) {
+                $aacDur = (float) ($chunk['aac_duration'] ?? 0);
+                if ($aacDur > 0.1) {
+                    $duration = $aacDur;
+                }
+            }
 
             // One segment per slot (speech + gap combined)
             $entries[] = [
