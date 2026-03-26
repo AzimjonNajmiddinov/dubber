@@ -230,28 +230,20 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         $text = TextNormalizer::normalize($this->text, $this->language);
         $edgeTts = $this->resolveEdgeTts();
 
-        // Try up to 3 times: original voice, then default voice, then en-US fallback
+        // Try up to 5 times with increasing delays for network resilience
         $attempts = [
-            ['voice' => $voice, 'pitch' => $pitch, 'rate' => $rate],
-            ['voice' => $voice, 'pitch' => '+0Hz', 'rate' => '+0%'],
-            ['voice' => $this->getDefaultEdgeVoice(), 'pitch' => '+0Hz', 'rate' => '+0%'],
+            ['voice' => $voice, 'pitch' => $pitch, 'rate' => $rate, 'delay' => 0],
+            ['voice' => $voice, 'pitch' => $pitch, 'rate' => $rate, 'delay' => 1000],
+            ['voice' => $voice, 'pitch' => '+0Hz', 'rate' => '+0%', 'delay' => 2000],
+            ['voice' => $this->getDefaultEdgeVoice(), 'pitch' => '+0Hz', 'rate' => '+0%', 'delay' => 3000],
+            ['voice' => $this->getDefaultEdgeVoice(), 'pitch' => '+0Hz', 'rate' => '+0%', 'delay' => 5000],
         ];
 
-        // Deduplicate attempts
-        $seen = [];
-        $uniqueAttempts = [];
-        foreach ($attempts as $a) {
-            $key = "{$a['voice']}|{$a['pitch']}|{$a['rate']}";
-            if (!isset($seen[$key])) {
-                $seen[$key] = true;
-                $uniqueAttempts[] = $a;
-            }
-        }
-
+        // Deduplicate but keep extra retries for network errors
         $lastError = '';
-        foreach ($uniqueAttempts as $i => $attempt) {
-            if ($i > 0) {
-                usleep(500000); // 500ms delay between retries
+        foreach ($attempts as $i => $attempt) {
+            if ($attempt['delay'] > 0) {
+                usleep($attempt['delay'] * 1000);
             }
 
             $tmpTxt = "{$tmpDir}/text_{$this->index}.txt";
