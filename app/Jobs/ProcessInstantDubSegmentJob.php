@@ -116,24 +116,10 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                 }
             }
 
-            // 3. Encode to base64 and store in Redis
+            // 3. Encode to base64
             $audioBase64 = base64_encode(file_get_contents($finalMp3));
 
-            $chunkKey = "{$sessionKey}:chunk:{$this->index}";
-            Redis::setex($chunkKey, 50400, json_encode([
-                'index' => $this->index,
-                'start_time' => $this->startTime,
-                'end_time' => $this->endTime,
-                'text' => $this->text,
-                'speaker' => $this->speaker,
-                'audio_base64' => $audioBase64,
-                'audio_duration' => $ttsDuration,
-            ]));
-
             // 4. Pre-generate AAC for HLS
-            // If background audio is available, mix it in. Otherwise generate TTS-only AAC.
-            // Background audio chunks will remix these later when they arrive.
-            // Find background audio chunk that covers this segment's time
             $bgAudioPath = $this->findBgChunkForTime($session, $this->startTime);
             $hasBg = $bgAudioPath !== null;
 
@@ -141,7 +127,6 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                 $session['original_audio_path'] = $bgAudioPath;
                 $this->generateHlsAac($session, $finalMp3, $ttsDuration);
             } else {
-                // Generate TTS-only AAC — will be remixed when background arrives
                 $this->generateTtsOnlyAac($finalMp3);
             }
 
@@ -158,18 +143,29 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                 $this->generateTailAac($session);
             }
 
-            // 4d. Store actual AAC duration for accurate HLS EXTINF
+            @unlink($finalMp3);
+
+            // 5. Probe actual AAC duration, then save chunk to Redis
+            // IMPORTANT: chunk must be saved AFTER AAC is generated so aac_duration
+            // is available from the first playlist reload. Otherwise EXTINF changes
+            // between reloads which violates EVENT playlist rules and crashes AVPlayer.
+            $aacDur = 0.0;
             $aacFile = storage_path("app/instant-dub/{$this->sessionId}/aac/{$this->index}.aac");
             if (file_exists($aacFile)) {
-                $aacDur = $this->getAudioDuration($aacFile);
-                if ($aacDur > 0) {
-                    $chunkData = json_decode(Redis::get($chunkKey), true);
-                    $chunkData['aac_duration'] = round($aacDur, 3);
-                    Redis::setex($chunkKey, 50400, json_encode($chunkData));
-                }
+                $aacDur = round($this->getAudioDuration($aacFile), 3);
             }
 
-            @unlink($finalMp3);
+            $chunkKey = "{$sessionKey}:chunk:{$this->index}";
+            Redis::setex($chunkKey, 50400, json_encode([
+                'index' => $this->index,
+                'start_time' => $this->startTime,
+                'end_time' => $this->endTime,
+                'text' => $this->text,
+                'speaker' => $this->speaker,
+                'audio_base64' => $audioBase64,
+                'audio_duration' => $ttsDuration,
+                'aac_duration' => $aacDur > 0 ? $aacDur : null,
+            ]));
 
             // 5. Increment ready counter
             $this->incrementReady();
