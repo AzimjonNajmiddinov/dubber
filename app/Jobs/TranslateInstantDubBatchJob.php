@@ -684,6 +684,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
                 . '  * Husband ↔ wife: usually "sen" (intimate)' . "\n"
                 . '  * Boss → employee: can be "sen"; employee → boss: "Siz"' . "\n"
                 . $fromLangHint . "\n"
+                . "- SCRIPT — FAQAT lotin alifbosi! Kirill harflar (а,б,в,г,д...) MUTLAQO ishlatilmasin. Agar manba matni Kirillda bo'lsa, lotinga o'giring. Aralash yozuv (masalan: \"taniyман\") QABUL QILINMAYDI.\n"
                 . "- SPELLING — O'zbek fe'l qoidasi: fe'l negizi (verb stem) ga shaxs qo'shimchasi qo'shganda, negiz oxiridagi unli HECH QACHON tushib qolmaydi. Masalan: negiz \"tani-\" → \"taniyman\" (to'g'ri), \"tanyman\" (XATO). Bu qoida BARCHA fe'llarga tegishli. Agar negiz unli bilan tugasa, u unli saqlanadi.\n"
                 . "- STYLE — spoken Uzbek, like real people talk:\n"
                 . '  * Use colloquial forms: "qilyapman" not "qilayotirman", "ketyapman" not "ketayotirman"' . "\n"

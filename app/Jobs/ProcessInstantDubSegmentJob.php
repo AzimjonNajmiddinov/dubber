@@ -453,7 +453,8 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         $slotDuration = round(max(0.1, $slotEnd - $this->startTime), 3);
 
         try {
-            Process::timeout(15)->run([
+            $timeout = max(30, (int) ceil($slotDuration / 5) + 15);
+            Process::timeout($timeout)->run([
                 'ffmpeg', '-y', '-i', $ttsMp3,
                 '-af', "aresample=44100,apad=whole_dur={$slotDuration}",
                 '-t', (string) $slotDuration,
