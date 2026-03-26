@@ -124,11 +124,13 @@ class WaitForAudioDownloadJob implements ShouldQueue
                     $chunk0 = json_decode($chunk0Json, true);
                     $firstStart = (float) ($chunk0['start_time'] ?? 0);
                     if ($firstStart > 1.0) {
-                        Process::timeout(30)->run([
+                        $leadDur = round($firstStart, 3);
+                        $leadTimeout = max(30, (int) ceil($leadDur) + 30);
+                        Process::timeout($leadTimeout)->run([
                             'ffmpeg', '-y',
-                            '-ss', '0', '-t', (string) round($firstStart, 3),
-                            '-i', $originalAudioPath,
-                            '-af', $bgFilter,
+                            '-f', 'lavfi', '-t', (string) $leadDur, '-i', 'anullsrc=r=44100:cl=mono',
+                            '-ss', '0', '-t', (string) $leadDur, '-i', $originalAudioPath,
+                            '-filter_complex', "[1:a]{$bgFilter}[bg];[0:a][bg]amix=inputs=2:duration=first:normalize=0",
                             '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $leadFile,
                         ]);
                         Log::info("[DUB] Remixed lead.aac with background audio ({$firstStart}s)", [

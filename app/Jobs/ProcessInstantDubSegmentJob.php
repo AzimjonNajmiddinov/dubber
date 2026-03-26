@@ -390,18 +390,20 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             @mkdir($aacDir, 0755, true);
         }
 
+        $timeout = max(30, (int) ceil($slotDuration) + 30);
         try {
             if ($hasBg) {
-                Process::timeout(15)->run([
+                Process::timeout($timeout)->run([
                     'ffmpeg', '-y',
+                    '-f', 'lavfi', '-t', (string) $slotDuration, '-i', 'anullsrc=r=44100:cl=mono',
                     '-i', $originalAudioPath,
                     '-ss', (string) round($slotStart, 3),
                     '-t', (string) $slotDuration,
-                    '-af', 'volume=0.2',
+                    '-filter_complex', '[1:a]volume=0.2[bg];[0:a][bg]amix=inputs=2:duration=first:normalize=0',
                     '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
                 ]);
             } else {
-                Process::timeout(10)->run([
+                Process::timeout($timeout)->run([
                     'ffmpeg', '-y', '-f', 'lavfi', '-t', (string) $slotDuration,
                     '-i', 'anullsrc=r=44100:cl=mono',
                     '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
@@ -453,7 +455,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         $slotDuration = round(max(0.1, $slotEnd - $this->startTime), 3);
 
         try {
-            $timeout = max(30, (int) ceil($slotDuration / 5) + 15);
+            $timeout = max(30, (int) ceil($slotDuration) + 30);
             Process::timeout($timeout)->run([
                 'ffmpeg', '-y', '-i', $ttsMp3,
                 '-af', "aresample=44100,apad=whole_dur={$slotDuration}",
@@ -605,10 +607,10 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             @mkdir($aacDir, 0755, true);
         }
 
+        $timeout = max(60, (int) ceil($tailDuration) + 30);
         try {
             if ($hasBg) {
-                // Use anullsrc base to guarantee exact duration in ADTS
-                Process::timeout(60)->run([
+                Process::timeout($timeout)->run([
                     'ffmpeg', '-y',
                     '-f', 'lavfi', '-t', (string) $tailDuration, '-i', 'anullsrc=r=44100:cl=mono',
                     '-ss', (string) round($tailStart, 3), '-t', (string) $tailDuration, '-i', $originalAudioPath,
@@ -617,7 +619,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                     '-ac', '1', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
                 ]);
             } else {
-                Process::timeout(30)->run([
+                Process::timeout($timeout)->run([
                     'ffmpeg', '-y', '-f', 'lavfi', '-t', (string) $tailDuration,
                     '-i', 'anullsrc=r=44100:cl=mono',
                     '-c:a', 'aac', '-b:a', '32k', '-f', 'adts', $aacFile,
@@ -656,10 +658,10 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             @mkdir($aacDir, 0755, true);
         }
 
+        $timeout = max(30, (int) ceil($duration) + 30);
         try {
             if ($hasBg) {
-                // Use anullsrc base to guarantee exact duration in ADTS
-                Process::timeout(30)->run([
+                Process::timeout($timeout)->run([
                     'ffmpeg', '-y',
                     '-f', 'lavfi', '-t', (string) $duration, '-i', 'anullsrc=r=44100:cl=mono',
                     '-ss', '0', '-t', (string) $duration, '-i', $originalAudioPath,
@@ -668,7 +670,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                     '-ac', '1', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
                 ]);
             } else {
-                Process::timeout(15)->run([
+                Process::timeout($timeout)->run([
                     'ffmpeg', '-y', '-f', 'lavfi', '-t', (string) $duration,
                     '-i', 'anullsrc=r=44100:cl=mono',
                     '-c:a', 'aac', '-b:a', '32k', '-f', 'adts', $aacFile,
