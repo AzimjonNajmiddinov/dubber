@@ -70,6 +70,17 @@ return [
             'report' => false,
         ],
 
+        's3-runpod' => [
+            'driver' => 's3',
+            'key' => env('S3_ACCESS_KEY'),
+            'secret' => env('S3_SECRET_KEY'),
+            'region' => env('S3_REGION', 'auto'),
+            'bucket' => env('S3_BUCKET', 'dubber-runpod'),
+            'endpoint' => env('S3_ENDPOINT'),
+            'use_path_style_endpoint' => false,
+            'throw' => true,
+        ],
+
     ],
 
     /*
