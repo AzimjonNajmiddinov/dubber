@@ -251,7 +251,9 @@ class PrepareInstantDubJob implements ShouldQueue
                 $tracks = [['lang' => 'unknown', 'uri' => $m[1]]];
             }
 
+            // Timeslots from English (original timing), text from Russian (better translation)
             $langPriority = ['ru', 'uz', 'en', 'tr'];
+            $timingPriority = ['en', 'ru', 'uz', 'tr'];
             $langPatterns = [
                 'ru' => ['ru', 'rus', 'russian'],
                 'uz' => ['uz', 'uzb', 'uzbek'],
@@ -274,69 +276,87 @@ class PrepareInstantDubJob implements ShouldQueue
             }
             unset($track);
 
-            // Build priority-ordered candidates — ALL tracks of priority languages first
-            $candidates = [];
-            $added = [];
-            foreach ($langPriority as $preferred) {
-                foreach ($tracks as $track) {
-                    if ($track['langCode'] === $preferred && !isset($added[$track['uri']])) {
-                        $candidates[] = $track;
-                        $added[$track['uri']] = true;
+            // Fetch all tracks by language
+            $byLang = [];
+            foreach ($tracks as $track) {
+                $lang = $track['langCode'];
+                if (!isset($byLang[$lang])) {
+                    $result = $this->fetchSubtitleTrack($track, $baseUrl, $resolve);
+                    if ($result['cues'] > 0 && $result['srt'] !== '') {
+                        $byLang[$lang] = $result;
                     }
                 }
             }
-            // Add any unmatched tracks at the end
-            foreach ($tracks as $track) {
-                if (!isset($added[$track['uri']])) {
-                    $candidates[] = $track;
+
+            if (empty($byLang)) return null;
+
+            $cueSummary = [];
+            foreach ($byLang as $lang => $r) {
+                $cueSummary[] = "{$lang}:{$r['cues']}";
+            }
+
+            // Pick TEXT track (for translation) — Russian preferred
+            $textResult = null;
+            $textLang = null;
+            foreach ($langPriority as $lang) {
+                if (isset($byLang[$lang])) {
+                    $textResult = $byLang[$lang];
+                    $textLang = $lang;
+                    break;
                 }
             }
-
-            if (empty($candidates)) return null;
-
-            // Fetch all candidate tracks in parallel-ish, compare cue counts
-            // Always pick by priority, but skip tracks that have <50% cues vs the richest
-            $fetched = [];
-            foreach ($candidates as $i => $candidate) {
-                $fetched[$i] = $this->fetchSubtitleTrack($candidate, $baseUrl, $resolve);
-                if ($i >= 3) break; // max 4 tracks
+            if (!$textResult) {
+                $textLang = array_key_first($byLang);
+                $textResult = $byLang[$textLang];
             }
 
-            $maxCues = max(array_column($fetched, 'cues'));
-            $bestIdx = null;
-
-            // Walk priority order, pick first track with >= 50% of the richest
-            foreach ($fetched as $i => $result) {
-                if ($result['cues'] >= $maxCues * 0.5 && $result['srt'] !== '') {
-                    $bestIdx = $i;
+            // Pick TIMING track (for timeslots) — English preferred
+            $timingResult = null;
+            $timingLang = null;
+            foreach ($timingPriority as $lang) {
+                if (isset($byLang[$lang])) {
+                    $timingResult = $byLang[$lang];
+                    $timingLang = $lang;
                     break;
                 }
             }
 
-            // If no track meets threshold, use the richest
-            if ($bestIdx === null) {
-                foreach ($fetched as $i => $result) {
-                    if ($result['cues'] === $maxCues && $result['srt'] !== '') {
-                        $bestIdx = $i;
-                        break;
+            // If we have both EN timing and RU text, merge: EN timestamps + RU text
+            if ($timingResult && $textResult && $timingLang !== $textLang) {
+                $timingSegments = \App\Services\SrtParser::parse($timingResult['srt']);
+                $textSegments = \App\Services\SrtParser::parse($textResult['srt']);
+
+                if (count($timingSegments) > 0 && count($textSegments) > 0) {
+                    // Build merged SRT: EN timestamps, RU text (matched by index)
+                    $merged = '';
+                    $count = min(count($timingSegments), count($textSegments));
+                    for ($i = 0; $i < $count; $i++) {
+                        $ts = $timingSegments[$i];
+                        $txt = $textSegments[$i]['text'] ?? $ts['text'];
+                        $startH = floor($ts['start'] / 3600);
+                        $startM = floor(($ts['start'] % 3600) / 60);
+                        $startS = fmod($ts['start'], 60);
+                        $endH = floor($ts['end'] / 3600);
+                        $endM = floor(($ts['end'] % 3600) / 60);
+                        $endS = fmod($ts['end'], 60);
+                        $merged .= ($i + 1) . "\n";
+                        $merged .= sprintf("%02d:%02d:%06.3f --> %02d:%02d:%06.3f\n", $startH, $startM, $startS, $endH, $endM, $endS);
+                        $merged .= $txt . "\n\n";
                     }
+
+                    Log::info("[DUB] Subtitle tracks merged: timing={$timingLang} text={$textLang} ({$count} cues) from [" . implode(', ', $cueSummary) . "]", [
+                        'session' => $this->sessionId,
+                    ]);
+
+                    return ['srt' => $merged, 'language' => $textLang];
                 }
             }
 
-            if ($bestIdx === null) return null;
-
-            $bestResult = $fetched[$bestIdx];
-            $selected = $candidates[$bestIdx];
-
-            $cueSummary = [];
-            foreach ($fetched as $i => $r) {
-                $cueSummary[] = "{$candidates[$i]['langCode']}:{$r['cues']}";
-            }
-            Log::info("[DUB] Subtitle track selected: {$selected['langCode']} ({$bestResult['cues']} cues) from [" . implode(', ', $cueSummary) . "]", [
+            Log::info("[DUB] Subtitle track selected: {$textLang} ({$textResult['cues']} cues) from [" . implode(', ', $cueSummary) . "]", [
                 'session' => $this->sessionId,
             ]);
 
-            return $bestResult['srt'] ? ['srt' => $bestResult['srt'], 'language' => $selected['langCode']] : null;
+            return ['srt' => $textResult['srt'], 'language' => $textLang];
         } catch (\Throwable $e) {
             Log::error("[DUB] HLS sub fetch failed", ['session' => $this->sessionId, 'error' => $e->getMessage()]);
             return null;
