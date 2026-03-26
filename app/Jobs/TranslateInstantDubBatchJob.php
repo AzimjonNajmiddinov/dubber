@@ -614,6 +614,14 @@ class TranslateInstantDubBatchJob implements ShouldQueue
             . "\nCHARACTERS:\n"
             . "M1: [name/role], [age category], [relationship to others]\n"
             . "F1: [name/role], [age category], [relationship to others]\n"
+            . ($this->language === 'uz' ? (
+                "\nSEN/SIZ MAP (for Uzbek dubbing — EVERY pair of characters must be listed):\n"
+                . "M1→M2: sen (reason: close friends, same age)\n"
+                . "M2→M1: sen (reason: close friends, same age)\n"
+                . "F1→M1: Siz (reason: younger woman to older man)\n"
+                . "M1→F1: sen (reason: older man to younger woman)\n"
+                . "[list ALL pairs — this map will be strictly followed in translation]\n"
+            ) : '')
             . "\nLINES:\n"
             . "1-3,7,12: M1\n"
             . "4-6,8-9: F1";
@@ -666,7 +674,8 @@ class TranslateInstantDubBatchJob implements ShouldQueue
             $uzbekRules = "\n"
                 . "UZBEK LANGUAGE RULES (CRITICAL):\n"
                 . "- SEN/SIZ — this is the #1 priority, getting it wrong ruins the dub:\n"
-                . '  * Look at CHARACTER ANALYSIS above for age and relationships' . "\n"
+                . '  * STRICTLY follow the SEN/SIZ MAP in CHARACTER ANALYSIS — it defines exactly who uses sen and who uses Siz to whom. NEVER deviate from it.' . "\n"
+                . '  * If no map is available, look at CHARACTER ANALYSIS for age and relationships' . "\n"
                 . '  * Elderly/parent → child/young person: always "sen" (-san, -ding, -yapsanmi)' . "\n"
                 . '  * Young person → elderly/parent: always "Siz" (-siz, -dingiz, -yapsizmi)' . "\n"
                 . '  * Same-age close friends: "sen"' . "\n"
