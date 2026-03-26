@@ -45,9 +45,12 @@ class PremiumDubTranscribeJob implements ShouldQueue
             $s3Path = "premium-dub/{$this->dubId}/audio_whisperx.wav";
             $audioUrl = $storage->upload($audioPath, $s3Path);
 
-            // Submit to RunPod WhisperX
+            // Submit to RunPod WhisperX (kodxana hub worker API)
             $jobId = $client->submitJob($endpointId, [
-                'audio_url' => $audioUrl,
+                'audio_file' => $audioUrl,
+                'diarization' => true,
+                'align_output' => true,
+                'batch_size' => 32,
             ]);
 
             // Poll until complete (up to 20 min)
@@ -57,8 +60,21 @@ class PremiumDubTranscribeJob implements ShouldQueue
             $storage->delete($s3Path);
 
             $segments = $result['segments'] ?? [];
-            $speakers = $result['speakers'] ?? [];
-            $language = $result['language'] ?? 'unknown';
+            $language = $result['detected_language'] ?? $result['language'] ?? 'unknown';
+
+            // Hub worker puts speaker in each segment, extract unique speakers
+            $speakers = [];
+            foreach ($segments as &$seg) {
+                $spk = $seg['speaker'] ?? 'SPEAKER_00';
+                if (!isset($speakers[$spk])) {
+                    $speakers[$spk] = ['gender' => 'unknown', 'age_group' => 'unknown'];
+                }
+                // Normalize field names for downstream compatibility
+                if (!isset($seg['speaker'])) {
+                    $seg['speaker'] = $spk;
+                }
+            }
+            unset($seg);
 
             if (empty($segments)) {
                 $this->updateStatus('error', 'WhisperX returned no segments');
