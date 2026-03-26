@@ -99,7 +99,7 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
 
         $uzbekRules = '';
         if ($this->language === 'uz') {
-            $uzbekRules = "\nUZBEK RULES: Use natural spoken Uzbek. Colloquial forms (qilyapman not qilayotirman). Keep names untranslated. Match emotional register.\n";
+            $uzbekRules = "\nUZBEK RULES: Use natural spoken Uzbek. Colloquial forms (qilyapman not qilayotirman). Keep names untranslated. Match emotional register. SPELLING: preserve vowels in verb stems — \"taniyman\" NOT \"tanyman\", \"bileman\" NOT \"bilman\", \"ko'raman\" NOT \"ko'rman\".\n";
         }
 
         $systemPrompt = "You are a dubbing voice director writing dialogue for a film in {$toLang}. You watch the scene, understand the story and emotions, then write what the characters would ACTUALLY SAY in {$toLang} — not a translation, but a re-creation.\n"
