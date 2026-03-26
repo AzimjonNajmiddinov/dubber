@@ -158,6 +158,17 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                 $this->generateTailAac($session);
             }
 
+            // 4d. Store actual AAC duration for accurate HLS EXTINF
+            $aacFile = storage_path("app/instant-dub/{$this->sessionId}/aac/{$this->index}.aac");
+            if (file_exists($aacFile)) {
+                $aacDur = $this->getAudioDuration($aacFile);
+                if ($aacDur > 0) {
+                    $chunkData = json_decode(Redis::get($chunkKey), true);
+                    $chunkData['aac_duration'] = round($aacDur, 3);
+                    Redis::setex($chunkKey, 50400, json_encode($chunkData));
+                }
+            }
+
             @unlink($finalMp3);
 
             // 5. Increment ready counter
