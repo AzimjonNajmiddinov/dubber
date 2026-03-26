@@ -754,6 +754,24 @@ class TranslateInstantDubBatchJob implements ShouldQueue
                 }
             }
         }
+
+        // Verify translation actually happened — if target is Uzbek (Latin),
+        // check for Cyrillic characters which means text wasn't translated
+        if ($this->language === 'uz') {
+            $untranslated = 0;
+            foreach ($batch as $seg) {
+                if (preg_match('/[а-яА-ЯёЁ]{3,}/', $seg['text'] ?? '')) {
+                    $untranslated++;
+                }
+            }
+            if ($untranslated > count($batch) * 0.3) {
+                Log::warning("[DUB] [{$this->title}] Batch {$this->batchIndex}: {$untranslated}/" . count($batch) . " segments still in Cyrillic — translation failed, retrying", [
+                    'session' => $this->sessionId,
+                ]);
+                throw new \RuntimeException("Translation returned untranslated Cyrillic text ({$untranslated}/" . count($batch) . " segments)");
+            }
+        }
+
         return $batch;
     }
 
