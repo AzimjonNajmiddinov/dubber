@@ -271,10 +271,16 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         // Try Claude Sonnet first
         $result = $this->callAnthropic($messages);
         if ($result !== null) {
+            Log::debug("[DUB] [{$this->title}] Batch {$this->batchIndex} Claude response: " . Str::limit($result, 300), [
+                'session' => $this->sessionId,
+            ]);
             return $this->parseTranslationResponse($batch, $result);
         }
 
         // Fallback: GPT-4o with retry
+        Log::warning("[DUB] [{$this->title}] Batch {$this->batchIndex} Claude returned null, falling back to GPT", [
+            'session' => $this->sessionId,
+        ]);
         return $this->callOpenAiWithRetry($batch, $messages);
     }
 
