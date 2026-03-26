@@ -251,7 +251,9 @@ class PrepareInstantDubJob implements ShouldQueue
                 $tracks = [['lang' => 'unknown', 'uri' => $m[1]]];
             }
 
-            $langPriority = ['ru', 'uz', 'en', 'tr'];
+            // English subtitles have the most accurate timing (original audio sync).
+            // Russian/Uzbek subs are often for dubbed audio with shifted timings.
+            $langPriority = ['en', 'ru', 'uz', 'tr'];
             $langPatterns = [
                 'ru' => ['ru', 'rus', 'russian'],
                 'uz' => ['uz', 'uzb', 'uzbek'],
