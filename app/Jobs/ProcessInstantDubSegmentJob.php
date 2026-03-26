@@ -446,12 +446,15 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         $aacFile = "{$aacDir}/{$this->index}.aac";
         if (!is_dir($aacDir)) @mkdir($aacDir, 0755, true);
 
-        // Speech-only AAC — just the TTS duration, no padding
-        // ADTS format drops silent padding, so we generate gap segments separately
+        // Pad TTS to full slot duration with silence so EXTINF matches actual audio
+        $slotEnd = $this->slotEnd ?? $this->endTime;
+        $slotDuration = round(max(0.1, $slotEnd - $this->startTime), 3);
+
         try {
             Process::timeout(15)->run([
                 'ffmpeg', '-y', '-i', $ttsMp3,
-                '-af', 'aresample=44100',
+                '-af', "aresample=44100,apad=whole_dur={$slotDuration}",
+                '-t', (string) $slotDuration,
                 '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
             ]);
         } catch (\Throwable $e) {
@@ -459,9 +462,6 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                 'session' => $this->sessionId,
             ]);
         }
-
-        // Generate gap segment (silence between this speech and next)
-        $this->generateGapAac();
     }
 
     private function generateGapAac(): void
