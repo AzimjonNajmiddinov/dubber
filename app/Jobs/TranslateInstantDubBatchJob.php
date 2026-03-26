@@ -769,13 +769,58 @@ class TranslateInstantDubBatchJob implements ShouldQueue
     {
         $title = 'Untitled';
         $sessionJson = Redis::get("instant-dub:{$this->sessionId}");
-        if ($sessionJson) {
-            $title = json_decode($sessionJson, true)['title'] ?? 'Untitled';
+        $session = $sessionJson ? json_decode($sessionJson, true) : [];
+        if ($session) {
+            $title = $session['title'] ?? 'Untitled';
         }
 
         Log::error("[DUB] [{$title}] Batch {$this->batchIndex} failed permanently: " . $exception->getMessage(), [
             'session' => $this->sessionId,
         ]);
+
+        // Generate background-only segments for failed batch so there are no gaps
+        $batchKey = "instant-dub:{$this->sessionId}:batch:{$this->batchIndex}";
+        $batchJson = Redis::get($batchKey);
+        if ($batchJson) {
+            $batch = json_decode($batchJson, true);
+            $total = (int) ($session['total_segments'] ?? 0);
+
+            foreach ($batch as $i => $seg) {
+                $globalIdx = $this->segmentOffset + $i;
+                $startTime = (float) ($seg['start'] ?? 0);
+                $endTime = (float) ($seg['end'] ?? 0);
+
+                // Compute slot end (next segment's start)
+                $slotEnd = null;
+                if (isset($batch[$i + 1])) {
+                    $slotEnd = (float) $batch[$i + 1]['start'];
+                } elseif ($globalIdx + 1 < $total) {
+                    $nextBatchKey = "instant-dub:{$this->sessionId}:batch:" . ($this->batchIndex + 1);
+                    $nextBatchJson = Redis::get($nextBatchKey);
+                    if ($nextBatchJson) {
+                        $nextBatch = json_decode($nextBatchJson, true);
+                        $slotEnd = (float) ($nextBatch[0]['start'] ?? $endTime);
+                    }
+                }
+
+                // Dispatch with empty text — ProcessInstantDubSegmentJob will
+                // generate background-only audio when TTS produces nothing
+                ProcessInstantDubSegmentJob::dispatch(
+                    $this->sessionId,
+                    $globalIdx,
+                    '', // empty text = background-only
+                    $startTime,
+                    $endTime,
+                    $this->language,
+                    'M1',
+                    $slotEnd,
+                )->onQueue('segment-generation');
+            }
+
+            Log::info("[DUB] [{$title}] Dispatched " . count($batch) . " background-only segments for failed batch {$this->batchIndex}", [
+                'session' => $this->sessionId,
+            ]);
+        }
 
         // Don't set status to 'error' — let remaining batches continue
         $this->updateSession([

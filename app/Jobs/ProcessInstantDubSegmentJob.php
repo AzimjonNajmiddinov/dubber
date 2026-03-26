@@ -52,6 +52,16 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         try {
             $slotDuration = $this->endTime - $this->startTime;
 
+            // Empty text = background-only (from failed translation batch)
+            if (trim($this->text) === '') {
+                $this->generateBackgroundOnlyAac($session);
+                $this->incrementReady();
+                Log::info("[DUB] [{$title}] Segment #{$this->index} ready (background-only, failed translation)", [
+                    'session' => $this->sessionId,
+                ]);
+                return;
+            }
+
             // 1. Generate TTS audio with configured driver
             $tmpDir = '/tmp/instant-dub-' . $this->sessionId;
             @mkdir($tmpDir, 0755, true);
