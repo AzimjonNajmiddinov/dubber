@@ -563,11 +563,10 @@ class InstantDubController extends Controller
         }
 
         $m3u8 = "#EXTM3U\n";
-        $m3u8 .= "#EXT-X-VERSION:7\n";
+        $m3u8 .= "#EXT-X-VERSION:3\n";
         $m3u8 .= "#EXT-X-TARGETDURATION:{$maxDur}\n";
         $m3u8 .= "#EXT-X-MEDIA-SEQUENCE:0\n";
         $m3u8 .= "#EXT-X-INDEPENDENT-SEGMENTS\n";
-        $m3u8 .= "#EXT-X-MAP:URI=\"dub-segment/init.mp4\"\n";
 
         if (!$allDone) {
             $m3u8 .= "#EXT-X-PLAYLIST-TYPE:EVENT\n";
@@ -596,40 +595,9 @@ class InstantDubController extends Controller
         ]);
     }
 
-    /**
-     * Serve the fMP4 init segment (ftyp + moov) for HLS EXT-X-MAP.
-     * Generated once from a cached silent fMP4 with identical codec config.
-     */
     public function hlsInitSegment(string $sessionId)
     {
-        $initFile = storage_path('app/fmp4-init.mp4');
-
-        if (!file_exists($initFile)) {
-            // Generate a tiny fMP4, then extract ftyp+moov as the init segment
-            $tmpFile = storage_path('app/fmp4-init-tmp.mp4');
-            Process::timeout(5)->run([
-                'ffmpeg', '-y', '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=mono',
-                '-t', '0.1', '-c:a', 'aac', '-b:a', '32k',
-                '-f', 'mp4', '-movflags', '+frag_keyframe+empty_moov+default_base_moof', $tmpFile,
-            ]);
-
-            if (file_exists($tmpFile)) {
-                $initData = $this->extractFmp4Init($tmpFile);
-                if ($initData) {
-                    file_put_contents($initFile, $initData);
-                }
-                @unlink($tmpFile);
-            }
-        }
-
-        if (file_exists($initFile)) {
-            return response()->file($initFile, [
-                'Content-Type' => 'video/mp4',
-                'Access-Control-Allow-Origin' => '*',
-                'Cache-Control' => 'max-age=86400',
-            ]);
-        }
-
+        // No longer needed — ADTS format doesn't require init segments
         return response('', 404);
     }
 
@@ -642,10 +610,14 @@ class InstantDubController extends Controller
             $status = $session['status'] ?? 'processing';
             $cacheControl = in_array($status, ['complete', 'stopped']) ? 'max-age=86400' : 'max-age=10';
 
-            return $this->serveFmp4MediaSegment($aacFile, $cacheControl);
+            return response()->file($aacFile, [
+                'Content-Type' => 'audio/aac',
+                'Access-Control-Allow-Origin' => '*',
+                'Cache-Control' => $cacheControl,
+            ]);
         }
 
-        return $this->silentFmp4Response();
+        return $this->silentAacResponse();
     }
 
     public function hlsLeadSegment(string $sessionId)
@@ -657,10 +629,14 @@ class InstantDubController extends Controller
             $status = $session['status'] ?? 'processing';
             $cacheControl = in_array($status, ['complete', 'stopped']) ? 'max-age=86400' : 'max-age=10';
 
-            return $this->serveFmp4MediaSegment($aacFile, $cacheControl);
+            return response()->file($aacFile, [
+                'Content-Type' => 'audio/aac',
+                'Access-Control-Allow-Origin' => '*',
+                'Cache-Control' => $cacheControl,
+            ]);
         }
 
-        return $this->silentFmp4Response();
+        return $this->silentAacResponse();
     }
 
     public function hlsTailSegment(string $sessionId)
@@ -668,10 +644,14 @@ class InstantDubController extends Controller
         $aacFile = storage_path("app/instant-dub/{$sessionId}/aac/tail.aac");
 
         if (file_exists($aacFile) && filesize($aacFile) > 100) {
-            return $this->serveFmp4MediaSegment($aacFile, 'max-age=86400');
+            return response()->file($aacFile, [
+                'Content-Type' => 'audio/aac',
+                'Access-Control-Allow-Origin' => '*',
+                'Cache-Control' => 'max-age=86400',
+            ]);
         }
 
-        return $this->silentFmp4Response();
+        return $this->silentAacResponse();
     }
 
     public function hlsAudioSegment(string $sessionId, int $index)
@@ -683,7 +663,11 @@ class InstantDubController extends Controller
             $status = $session['status'] ?? 'processing';
             $cacheControl = in_array($status, ['complete', 'stopped']) ? 'max-age=86400' : 'max-age=10';
 
-            return $this->serveFmp4MediaSegment($aacFile, $cacheControl);
+            return response()->file($aacFile, [
+                'Content-Type' => 'audio/aac',
+                'Access-Control-Allow-Origin' => '*',
+                'Cache-Control' => $cacheControl,
+            ]);
         }
 
         Log::warning("[DUB] Segment {$index} pre-gen AAC missing, using fallback", [
@@ -695,7 +679,7 @@ class InstantDubController extends Controller
         // Fallback: generate on-demand if pre-gen missed (e.g. race condition, old session)
         $chunkJson = Redis::get("instant-dub:{$sessionId}:chunk:{$index}");
         if (!$chunkJson) {
-            return $this->silentFmp4Response();
+            return $this->silentAacResponse();
         }
 
         $session = $this->getSession($sessionId);
@@ -720,13 +704,9 @@ class InstantDubController extends Controller
             // Non-fatal
         }
 
-        // Strip ftyp+moov — serve only moof+mdat (init is via EXT-X-MAP)
-        $moofOffset = $this->findMoofOffset($aacData);
-        $mediaData = substr($aacData, $moofOffset);
-
-        return response($mediaData, 200, [
-            'Content-Type' => 'audio/mp4',
-            'Content-Length' => strlen($mediaData),
+        return response($aacData, 200, [
+            'Content-Type' => 'audio/aac',
+            'Content-Length' => strlen($aacData),
             'Access-Control-Allow-Origin' => '*',
             'Cache-Control' => 'max-age=86400',
         ]);
@@ -755,7 +735,7 @@ class InstantDubController extends Controller
         }
 
         $m3u8 = "#EXTM3U\n";
-        $m3u8 .= "#EXT-X-VERSION:7\n";
+        $m3u8 .= "#EXT-X-VERSION:3\n";
         $m3u8 .= "#EXT-X-TARGETDURATION:{$totalDuration}\n";
         $m3u8 .= "#EXT-X-MEDIA-SEQUENCE:0\n";
 
@@ -869,75 +849,28 @@ class InstantDubController extends Controller
     // ── Private helpers ──
 
     /**
-     * Serve an fMP4 file as a media segment (moof+mdat only, stripped of ftyp+moov).
-     * The init segment (ftyp+moov) is served separately via EXT-X-MAP.
+     * Return a minimal silent AAC ADTS segment for missing chunks.
      */
-    private function serveFmp4MediaSegment(string $filePath, string $cacheControl): \Illuminate\Http\Response
+    private function silentAacResponse()
     {
-        $data = file_get_contents($filePath);
-        $offset = $this->findMoofOffset($data);
-
-        return response(substr($data, $offset), 200, [
-            'Content-Type' => 'audio/mp4',
-            'Access-Control-Allow-Origin' => '*',
-            'Cache-Control' => $cacheControl,
-        ]);
-    }
-
-    /**
-     * Find the byte offset where moof box starts (after ftyp+moov).
-     * MP4 boxes: 4 bytes size (big-endian) + 4 bytes type.
-     */
-    private function findMoofOffset(string $data): int
-    {
-        $offset = 0;
-        $len = strlen($data);
-
-        while ($offset + 8 <= $len) {
-            $size = unpack('N', substr($data, $offset, 4))[1];
-            $type = substr($data, $offset + 4, 4);
-
-            if ($size < 8) break;
-            if ($type === 'moof' || $type === 'mdat') {
-                return $offset;
-            }
-
-            $offset += $size;
-        }
-
-        return 0; // fallback: serve whole file
-    }
-
-    /**
-     * Extract ftyp+moov boxes from an fMP4 file (init segment).
-     */
-    private function extractFmp4Init(string $filePath): ?string
-    {
-        $data = file_get_contents($filePath);
-        $offset = $this->findMoofOffset($data);
-        return $offset > 0 ? substr($data, 0, $offset) : null;
-    }
-
-    /**
-     * Return a silent fMP4 media segment (moof+mdat only) for missing chunks.
-     */
-    private function silentFmp4Response()
-    {
-        $silentFile = storage_path('app/silent-fmp4.mp4');
+        $silentFile = storage_path('app/silent.aac');
         if (!file_exists($silentFile)) {
             Process::timeout(5)->run([
                 'ffmpeg', '-y', '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=mono',
-                '-t', '0.5', '-c:a', 'aac', '-b:a', '32k',
-                '-f', 'mp4', '-movflags', '+frag_keyframe+empty_moov+default_base_moof', $silentFile,
+                '-t', '0.5', '-c:a', 'aac', '-b:a', '32k', '-f', 'adts', $silentFile,
             ]);
         }
 
         if (file_exists($silentFile)) {
-            return $this->serveFmp4MediaSegment($silentFile, 'max-age=86400');
+            return response()->file($silentFile, [
+                'Content-Type' => 'audio/aac',
+                'Access-Control-Allow-Origin' => '*',
+                'Cache-Control' => 'max-age=86400',
+            ]);
         }
 
         return response('', 200, [
-            'Content-Type' => 'audio/mp4',
+            'Content-Type' => 'audio/aac',
             'Access-Control-Allow-Origin' => '*',
         ]);
     }
@@ -1006,13 +939,13 @@ class InstantDubController extends Controller
                         '-ss', (string) round($slotStart, 3),
                         '-t', (string) $slotDuration,
                         '-af', 'volume=0.2',
-                        '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'mp4', '-movflags', '+frag_keyframe+empty_moov+default_base_moof', $aacFile,
+                        '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
                     ]);
                 } else {
                     Process::timeout(15)->run([
                         'ffmpeg', '-y', '-f', 'lavfi', '-t', (string) $slotDuration,
                         '-i', 'anullsrc=r=44100:cl=mono',
-                        '-c:a', 'aac', '-b:a', '64k', '-f', 'mp4', '-movflags', '+frag_keyframe+empty_moov+default_base_moof', $aacFile,
+                        '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
                     ]);
                 }
             } else {
@@ -1027,7 +960,7 @@ class InstantDubController extends Controller
                         '-filter_complex',
                         "[0:a]aresample=44100,{$delayFilter}apad=whole_dur={$slotDuration}[tts];[1:a]atrim=duration={$slotDuration},volume=0.2[bg];[tts][bg]amix=inputs=2:duration=first:normalize=0",
                         '-t', (string) $slotDuration,
-                        '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'mp4', '-movflags', '+frag_keyframe+empty_moov+default_base_moof', $aacFile,
+                        '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
                     ]);
                 } else {
                     $delayFilter = $preGapMs > 0 ? "adelay={$preGapMs}|{$preGapMs}," : '';
@@ -1035,7 +968,7 @@ class InstantDubController extends Controller
                         'ffmpeg', '-y', '-i', $mp3File,
                         '-af', "aresample=44100,{$delayFilter}apad=whole_dur={$slotDuration}",
                         '-t', (string) $slotDuration,
-                        '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'mp4', '-movflags', '+frag_keyframe+empty_moov+default_base_moof', $aacFile,
+                        '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
                     ]);
                 }
             }
