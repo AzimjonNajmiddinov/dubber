@@ -251,8 +251,7 @@ class PrepareInstantDubJob implements ShouldQueue
                 $tracks = [['lang' => 'unknown', 'uri' => $m[1]]];
             }
 
-            // English subs for timing (original audio sync), translate from English
-            $langPriority = ['en', 'ru', 'uz', 'tr'];
+            $langPriority = ['ru', 'uz', 'en', 'tr'];
             $langPatterns = [
                 'ru' => ['ru', 'rus', 'russian'],
                 'uz' => ['uz', 'uzb', 'uzbek'],
