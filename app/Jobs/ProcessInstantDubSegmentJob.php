@@ -387,8 +387,8 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         $hasBg = $originalAudioPath && file_exists($originalAudioPath);
 
         $slotStart = $this->startTime;
-        $slotEnd = $this->slotEnd ?? $this->endTime;
-        $slotDuration = round(max(0.1, $slotEnd - $slotStart), 3);
+        // Speech duration only — gap handled separately in playlist
+        $slotDuration = round(max(0.1, $this->endTime - $slotStart), 3);
 
         $aacDir = storage_path("app/instant-dub/{$this->sessionId}/aac");
         $aacFile = "{$aacDir}/{$this->index}.aac";
@@ -457,16 +457,15 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         $aacFile = "{$aacDir}/{$this->index}.aac";
         if (!is_dir($aacDir)) @mkdir($aacDir, 0755, true);
 
-        // Pad TTS to full slot duration with silence so EXTINF matches actual audio
-        $slotEnd = $this->slotEnd ?? $this->endTime;
-        $slotDuration = round(max(0.1, $slotEnd - $this->startTime), 3);
+        // Generate TTS for speech duration only (gap handled separately in playlist)
+        $speechDuration = round(max(0.1, $this->endTime - $this->startTime), 3);
 
         try {
-            $timeout = max(30, (int) ceil($slotDuration) + 30);
+            $timeout = max(30, (int) ceil($speechDuration) + 30);
             Process::timeout($timeout)->run([
                 'ffmpeg', '-y', '-i', $ttsMp3,
-                '-af', "aresample=44100,apad=whole_dur={$slotDuration}",
-                '-t', (string) $slotDuration,
+                '-af', "aresample=44100,apad=whole_dur={$speechDuration}",
+                '-t', (string) $speechDuration,
                 '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
             ]);
         } catch (\Throwable $e) {
@@ -509,8 +508,8 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         $bgChunkStart = $this->findBgChunkStart($session, $this->startTime);
         $seekInBg = max(0, $this->startTime - $bgChunkStart);
 
-        $slotEnd = $this->slotEnd ?? $this->endTime;
-        $slotDuration = round(max(0.1, $slotEnd - $this->startTime), 3);
+        // Speech duration only — gap is handled separately in the playlist
+        $slotDuration = round(max(0.1, $this->endTime - $this->startTime), 3);
 
         $aacDir = storage_path("app/instant-dub/{$this->sessionId}/aac");
         $aacFile = "{$aacDir}/{$this->index}.aac";

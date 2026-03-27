@@ -536,15 +536,23 @@ class InstantDubController extends Controller
                 }
             }
             $slotEnd = $nextStart ?? $endTime;
-            $slotDur = round(max(0.1, $slotEnd - $startTime), 3);
+            $gap = $slotEnd - $endTime;
 
-            $duration = $slotDur;
-
-            // One segment per slot (speech + gap combined)
+            // Speech segment — just the speech duration
+            $speechDur = round(max(0.1, $endTime - $startTime), 3);
             $entries[] = [
                 'uri' => "dub-segment/{$i}.aac",
-                'duration' => $duration,
+                'duration' => $speechDur,
             ];
+
+            // If there's a gap > 0.5s until next dialogue, add silent gap segment(s)
+            if ($gap > 0.5) {
+                $gapDur = round($gap, 3);
+                $entries[] = [
+                    'uri' => "dub-segment/gap-{$i}.aac",
+                    'duration' => $gapDur,
+                ];
+            }
         }
 
         // Prepare tail segment info before TARGETDURATION calculation
