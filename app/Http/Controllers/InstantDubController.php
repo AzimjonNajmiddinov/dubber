@@ -31,7 +31,7 @@ class InstantDubController extends Controller
         $translateFrom = $request->input('translate_from', '');
         $srt = $request->input('srt', '');
         $title = $request->input('title', 'Untitled');
-        $quality = $request->input('quality', 'premium'); // standard=edge, premium=elevenlabs
+        $quality = $request->input('quality', 'standard'); // standard=edge, premium=elevenlabs
         $ttsDriver = $quality === 'premium' ? 'elevenlabs' : 'edge';
 
         // Parse video URL components for HLS
