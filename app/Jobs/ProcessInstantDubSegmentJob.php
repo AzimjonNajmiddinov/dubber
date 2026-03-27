@@ -370,6 +370,18 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         return $voices[$this->language] ?? 'uz-UZ-SardorNeural';
     }
 
+    /**
+     * Compute frame-aligned duration from absolute positions.
+     * Uses cumulative frame counting so rounding errors don't accumulate
+     * across segments (max drift: 23ms at any point, bounded).
+     */
+    private function frameAlignedDuration(float $start, float $end): float
+    {
+        $startFrames = (int) round($start * 44100 / 1024);
+        $endFrames = (int) round($end * 44100 / 1024);
+        return max(1, $endFrames - $startFrames) * 1024 / 44100;
+    }
+
     private function getAudioDuration(string $path): float
     {
         $result = Process::timeout(10)->run([
@@ -388,9 +400,9 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         $hasBg = $originalAudioPath && file_exists($originalAudioPath);
 
         $slotStart = $this->startTime;
-        // Full slot: from this segment's start to next segment's start (or endTime if last)
+        // Frame-aligned duration from absolute positions (prevents cumulative drift)
         $slotEnd = $this->slotEnd ?? $this->endTime;
-        $slotDuration = round(max(0.1, $slotEnd - $slotStart), 3);
+        $slotDuration = round($this->frameAlignedDuration($slotStart, $slotEnd), 6);
 
         $aacDir = storage_path("app/instant-dub/{$this->sessionId}/aac");
         $aacFile = "{$aacDir}/{$this->index}.aac";
@@ -459,9 +471,9 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         $aacFile = "{$aacDir}/{$this->index}.aac";
         if (!is_dir($aacDir)) @mkdir($aacDir, 0755, true);
 
-        // Full slot: from this segment's start to next segment's start (or endTime if last)
+        // Frame-aligned duration from absolute positions (prevents cumulative drift)
         $slotEnd = $this->slotEnd ?? $this->endTime;
-        $speechDuration = round(max(0.1, $slotEnd - $this->startTime), 3);
+        $speechDuration = round($this->frameAlignedDuration($this->startTime, $slotEnd), 6);
 
         try {
             $timeout = max(30, (int) ceil($speechDuration) + 30);
@@ -513,9 +525,9 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         $bgChunkStart = $this->findBgChunkStart($session, $this->startTime);
         $seekInBg = max(0, $this->startTime - $bgChunkStart);
 
-        // Full slot: from this segment's start to next segment's start (or endTime if last)
+        // Frame-aligned duration from absolute positions (prevents cumulative drift)
         $slotEnd = $this->slotEnd ?? $this->endTime;
-        $slotDuration = round(max(0.1, $slotEnd - $this->startTime), 3);
+        $slotDuration = round($this->frameAlignedDuration($this->startTime, $slotEnd), 6);
 
         $aacDir = storage_path("app/instant-dub/{$this->sessionId}/aac");
         $aacFile = "{$aacDir}/{$this->index}.aac";
@@ -526,8 +538,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
 
         try {
             if ($hasBg) {
-                // anullsrc as time base guarantees exact frame count (prevents ADTS drift)
-                // TTS overlaid on 20% background; after TTS ends, background continues
+                // anullsrc with frame-aligned duration: exact frame count, no cumulative drift
                 $result = Process::timeout(20)->run([
                     'ffmpeg', '-y',
                     '-f', 'lavfi', '-t', (string) $slotDuration, '-i', 'anullsrc=r=44100:cl=mono',
@@ -605,7 +616,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
 
         // If we don't know video duration, add 3 minutes of padding
         $tailEnd = $videoDuration > $tailStart ? $videoDuration : $tailStart + 180;
-        $tailDuration = round($tailEnd - $tailStart, 3);
+        $tailDuration = round($this->frameAlignedDuration($tailStart, $tailEnd), 6);
 
         if ($tailDuration < 5) return; // No significant tail needed
 
@@ -659,7 +670,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
     {
         $originalAudioPath = $session['original_audio_path'] ?? null;
         $hasBg = $originalAudioPath && file_exists($originalAudioPath);
-        $duration = round($this->startTime, 3);
+        $duration = round($this->frameAlignedDuration(0, $this->startTime), 6);
 
         $aacDir = storage_path("app/instant-dub/{$this->sessionId}/aac");
         $aacFile = "{$aacDir}/lead.aac";

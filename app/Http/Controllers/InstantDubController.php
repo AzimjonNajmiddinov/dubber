@@ -511,7 +511,7 @@ class InstantDubController extends Controller
         if ($horizon >= 0) {
             $firstStart = (float) ($chunks[0]['start_time'] ?? 0);
             if ($firstStart > 1.0) {
-                $leadDur = round($firstStart, 3);
+                $leadDur = round($this->frameAlignedDuration(0, $firstStart), 6);
                 $entries[] = [
                     'uri' => 'dub-segment/lead.aac',
                     'duration' => $leadDur,
@@ -542,8 +542,8 @@ class InstantDubController extends Controller
             }
             $slotEnd = $nextStart ?? $endTime;
 
-            // Use calculated slot duration (matches video timeline exactly)
-            $slotDur = round(max(0.1, $slotEnd - $startTime), 3);
+            // Frame-aligned duration (matches actual AAC, max 23ms bounded drift)
+            $slotDur = round($this->frameAlignedDuration($startTime, $slotEnd), 6);
             $entries[] = [
                 'uri' => "dub-segment/{$i}.aac",
                 'duration' => $slotDur,
@@ -879,6 +879,13 @@ class InstantDubController extends Controller
             'Content-Type' => 'audio/aac',
             'Access-Control-Allow-Origin' => '*',
         ]);
+    }
+
+    private function frameAlignedDuration(float $start, float $end): float
+    {
+        $startFrames = (int) round($start * 44100 / 1024);
+        $endFrames = (int) round($end * 44100 / 1024);
+        return max(1, $endFrames - $startFrames) * 1024 / 44100;
     }
 
     private function getSession(string $sessionId): ?array

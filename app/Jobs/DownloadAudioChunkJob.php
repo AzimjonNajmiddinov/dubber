@@ -157,8 +157,7 @@ class DownloadAudioChunkJob implements ShouldQueue
                 $firstStart = (float) ($chunk0['start_time'] ?? 0);
                 if ($firstStart > 1.0) {
                     $leadFile = "{$aacDir}/lead.aac";
-                    $leadDur = round($firstStart, 3);
-                    // Use anullsrc as base to guarantee exact duration (ADTS trims silence)
+                    $leadDur = round($this->frameAlignedDuration(0, $firstStart), 6);
                     Process::timeout(30)->run([
                         'ffmpeg', '-y',
                         '-f', 'lavfi', '-t', (string) $leadDur, '-i', 'anullsrc=r=44100:cl=mono',
@@ -193,7 +192,7 @@ class DownloadAudioChunkJob implements ShouldQueue
                     ? (float) (json_decode($nextChunkJson, true)['start_time'] ?? $segEnd)
                     : $segEnd;
             }
-            $slotDuration = round(max(0.1, $slotEnd - $segStart), 3);
+            $slotDuration = round($this->frameAlignedDuration($segStart, $slotEnd), 6);
 
             $tmpMp3 = "/tmp/remix_{$this->sessionId}_{$i}.mp3";
             file_put_contents($tmpMp3, base64_decode($audioBase64));
@@ -221,6 +220,13 @@ class DownloadAudioChunkJob implements ShouldQueue
                 'session' => $this->sessionId,
             ]);
         }
+    }
+
+    private function frameAlignedDuration(float $start, float $end): float
+    {
+        $startFrames = (int) round($start * 44100 / 1024);
+        $endFrames = (int) round($end * 44100 / 1024);
+        return max(1, $endFrames - $startFrames) * 1024 / 44100;
     }
 
     public function failed(\Throwable $exception): void
