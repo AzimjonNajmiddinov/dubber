@@ -387,8 +387,9 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         $hasBg = $originalAudioPath && file_exists($originalAudioPath);
 
         $slotStart = $this->startTime;
-        // Speech duration only — gap handled separately in playlist
-        $slotDuration = round(max(0.1, $this->endTime - $slotStart), 3);
+        // Full slot: from this segment's start to next segment's start (or endTime if last)
+        $slotEnd = $this->slotEnd ?? $this->endTime;
+        $slotDuration = round(max(0.1, $slotEnd - $slotStart), 3);
 
         $aacDir = storage_path("app/instant-dub/{$this->sessionId}/aac");
         $aacFile = "{$aacDir}/{$this->index}.aac";
@@ -457,8 +458,9 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         $aacFile = "{$aacDir}/{$this->index}.aac";
         if (!is_dir($aacDir)) @mkdir($aacDir, 0755, true);
 
-        // Generate TTS for speech duration only (gap handled separately in playlist)
-        $speechDuration = round(max(0.1, $this->endTime - $this->startTime), 3);
+        // Full slot: from this segment's start to next segment's start (or endTime if last)
+        $slotEnd = $this->slotEnd ?? $this->endTime;
+        $speechDuration = round(max(0.1, $slotEnd - $this->startTime), 3);
 
         try {
             $timeout = max(30, (int) ceil($speechDuration) + 30);
@@ -508,8 +510,9 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         $bgChunkStart = $this->findBgChunkStart($session, $this->startTime);
         $seekInBg = max(0, $this->startTime - $bgChunkStart);
 
-        // Speech duration only — gap is handled separately in the playlist
-        $slotDuration = round(max(0.1, $this->endTime - $this->startTime), 3);
+        // Full slot: from this segment's start to next segment's start (or endTime if last)
+        $slotEnd = $this->slotEnd ?? $this->endTime;
+        $slotDuration = round(max(0.1, $slotEnd - $this->startTime), 3);
 
         $aacDir = storage_path("app/instant-dub/{$this->sessionId}/aac");
         $aacFile = "{$aacDir}/{$this->index}.aac";
@@ -521,7 +524,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         try {
             if ($hasBg) {
                 // ONE segment for full slot: TTS overlaid on background audio
-                // Real background audio preserves ADTS duration (no silent trim)
+                // After TTS ends, background continues alone at 20%
                 $result = Process::timeout(20)->run([
                     'ffmpeg', '-y',
                     '-ss', (string) round($seekInBg, 3), '-t', (string) $slotDuration, '-i', $originalAudioPath,

@@ -532,7 +532,7 @@ class InstantDubController extends Controller
             $startTime = (float) ($chunk['start_time'] ?? 0);
             $endTime = (float) ($chunk['end_time'] ?? 0);
 
-            // Find next chunk for slot duration
+            // Find next chunk for full slot duration
             $nextStart = null;
             for ($j = $i + 1; $j <= $horizon; $j++) {
                 if (isset($chunks[$j])) {
@@ -541,23 +541,13 @@ class InstantDubController extends Controller
                 }
             }
             $slotEnd = $nextStart ?? $endTime;
-            $gap = $slotEnd - $endTime;
 
-            // Speech segment — just the speech duration
-            $speechDur = round(max(0.1, $endTime - $startTime), 3);
+            // Full slot: TTS + background continues until next segment starts
+            $slotDur = round(max(0.1, $slotEnd - $startTime), 3);
             $entries[] = [
                 'uri' => "dub-segment/{$i}.aac",
-                'duration' => $speechDur,
+                'duration' => $slotDur,
             ];
-
-            // If there's a gap > 0.5s until next dialogue, add silent gap segment(s)
-            if ($gap > 0.5) {
-                $gapDur = round($gap, 3);
-                $entries[] = [
-                    'uri' => "dub-segment/gap-{$i}.aac",
-                    'duration' => $gapDur,
-                ];
-            }
         }
 
         // Prepare tail segment info before TARGETDURATION calculation
