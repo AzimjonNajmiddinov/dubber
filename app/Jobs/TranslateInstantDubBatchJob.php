@@ -93,6 +93,9 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         }
 
         // Dispatch TTS for this batch's segments — ALWAYS runs, even if translation failed
+        // Post-process: merge rare speakers into nearest common speaker
+        $batch = $this->mergeRareSpeakers($batch);
+
         $this->updateSession(['progress' => "Generating audio ({$batchNum}/{$this->totalBatches})..."]);
         $globalOffset = $this->segmentOffset + $this->batchIndex * 15;
 
@@ -525,6 +528,80 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         if ($changed && $sessionJson) {
             Redis::setex($sessionKey, 50400, json_encode($session));
         }
+    }
+
+    /**
+     * Merge rare speakers (≤2 segments) into the most common speaker of same gender.
+     * Prevents 2-person dialogues from getting 4+ different voices.
+     */
+    private function mergeRareSpeakers(array $batch): array
+    {
+        // Count segments per speaker across ALL session chunks (not just this batch)
+        $allCounts = [];
+        $sessionKey = "instant-dub:{$this->sessionId}";
+        $sessionJson = Redis::get($sessionKey);
+        $total = $sessionJson ? (int) (json_decode($sessionJson, true)['total_segments'] ?? 0) : 0;
+
+        // Count from already-processed chunks
+        for ($i = 0; $i < $total; $i++) {
+            $chunkJson = Redis::get("{$sessionKey}:chunk:{$i}");
+            if ($chunkJson) {
+                $chunk = json_decode($chunkJson, true);
+                $tag = $chunk['speaker'] ?? 'M1';
+                $allCounts[$tag] = ($allCounts[$tag] ?? 0) + 1;
+            }
+        }
+        // Count from current batch
+        foreach ($batch as $seg) {
+            $tag = $seg['speaker'] ?? 'M1';
+            $allCounts[$tag] = ($allCounts[$tag] ?? 0) + 1;
+        }
+
+        if (count($allCounts) <= 2) return $batch; // 2 speakers or less — no merging needed
+
+        // Find the most common male and female speakers
+        $maleCounts = [];
+        $femaleCounts = [];
+        foreach ($allCounts as $tag => $count) {
+            if (str_starts_with($tag, 'F')) {
+                $femaleCounts[$tag] = $count;
+            } else {
+                $maleCounts[$tag] = $count;
+            }
+        }
+        arsort($maleCounts);
+        arsort($femaleCounts);
+
+        $topMale = $maleCounts ? array_key_first($maleCounts) : 'M1';
+        $topFemale = $femaleCounts ? array_key_first($femaleCounts) : 'F1';
+
+        // Merge: speakers with ≤2 segments → top speaker of same gender
+        $mergeMap = [];
+        $threshold = max(2, (int) ($total * 0.05)); // ≤2 or ≤5% of total
+        foreach ($allCounts as $tag => $count) {
+            if ($count <= $threshold) {
+                $target = str_starts_with($tag, 'F') ? $topFemale : $topMale;
+                if ($tag !== $target) {
+                    $mergeMap[$tag] = $target;
+                }
+            }
+        }
+
+        if (empty($mergeMap)) return $batch;
+
+        Log::info("[DUB] [{$this->title}] Merging rare speakers: " . implode(', ', array_map(fn($from, $to) => "{$from}→{$to}", array_keys($mergeMap), $mergeMap)), [
+            'session' => $this->sessionId,
+        ]);
+
+        foreach ($batch as &$seg) {
+            $tag = $seg['speaker'] ?? 'M1';
+            if (isset($mergeMap[$tag])) {
+                $seg['speaker'] = $mergeMap[$tag];
+            }
+        }
+        unset($seg);
+
+        return $batch;
     }
 
     private function mergeVoiceMap(array $newSpeakers): void
