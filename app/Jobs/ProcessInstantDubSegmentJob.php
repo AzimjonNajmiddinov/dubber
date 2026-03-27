@@ -465,9 +465,11 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         try {
             $timeout = max(30, (int) ceil($speechDuration) + 30);
             Process::timeout($timeout)->run([
-                'ffmpeg', '-y', '-i', $ttsMp3,
-                '-af', "aresample=44100,apad=whole_dur={$speechDuration}",
-                '-t', (string) $speechDuration,
+                'ffmpeg', '-y',
+                '-f', 'lavfi', '-t', (string) $speechDuration, '-i', 'anullsrc=r=44100:cl=mono',
+                '-i', $ttsMp3,
+                '-filter_complex',
+                "[1:a]aresample=44100[tts];[0:a][tts]amix=inputs=2:duration=first:normalize=0",
                 '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
             ]);
         } catch (\Throwable $e) {
@@ -523,15 +525,15 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
 
         try {
             if ($hasBg) {
-                // ONE segment for full slot: TTS overlaid on background audio
-                // After TTS ends, background continues alone at 20%
+                // anullsrc as time base guarantees exact frame count (prevents ADTS drift)
+                // TTS overlaid on 20% background; after TTS ends, background continues
                 $result = Process::timeout(20)->run([
                     'ffmpeg', '-y',
+                    '-f', 'lavfi', '-t', (string) $slotDuration, '-i', 'anullsrc=r=44100:cl=mono',
                     '-ss', (string) round($seekInBg, 3), '-t', (string) $slotDuration, '-i', $originalAudioPath,
                     '-i', $ttsMp3,
                     '-filter_complex',
-                    "[0:a]volume=0.2,aresample=44100[bg];[1:a]aresample=44100[tts];[bg][tts]amix=inputs=2:duration=first:normalize=0",
-                    '-t', (string) $slotDuration,
+                    "[1:a]volume=0.2,aresample=44100[bg];[2:a]aresample=44100[tts];[0:a][bg][tts]amix=inputs=3:duration=first:normalize=0",
                     '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
                 ]);
                 if (!$result->successful() || !file_exists($aacFile) || filesize($aacFile) < 100) {

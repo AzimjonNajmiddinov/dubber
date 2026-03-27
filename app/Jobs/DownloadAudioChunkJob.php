@@ -197,15 +197,14 @@ class DownloadAudioChunkJob implements ShouldQueue
             $tmpMp3 = "/tmp/remix_{$this->sessionId}_{$i}.mp3";
             file_put_contents($tmpMp3, base64_decode($audioBase64));
 
-            // ONE segment: TTS overlaid on background for full slot duration
-            // Real background audio preserves ADTS duration (no silent trim issue)
+            // anullsrc as time base guarantees exact frame count (prevents ADTS drift)
             $result = Process::timeout(20)->run([
                 'ffmpeg', '-y',
+                '-f', 'lavfi', '-t', (string) $slotDuration, '-i', 'anullsrc=r=44100:cl=mono',
                 '-ss', (string) round($seekInBg, 3), '-t', (string) $slotDuration, '-i', $bgAudioPath,
                 '-i', $tmpMp3,
                 '-filter_complex',
-                "[0:a]volume=0.2,aresample=44100[bg];[1:a]aresample=44100[tts];[bg][tts]amix=inputs=2:duration=first:normalize=0",
-                '-t', (string) $slotDuration,
+                "[1:a]volume=0.2,aresample=44100[bg];[2:a]aresample=44100[tts];[0:a][bg][tts]amix=inputs=3:duration=first:normalize=0",
                 '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
             ]);
 

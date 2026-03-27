@@ -542,11 +542,12 @@ class InstantDubController extends Controller
             }
             $slotEnd = $nextStart ?? $endTime;
 
-            // Full slot: TTS + background continues until next segment starts
+            // Use probed AAC duration when available (prevents ADTS frame-rounding drift)
             $slotDur = round(max(0.1, $slotEnd - $startTime), 3);
+            $aacDur = (float) ($chunk['aac_duration'] ?? 0);
             $entries[] = [
                 'uri' => "dub-segment/{$i}.aac",
-                'duration' => $slotDur,
+                'duration' => $aacDur > 0 ? $aacDur : $slotDur,
             ];
         }
 
