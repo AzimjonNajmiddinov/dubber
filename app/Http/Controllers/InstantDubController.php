@@ -404,8 +404,8 @@ class InstantDubController extends Controller
                 $output[] = "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"{$subsGroupId}\",NAME=\"{$subName}\",LANGUAGE=\"{$lang}\",URI=\"dub-subtitles.m3u8\",DEFAULT=NO,AUTOSELECT=YES,FORCED=NO";
             }
 
-            // Set existing audio tracks to DEFAULT=NO
-            if (str_starts_with($trimmed, '#EXT-X-MEDIA') && str_contains($trimmed, 'TYPE=AUDIO') && !str_contains($trimmed, 'dub-audio')) {
+            // Set existing audio and subtitle tracks to DEFAULT=NO/AUTOSELECT=NO (ours takes priority)
+            if (str_starts_with($trimmed, '#EXT-X-MEDIA') && !str_contains($trimmed, 'dub-audio') && !str_contains($trimmed, 'dub-subtitles')) {
                 $line = preg_replace('/DEFAULT=YES/', 'DEFAULT=NO', $line);
                 $line = preg_replace('/AUTOSELECT=YES/', 'AUTOSELECT=NO', $line);
             }
