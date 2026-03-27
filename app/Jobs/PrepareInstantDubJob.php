@@ -276,13 +276,13 @@ class PrepareInstantDubJob implements ShouldQueue
             }
             unset($track);
 
-            // Fetch all tracks by language
+            // Fetch all tracks — for duplicate languages, keep the one with most cues
             $byLang = [];
             foreach ($tracks as $track) {
                 $lang = $track['langCode'];
-                if (!isset($byLang[$lang])) {
-                    $result = $this->fetchSubtitleTrack($track, $baseUrl, $resolve);
-                    if ($result['cues'] > 0 && $result['srt'] !== '') {
+                $result = $this->fetchSubtitleTrack($track, $baseUrl, $resolve);
+                if ($result['cues'] > 0 && $result['srt'] !== '') {
+                    if (!isset($byLang[$lang]) || $result['cues'] > $byLang[$lang]['cues']) {
                         $byLang[$lang] = $result;
                     }
                 }
