@@ -16,7 +16,7 @@ class DownloadAudioChunkJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public int $timeout = 120;
+    public int $timeout = 300;
     public int $tries = 3;
 
     public function __construct(
@@ -179,13 +179,11 @@ class DownloadAudioChunkJob implements ShouldQueue
             $segStart = (float) ($chunk['start_time'] ?? 0);
             $segEnd = (float) ($chunk['end_time'] ?? 0);
 
-            if ($segStart < $this->startTime || $segStart >= $this->endTime) continue;
-
             $audioBase64 = $chunk['audio_base64'] ?? null;
             if (!$audioBase64) continue;
 
             $aacFile = "{$aacDir}/{$i}.aac";
-            $seekInBg = max(0, $segStart - $this->startTime);
+            $seekInBg = max(0, $segStart);
 
             // Compute full slot duration (speech + gap until next segment)
             $nextChunkJson = Redis::get("{$sessionKey}:chunk:" . ($i + 1));

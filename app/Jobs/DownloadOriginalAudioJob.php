@@ -17,11 +17,8 @@ class DownloadOriginalAudioJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public int $timeout = 120;
+    public int $timeout = 300;
     public int $tries = 3;
-
-    // Download audio in chunks of this many seconds
-    private const CHUNK_DURATION = 300; // 5 minutes
 
     public function __construct(
         public string $sessionId,
@@ -58,25 +55,15 @@ class DownloadOriginalAudioJob implements ShouldQueue
             Redis::setex($sessionKey, 50400, json_encode($s));
         }
 
-        // Split into time-based chunks and dispatch download jobs
-        $chunkStart = 0;
-        $chunkIndex = 0;
+        // Download entire audio as one file
+        DownloadAudioChunkJob::dispatch(
+            $this->sessionId,
+            0,
+            0,
+            $totalDuration,
+        )->onQueue('default');
 
-        while ($chunkStart < $totalDuration) {
-            $chunkEnd = min($chunkStart + self::CHUNK_DURATION, $totalDuration);
-
-            DownloadAudioChunkJob::dispatch(
-                $this->sessionId,
-                $chunkIndex,
-                $chunkStart,
-                $chunkEnd,
-            )->onQueue('default');
-
-            $chunkStart = $chunkEnd;
-            $chunkIndex++;
-        }
-
-        Log::info("[DUB] Audio download split into {$chunkIndex} chunks ({$totalDuration}s total)", [
+        Log::info("[DUB] Audio download dispatched ({$totalDuration}s total)", [
             'session' => $this->sessionId,
         ]);
     }
