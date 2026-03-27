@@ -160,6 +160,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                 'index' => $this->index,
                 'start_time' => $this->startTime,
                 'end_time' => $this->endTime,
+                'slot_end' => $this->slotEnd,
                 'text' => $this->text,
                 'speaker' => $this->speaker,
                 'audio_base64' => $audioBase64,

@@ -185,12 +185,15 @@ class DownloadAudioChunkJob implements ShouldQueue
             $aacFile = "{$aacDir}/{$i}.aac";
             $seekInBg = max(0, $segStart);
 
-            // Compute full slot duration (speech + gap until next segment)
-            $nextChunkJson = Redis::get("{$sessionKey}:chunk:" . ($i + 1));
-            $nextStart = $nextChunkJson
-                ? (float) (json_decode($nextChunkJson, true)['start_time'] ?? $segEnd)
-                : $segEnd;
-            $slotDuration = round(max(0.1, $nextStart - $segStart), 3);
+            // Use stored slot_end (same as initial generation) for consistent duration
+            $slotEnd = isset($chunk['slot_end']) ? (float) $chunk['slot_end'] : null;
+            if ($slotEnd === null) {
+                $nextChunkJson = Redis::get("{$sessionKey}:chunk:" . ($i + 1));
+                $slotEnd = $nextChunkJson
+                    ? (float) (json_decode($nextChunkJson, true)['start_time'] ?? $segEnd)
+                    : $segEnd;
+            }
+            $slotDuration = round(max(0.1, $slotEnd - $segStart), 3);
 
             $tmpMp3 = "/tmp/remix_{$this->sessionId}_{$i}.mp3";
             file_put_contents($tmpMp3, base64_decode($audioBase64));

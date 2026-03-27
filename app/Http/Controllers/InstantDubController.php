@@ -542,12 +542,11 @@ class InstantDubController extends Controller
             }
             $slotEnd = $nextStart ?? $endTime;
 
-            // Use probed AAC duration when available (prevents ADTS frame-rounding drift)
+            // Use calculated slot duration (matches video timeline exactly)
             $slotDur = round(max(0.1, $slotEnd - $startTime), 3);
-            $aacDur = (float) ($chunk['aac_duration'] ?? 0);
             $entries[] = [
                 'uri' => "dub-segment/{$i}.aac",
-                'duration' => $aacDur > 0 ? $aacDur : $slotDur,
+                'duration' => $slotDur,
             ];
         }
 
