@@ -438,8 +438,35 @@ class TranslateInstantDubBatchJob implements ShouldQueue
                 }
             }
 
+            // For speakers that couldn't be cloned, use ElevenLabs pre-made voices
+            $premadeMale = [
+                'pNInz6obpgDQGcFmaJgB', // Adam
+                'ErXwobaYiN019PkySvjV', // Antoni
+                'VR6AewLTigWG4xSOukaG', // Arnold
+                'yoZ06aMxZJJ28mfd3POQ', // Sam
+            ];
+            $premadeFemale = [
+                'EXAVITQu4vr4xnSDxMaL', // Sarah
+                '21m00Tcm4TlvDq8ikWAM', // Rachel
+                'XB0fDUnXU5powFXDhCwa', // Charlotte
+            ];
+            $maleIdx = count($clonedVoiceIds);
+            $femaleIdx = 0;
+
+            foreach ($speakerMap as $tag => $_) {
+                if (!isset($voiceMap[$tag]) || ($voiceMap[$tag]['driver'] ?? '') !== 'elevenlabs') {
+                    if (str_starts_with($tag, 'F')) {
+                        $voiceMap[$tag] = ['driver' => 'elevenlabs', 'voice_id' => $premadeFemale[$femaleIdx % count($premadeFemale)]];
+                        $femaleIdx++;
+                    } else {
+                        $voiceMap[$tag] = ['driver' => 'elevenlabs', 'voice_id' => $premadeMale[$maleIdx % count($premadeMale)]];
+                        $maleIdx++;
+                    }
+                }
+            }
+
+            Redis::setex($voiceKey, 50400, json_encode($voiceMap));
             if (!empty($clonedVoiceIds)) {
-                Redis::setex($voiceKey, 50400, json_encode($voiceMap));
                 Redis::setex("instant-dub:{$this->sessionId}:elevenlabs-voices", 50400, json_encode($clonedVoiceIds));
             }
         } catch (\Throwable $e) {
