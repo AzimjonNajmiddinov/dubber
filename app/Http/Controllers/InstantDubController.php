@@ -22,6 +22,7 @@ class InstantDubController extends Controller
             'video_url' => 'nullable|string',
             'translate_from' => 'nullable|string|max:10',
             'title' => 'nullable|string|max:255',
+            'quality' => 'nullable|string|in:standard,premium',
         ]);
 
         $sessionId = Str::uuid()->toString();
@@ -30,6 +31,8 @@ class InstantDubController extends Controller
         $translateFrom = $request->input('translate_from', '');
         $srt = $request->input('srt', '');
         $title = $request->input('title', 'Untitled');
+        $quality = $request->input('quality', 'standard'); // standard=edge, premium=elevenlabs
+        $ttsDriver = $quality === 'premium' ? 'elevenlabs' : 'edge';
 
         // Parse video URL components for HLS
         $urlWithoutQuery = strtok($videoUrl, '?');
@@ -45,6 +48,8 @@ class InstantDubController extends Controller
             'video_base_url' => $videoBaseUrl,
             'video_query' => $videoQuery,
             'status' => 'preparing',
+            'quality' => $quality,
+            'tts_driver' => $ttsDriver,
             'total_segments' => 0,
             'segments_ready' => 0,
             'created_at' => now()->toIso8601String(),

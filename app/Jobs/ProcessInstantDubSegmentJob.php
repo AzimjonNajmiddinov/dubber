@@ -72,7 +72,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             $voiceKey = "instant-dub:{$this->sessionId}:voices";
             $voiceMap = json_decode(Redis::get($voiceKey), true) ?? [];
             $speakerEntry = $voiceMap[$this->speaker] ?? [];
-            $driver = $speakerEntry['driver'] ?? config('dubber.tts.default', 'edge');
+            $driver = $speakerEntry['driver'] ?? ($session['tts_driver'] ?? config('dubber.tts.default', 'edge'));
 
             if ($driver === 'elevenlabs' && !empty($speakerEntry['voice_id'])) {
                 $this->generateWithElevenLabs($rawMp3, $speakerEntry['voice_id']);

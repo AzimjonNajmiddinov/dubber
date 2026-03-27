@@ -79,7 +79,8 @@ class TranslateInstantDubBatchJob implements ShouldQueue
             $this->mergeVoiceMap($speakers);
 
             // Clone voices with ElevenLabs on batch 0 (first time speakers are identified)
-            if ($this->batchIndex === 0 && config('dubber.tts.default') === 'elevenlabs') {
+            $sessionTtsDriver = $session['tts_driver'] ?? config('dubber.tts.default', 'edge');
+            if ($this->batchIndex === 0 && $sessionTtsDriver === 'elevenlabs') {
                 $this->cloneVoicesWithElevenLabs($batch);
             }
         } catch (\Throwable $e) {
@@ -503,7 +504,9 @@ class TranslateInstantDubBatchJob implements ShouldQueue
     {
         $voiceKey = "instant-dub:{$this->sessionId}:voices";
         $lockKey = "instant-dub:{$this->sessionId}:voices-lock";
-        $driver = config('dubber.tts.default', 'edge');
+        $sessionJson = Redis::get("instant-dub:{$this->sessionId}");
+        $sessionData = $sessionJson ? json_decode($sessionJson, true) : [];
+        $driver = $sessionData['tts_driver'] ?? config('dubber.tts.default', 'edge');
 
         if ($driver === 'aisha') {
             $variants = \App\Services\VoiceVariants::forAisha();

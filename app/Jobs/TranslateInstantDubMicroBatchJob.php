@@ -230,7 +230,9 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
     {
         $voiceKey = "instant-dub:{$this->sessionId}:voices";
         $lockKey = "instant-dub:{$this->sessionId}:voices-lock";
-        $driver = config('dubber.tts.default', 'edge');
+        $sessionJson = Redis::get("instant-dub:{$this->sessionId}");
+        $sessionData = $sessionJson ? json_decode($sessionJson, true) : [];
+        $driver = $sessionData['tts_driver'] ?? config('dubber.tts.default', 'edge');
 
         if ($driver === 'aisha') {
             $variants = \App\Services\VoiceVariants::forAisha();
