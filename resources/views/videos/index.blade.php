@@ -29,6 +29,7 @@ body { font-family: ui-sans-serif, system-ui, -apple-system; margin: 24px; }
 <div style="margin-bottom:16px; display:flex; gap:8px;">
     <a class="btn btn-primary" href="{{ route('dub.index') }}">+ New Dub</a>
     <a class="btn" href="{{ route('instant-dub') }}">Instant Dub</a>
+    <a class="btn" href="{{ route('admin.dubs.index') }}">Admin</a>
 </div>
 
 <div class="card">
