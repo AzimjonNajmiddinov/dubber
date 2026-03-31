@@ -80,7 +80,10 @@
 </head>
 <body>
 <div class="container">
-    <h1>Instant Dub</h1>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+        <h1 style="margin-bottom:0">Instant Dub</h1>
+        <a href="{{ route('admin.dubs.index') }}" style="padding:7px 16px;background:#1a1f2e;border:1px solid #333;border-radius:6px;color:#999;font-size:0.85rem;text-decoration:none">Admin</a>
+    </div>
 
     <div class="layout">
         <div class="panel">
