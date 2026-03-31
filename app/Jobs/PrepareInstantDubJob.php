@@ -2,6 +2,7 @@
 
 namespace App\Jobs;
 
+use App\Models\InstantDub;
 use App\Services\SrtParser;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -26,6 +27,7 @@ class PrepareInstantDubJob implements ShouldQueue
         public string $language,
         public string $translateFrom,
         public string $srt,
+        public ?int   $cachedDubId = null,
     ) {}
 
     public function handle(): void
@@ -37,6 +39,12 @@ class PrepareInstantDubJob implements ShouldQueue
         $sessionJson = Redis::get($sessionKey);
         if ($sessionJson) {
             $title = json_decode($sessionJson, true)['title'] ?? 'Untitled';
+        }
+
+        // Fast path: needs_retts — skip translation, re-TTS from saved DB segments
+        if ($this->cachedDubId !== null) {
+            $this->handleReTts($title);
+            return;
         }
 
         // 1. Get subtitles — from SRT or fetch from HLS
@@ -184,6 +192,60 @@ class PrepareInstantDubJob implements ShouldQueue
         }
 
         Log::info("[DUB] [{$title}] Prepared: {$microBatchSize} micro-batch + " . count($remainingSegments) . " remaining in {$totalBatches} batches, {$this->translateFrom}→{$this->language}", [
+            'session' => $this->sessionId,
+        ]);
+    }
+
+    private function handleReTts(string $title): void
+    {
+        $dub = InstantDub::with('segments')->find($this->cachedDubId);
+        if (!$dub) {
+            $this->updateStatus('error', 'Cached dub not found');
+            return;
+        }
+
+        $segments = $dub->segments->sortBy('segment_index')->values();
+        $total = $segments->count();
+
+        if ($total === 0) {
+            $this->updateStatus('error', 'No segments in cached dub');
+            return;
+        }
+
+        // Rebuild voice map from saved speaker tags
+        $allSpeakers = [];
+        foreach ($segments as $seg) {
+            $allSpeakers[$seg->speaker] = true;
+        }
+        $this->buildVoiceMap($allSpeakers);
+
+        $this->updateSession(['total_segments' => $total, 'status' => 'processing']);
+
+        // Download background audio (needed for remix)
+        DownloadOriginalAudioJob::dispatch($this->sessionId, $this->videoUrl)
+            ->onQueue('default');
+
+        // Dispatch TTS for segments that need re-TTS
+        $dispatched = 0;
+        foreach ($segments as $i => $seg) {
+            $text = trim($seg->translated_text ?? '');
+            if ($text === '') continue;
+
+            ProcessInstantDubSegmentJob::dispatch(
+                $this->sessionId,
+                $seg->segment_index,
+                $text,
+                $seg->start_time,
+                $seg->end_time,
+                $this->language,
+                $seg->speaker,
+                $seg->slot_end,
+                $seg->source_text,
+            )->onQueue('segment-generation');
+            $dispatched++;
+        }
+
+        Log::info("[DUB] [{$title}] Re-TTS dispatched: {$dispatched} segments (cached_dub_id={$this->cachedDubId})", [
             'session' => $this->sessionId,
         ]);
     }

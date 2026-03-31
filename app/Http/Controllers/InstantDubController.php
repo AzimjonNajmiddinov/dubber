@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Jobs\PrepareInstantDubJob;
+use App\Models\InstantDub;
 use App\Services\ElevenLabs\ElevenLabsClient;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -31,7 +32,7 @@ class InstantDubController extends Controller
         $translateFrom = $request->input('translate_from', '');
         $srt = $request->input('srt', '');
         $title = $request->input('title', 'Untitled');
-        $quality = $request->input('quality', 'standard'); // standard=edge, premium=elevenlabs
+        $quality = $request->input('quality', 'standard');
         $ttsDriver = $quality === 'premium' ? 'elevenlabs' : 'edge';
 
         // Parse video URL components for HLS
@@ -39,34 +40,72 @@ class InstantDubController extends Controller
         $videoBaseUrl = $videoUrl ? preg_replace('#/[^/]+$#', '/', $urlWithoutQuery) : '';
         $videoQuery = $videoUrl ? (parse_url($videoUrl, PHP_URL_QUERY) ?? '') : '';
 
-        // Create session immediately so polling works right away
+        // Check cache — skip re-dubbing if we already have a result
+        if ($videoUrl && !$srt) {
+            $cached = InstantDub::where('video_url', $urlWithoutQuery)
+                ->where('language', $language)
+                ->whereIn('status', ['complete', 'needs_retts'])
+                ->first();
+
+            if ($cached) {
+                $session = $this->buildSessionFromCache($cached, $sessionId, $videoUrl, $videoBaseUrl, $videoQuery, $title);
+                Redis::setex("instant-dub:{$sessionId}", 50400, json_encode($session));
+
+                if ($cached->status === 'complete') {
+                    // Populate chunk keys from DB — no processing needed
+                    foreach ($cached->segments as $seg) {
+                        Redis::setex("instant-dub:{$sessionId}:chunk:{$seg->segment_index}", 50400, json_encode([
+                            'index'          => $seg->segment_index,
+                            'start_time'     => $seg->start_time,
+                            'end_time'       => $seg->end_time,
+                            'slot_end'       => $seg->slot_end,
+                            'text'           => $seg->translated_text,
+                            'source_text'    => $seg->source_text,
+                            'speaker'        => $seg->speaker,
+                            'audio_base64'   => null,
+                            'audio_duration' => $seg->aac_duration,
+                            'aac_duration'   => $seg->aac_duration,
+                        ]));
+                    }
+                    Log::info("[DUB] Cache hit (complete) for: {$urlWithoutQuery} [{$language}]", ['session' => $sessionId]);
+                    return response()->json(['session_id' => $sessionId, 'cached' => true]);
+                }
+
+                // needs_retts: re-TTS with saved translations, skip full translation
+                $cached->update(['status' => 'processing', 'session_id' => $sessionId]);
+                PrepareInstantDubJob::dispatch(
+                    $sessionId, $videoUrl, $language, $translateFrom, $srt, $cached->id,
+                )->onQueue('segment-generation');
+                Log::info("[DUB] Cache hit (needs_retts) — re-TTS for: {$urlWithoutQuery} [{$language}]", ['session' => $sessionId]);
+                return response()->json(['session_id' => $sessionId]);
+            }
+        }
+
+        // No cache — full pipeline
         $session = [
-            'id' => $sessionId,
-            'title' => $title,
-            'language' => $language,
-            'video_url' => $videoUrl,
+            'id'             => $sessionId,
+            'title'          => $title,
+            'language'       => $language,
+            'video_url'      => $videoUrl,
             'video_base_url' => $videoBaseUrl,
-            'video_query' => $videoQuery,
-            'status' => 'preparing',
-            'quality' => $quality,
-            'tts_driver' => $ttsDriver,
+            'video_query'    => $videoQuery,
+            'status'         => 'preparing',
+            'quality'        => $quality,
+            'tts_driver'     => $ttsDriver,
             'total_segments' => 0,
             'segments_ready' => 0,
-            'created_at' => now()->toIso8601String(),
+            'created_at'     => now()->toIso8601String(),
         ];
 
         Redis::setex("instant-dub:{$sessionId}", 50400, json_encode($session));
 
-        // Dispatch prep job — fetches subs, translates, dispatches TTS
         PrepareInstantDubJob::dispatch(
             $sessionId, $videoUrl, $language, $translateFrom, $srt,
         )->onQueue('segment-generation');
 
-        Log::info("[DUB] Session created", ['session' => $sessionId, 'title' => $title, 'language' => $language, 'translate_from' => $translateFrom]);
+        Log::info("[DUB] Session created", ['session' => $sessionId, 'title' => $title, 'language' => $language]);
 
-        return response()->json([
-            'session_id' => $sessionId,
-        ]);
+        return response()->json(['session_id' => $sessionId]);
     }
 
     public function poll(string $sessionId, Request $request): JsonResponse
@@ -607,9 +646,15 @@ class InstantDubController extends Controller
         return response('', 404);
     }
 
+    private function aacDir(string $sessionId): string
+    {
+        $session = $this->getSession($sessionId);
+        return $session['aac_base_dir'] ?? storage_path("app/instant-dub/{$sessionId}/aac");
+    }
+
     public function hlsGapSegment(string $sessionId, int $index)
     {
-        $aacFile = storage_path("app/instant-dub/{$sessionId}/aac/gap-{$index}.aac");
+        $aacFile = $this->aacDir($sessionId) . "/gap-{$index}.aac";
 
         if (file_exists($aacFile) && filesize($aacFile) > 10) {
             $session = $this->getSession($sessionId);
@@ -628,7 +673,7 @@ class InstantDubController extends Controller
 
     public function hlsLeadSegment(string $sessionId)
     {
-        $aacFile = storage_path("app/instant-dub/{$sessionId}/aac/lead.aac");
+        $aacFile = $this->aacDir($sessionId) . "/lead.aac";
 
         if (file_exists($aacFile) && filesize($aacFile) > 100) {
             $session = $this->getSession($sessionId);
@@ -647,7 +692,7 @@ class InstantDubController extends Controller
 
     public function hlsTailSegment(string $sessionId)
     {
-        $aacFile = storage_path("app/instant-dub/{$sessionId}/aac/tail.aac");
+        $aacFile = $this->aacDir($sessionId) . "/tail.aac";
 
         if (file_exists($aacFile) && filesize($aacFile) > 100) {
             return response()->file($aacFile, [
@@ -662,7 +707,7 @@ class InstantDubController extends Controller
 
     public function hlsAudioSegment(string $sessionId, int $index)
     {
-        $aacFile = storage_path("app/instant-dub/{$sessionId}/aac/{$index}.aac");
+        $aacFile = $this->aacDir($sessionId) . "/{$index}.aac";
 
         if (file_exists($aacFile) && filesize($aacFile) > 10) {
             $session = $this->getSession($sessionId);
@@ -879,6 +924,26 @@ class InstantDubController extends Controller
             'Content-Type' => 'audio/aac',
             'Access-Control-Allow-Origin' => '*',
         ]);
+    }
+
+    private function buildSessionFromCache(InstantDub $dub, string $sessionId, string $videoUrl, string $videoBaseUrl, string $videoQuery, string $title): array
+    {
+        return [
+            'id'             => $sessionId,
+            'title'          => $dub->title ?: $title,
+            'language'       => $dub->language,
+            'video_url'      => $videoUrl,
+            'video_base_url' => $videoBaseUrl,
+            'video_query'    => $videoQuery,
+            'status'         => $dub->status === 'complete' ? 'complete' : 'preparing',
+            'playable'       => $dub->status === 'complete',
+            'tts_driver'     => $dub->tts_driver,
+            'total_segments' => $dub->total_segments,
+            'segments_ready' => $dub->status === 'complete' ? $dub->total_segments : 0,
+            'cached_dub_id'  => $dub->id,
+            'aac_base_dir'   => $dub->aac_dir,
+            'created_at'     => now()->toIso8601String(),
+        ];
     }
 
     private function frameAlignedDuration(float $start, float $end): float

@@ -7,6 +7,7 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use App\Jobs\PersistDubCacheJob;
 use App\Services\ElevenLabs\ElevenLabsClient;
 use App\Services\TextNormalizer;
 use App\Services\Tts\Drivers\AishaTtsDriver;
@@ -23,14 +24,15 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
     public int $tries = 4; // Allow retries to survive multiple horizon restarts during deploys
 
     public function __construct(
-        public string $sessionId,
-        public int    $index,
-        public string $text,
-        public float  $startTime,
-        public float  $endTime,
-        public string $language,
-        public string $speaker = 'M1',
-        public ?float $slotEnd = null,
+        public string  $sessionId,
+        public int     $index,
+        public string  $text,
+        public float   $startTime,
+        public float   $endTime,
+        public string  $language,
+        public string  $speaker = 'M1',
+        public ?float  $slotEnd = null,
+        public ?string $sourceText = null,
     ) {}
 
     public function handle(): void
@@ -162,14 +164,16 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                 'end_time' => $this->endTime,
                 'slot_end' => $this->slotEnd,
                 'text' => $this->text,
+                'source_text' => $this->sourceText,
                 'speaker' => $this->speaker,
                 'audio_base64' => $audioBase64,
                 'audio_duration' => $ttsDuration,
                 'aac_duration' => $aacDur > 0 ? $aacDur : null,
             ]));
 
-            // 5. Increment ready counter
+            // 5. Increment ready counter and dispatch cache persist on completion
             $this->incrementReady();
+            $this->dispatchPersistIfComplete($sessionKey);
 
             Log::info("[DUB] [{$title}] Segment #{$this->index} ready ({$this->speaker}, " . round($ttsDuration, 2) . "s): " . Str::limit($this->text, 60), [
                 'session' => $this->sessionId,
@@ -703,6 +707,16 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             Log::warning("[DUB] Lead-in AAC generation failed: " . $e->getMessage(), [
                 'session' => $this->sessionId,
             ]);
+        }
+    }
+
+    private function dispatchPersistIfComplete(string $sessionKey): void
+    {
+        $sessionJson = Redis::get($sessionKey);
+        if (!$sessionJson) return;
+        $s = json_decode($sessionJson, true);
+        if (($s['status'] ?? '') === 'complete' && empty($s['cached_dub_id'])) {
+            PersistDubCacheJob::dispatch($this->sessionId)->onQueue('default');
         }
     }
 

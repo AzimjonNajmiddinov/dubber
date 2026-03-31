@@ -1,5 +1,7 @@
 <?php
 
+use App\Http\Controllers\AdminController;
+use App\Http\Controllers\AdminDubController;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\VideoController;
 use App\Http\Controllers\StreamDubController;
@@ -44,4 +46,16 @@ Route::get('/dub/{video}', [OnlineDubController::class, 'progress'])->name('dub.
 
 // Instant dub (SRT → TTS over video)
 Route::get('/instant-dub', fn() => view('instant-dub'))->name('instant-dub');
+
+// Admin panel
+Route::get('/admin/login', [AdminController::class, 'loginForm'])->name('admin.login');
+Route::post('/admin/login', [AdminController::class, 'login'])->name('admin.login.post');
+Route::post('/admin/logout', [AdminController::class, 'logout'])->name('admin.logout');
+
+Route::middleware('admin.auth')->prefix('admin')->name('admin.')->group(function () {
+    Route::get('/dubs', [AdminDubController::class, 'index'])->name('dubs.index');
+    Route::get('/dubs/{dub}', [AdminDubController::class, 'show'])->name('dubs.show');
+    Route::patch('/dubs/{dub}/segments/{segment}', [AdminDubController::class, 'updateSegment'])->name('dubs.segment.update');
+    Route::delete('/dubs/{dub}', [AdminDubController::class, 'destroy'])->name('dubs.destroy');
+});
 

@@ -45,14 +45,29 @@ Content-Type: application/json
 {
   "video_url": "https://cdn.example.com/path/to/master.m3u8?token=...",
   "language": "uz",
-  "translate_from": "auto"
+  "translate_from": "auto",
+  "title": "Breaking Bad S01E01"
 }
 ```
+
+**Fields:**
+
+| Field            | Required | Description                                                         |
+|------------------|----------|---------------------------------------------------------------------|
+| `video_url`      | yes      | Full HLS master playlist URL (with token if any)                   |
+| `language`       | yes      | Target dub language (`uz`, `ru`, `en`, etc.)                       |
+| `translate_from` | no       | Source language for translation (`auto` = detect). Omit if same as target. |
+| `title`          | **yes**  | Human-readable title of the content (show + episode name). Used for the admin panel dub list and cache lookup. Example: `"Breaking Bad S01E01"` |
+| `quality`        | no       | `standard` (Edge TTS, default) or `premium` (ElevenLabs)           |
+
+> **`title` is required.** Without it, dubbed content will show as "Untitled" in the admin panel and cannot be easily identified or re-used. Send the show name and episode in a searchable format, e.g. `"Squid Game S02E03"`.
 
 **Response:**
 ```json
 { "session_id": "550e8400-e29b-41d4-a716-446655440000" }
 ```
+
+If the video was previously dubbed and cached, the server returns immediately with the cached result — no re-processing occurs. If an admin edited the translation, only TTS is re-run (no re-translation).
 
 The server begins:
 1. Fetching subtitles from the HLS stream
@@ -238,6 +253,7 @@ enum DubAPI {
 
     static func startSession(
         videoURL: URL,
+        title: String,
         language: String = "uz",
         translateFrom: String = "auto"
     ) async throws -> String {
@@ -247,8 +263,9 @@ enum DubAPI {
 
         let body: [String: String] = [
             "video_url": videoURL.absoluteString,
+            "title": title,
             "language": language,
-            "translate_from": translateFrom
+            "translate_from": translateFrom,
         ]
         request.httpBody = try JSONEncoder().encode(body)
 
@@ -397,7 +414,7 @@ class DubPlayerViewModel: ObservableObject {
         Task {
             do {
                 // 1. Create session
-                let sid = try await DubAPI.startSession(videoURL: videoURL)
+                let sid = try await DubAPI.startSession(videoURL: videoURL, title: "Show Name S01E01")
                 self.sessionId = sid
 
                 // 2. Connect SSE for real-time updates

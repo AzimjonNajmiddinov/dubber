@@ -72,6 +72,9 @@ return [
         'unknown' => ['rate' => '+0%', 'pitch' => '+0Hz', 'gain_db' => 0.0],
     ],
 
+    // Admin panel password (set ADMIN_PASSWORD in .env)
+    'admin_password' => env('ADMIN_PASSWORD', ''),
+
     // Cleanup settings - delete original files after dubbing to save storage
     'cleanup' => [
         // Delete original video and intermediate files after dubbing completes
