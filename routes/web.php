@@ -57,6 +57,10 @@ Route::middleware('admin.auth')->prefix('admin')->name('admin.')->group(function
     Route::get('/dubs', [AdminDubController::class, 'index'])->name('dubs.index');
     Route::get('/dubs/{dub}', [AdminDubController::class, 'show'])->name('dubs.show');
     Route::patch('/dubs/{dub}/segments/{segment}', [AdminDubController::class, 'updateSegment'])->name('dubs.segment.update');
+    Route::get('/dubs/{dub}/segments/{segment}/audio', [AdminDubController::class, 'audioSegment'])->name('dubs.segment.audio');
+    Route::post('/dubs/{dub}/retts', [AdminDubController::class, 'rettsDub'])->name('dubs.retts');
+    Route::get('/dubs/{dub}/retts-status', [AdminDubController::class, 'rettsStatus'])->name('dubs.retts.status');
+    Route::patch('/dubs/{dub}/voice-map', [AdminDubController::class, 'updateVoiceMap'])->name('dubs.voice-map');
     Route::delete('/dubs/{dub}', [AdminDubController::class, 'destroy'])->name('dubs.destroy');
 
     Route::get('/users', [AdminUserController::class, 'index'])->name('users.index');

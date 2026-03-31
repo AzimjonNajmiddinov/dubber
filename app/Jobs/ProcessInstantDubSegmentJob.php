@@ -715,7 +715,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         $sessionJson = Redis::get($sessionKey);
         if (!$sessionJson) return;
         $s = json_decode($sessionJson, true);
-        if (($s['status'] ?? '') === 'complete' && empty($s['cached_dub_id'])) {
+        if (($s['status'] ?? '') === 'complete') {
             PersistDubCacheJob::dispatch($this->sessionId)->onQueue('default');
         }
     }

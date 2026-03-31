@@ -35,7 +35,6 @@ class PersistDubCacheJob implements ShouldQueue
 
         $session = json_decode($sessionJson, true);
         if (($session['status'] ?? '') !== 'complete') return;
-        if (!empty($session['cached_dub_id'])) return; // already persisted
 
         $videoUrl = strtok($session['video_url'] ?? '', '?');
         $language  = $session['language'] ?? 'uz';
