@@ -56,20 +56,10 @@ class PersistDubCacheJob implements ShouldQueue
                 ]
             );
 
-            // Permanent AAC directory
+            // Permanent TTS directory (stores raw TTS mp3 per segment — no mixed AAC)
             $aacDir = storage_path("app/instant-dub-cache/{$dub->id}/aac");
             @mkdir($aacDir, 0755, true);
             $dub->update(['aac_dir' => $aacDir]);
-
-            $sessionAacDir = storage_path("app/instant-dub/{$this->sessionId}/aac");
-
-            // Copy lead + tail
-            foreach (['lead.aac', 'tail.aac'] as $file) {
-                $src = "{$sessionAacDir}/{$file}";
-                if (file_exists($src)) {
-                    copy($src, "{$aacDir}/{$file}");
-                }
-            }
 
             // Save voice map
             $voiceMap = json_decode(Redis::get("instant-dub:{$this->sessionId}:voices") ?? '{}', true);
@@ -95,10 +85,17 @@ class PersistDubCacheJob implements ShouldQueue
                 if (!$chunkJson) continue;
                 $chunk = json_decode($chunkJson, true);
 
-                $src     = "{$sessionAacDir}/{$i}.aac";
-                $dstPath = "{$aacDir}/{$i}.aac";
-                if (file_exists($src)) {
-                    copy($src, $dstPath);
+                // Save raw TTS mp3 (from audio_base64) — much smaller than mixed AAC
+                $ttsPath = null;
+                $ttsDuration = $chunk['audio_duration'] ?? null;
+                $audioBase64 = $chunk['audio_base64'] ?? null;
+                if ($audioBase64) {
+                    $ttsPath = "{$aacDir}/{$i}.mp3";
+                    file_put_contents($ttsPath, base64_decode($audioBase64));
+                    if (!file_exists($ttsPath) || filesize($ttsPath) < 100) {
+                        @unlink($ttsPath);
+                        $ttsPath = null;
+                    }
                 }
 
                 InstantDubSegment::create([
@@ -110,8 +107,10 @@ class PersistDubCacheJob implements ShouldQueue
                     'slot_end'       => $chunk['slot_end'] ?? null,
                     'source_text'    => $chunk['source_text'] ?? null,
                     'translated_text'=> $chunk['text'] ?? '',
-                    'aac_path'       => file_exists($dstPath) ? $dstPath : null,
-                    'aac_duration'   => $chunk['aac_duration'] ?? null,
+                    'aac_path'       => null,
+                    'aac_duration'   => null,
+                    'tts_path'       => $ttsPath,
+                    'tts_duration'   => $ttsDuration,
                     'needs_retts'    => false,
                 ]);
             }

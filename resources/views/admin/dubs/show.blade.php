@@ -52,9 +52,10 @@
     </div>
     @php
         $overflowCount = $dub->segments->filter(function($s) {
-            if (!$s->aac_duration) return false;
+            $dur = $s->tts_duration ?? $s->aac_duration;
+            if (!$dur) return false;
             $slot = $s->slot_end ? ($s->slot_end - $s->start_time) : ($s->end_time - $s->start_time);
-            return $s->aac_duration > $slot + 0.15;
+            return $dur > $slot + 0.15;
         })->count();
     @endphp
     @if($overflowCount > 0)
@@ -131,8 +132,10 @@
             @foreach($dub->segments as $seg)
             @php
                 $slotDur = $seg->slot_end ? ($seg->slot_end - $seg->start_time) : ($seg->end_time - $seg->start_time);
-                $overflow = $seg->aac_duration && $seg->aac_duration > $slotDur + 0.15;
-                $hasAudio = $seg->aac_path && file_exists($seg->aac_path)
+                $ttsDur = $seg->tts_duration ?? $seg->aac_duration;
+                $overflow = $ttsDur && $ttsDur > $slotDur + 0.15;
+                $hasAudio = ($seg->tts_path && file_exists($seg->tts_path))
+                    || ($seg->aac_path && file_exists($seg->aac_path))
                     || ($dub->aac_dir && file_exists($dub->aac_dir.'/'.$seg->segment_index.'.aac'));
             @endphp
             <tr data-seg="{{ $seg->id }}" data-dub="{{ $dub->id }}"
@@ -152,11 +155,11 @@
                         style="font-size:0.85rem;min-width:180px;line-height:1.5">{{ $seg->translated_text }}</textarea>
                 </td>
                 <td style="text-align:center;white-space:nowrap">
-                    @if($seg->aac_duration)
+                    @if($ttsDur)
                         <span style="font-size:0.78rem;color:{{ $overflow ? '#fca5a5' : '#64748b' }}">
-                            {{ number_format($seg->aac_duration, 1) }}s
+                            {{ number_format($ttsDur, 1) }}s
                             @if($overflow)
-                                <br><span style="font-size:0.7rem;color:#ef4444">⚠ +{{ number_format($seg->aac_duration - $slotDur, 1) }}s</span>
+                                <br><span style="font-size:0.7rem;color:#ef4444">⚠ +{{ number_format($ttsDur - $slotDur, 1) }}s</span>
                             @endif
                         </span>
                     @else

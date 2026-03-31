@@ -96,13 +96,14 @@ class AdminDubController extends Controller
     {
         abort_if($segment->instant_dub_id !== $dub->id, 404);
 
-        $path = $segment->aac_path;
+        // Try TTS mp3 first (new format)
+        $path = $segment->tts_path;
+        $mime = 'audio/mpeg';
 
         if (!$path || !file_exists($path)) {
-            // Try deriving path from aac_dir
-            if ($dub->aac_dir) {
-                $path = $dub->aac_dir . '/' . $segment->segment_index . '.aac';
-            }
+            // Fall back to legacy mixed AAC
+            $path = $segment->aac_path;
+            $mime = 'audio/aac';
         }
 
         if (!$path || !file_exists($path) || filesize($path) < 10) {
@@ -110,7 +111,7 @@ class AdminDubController extends Controller
         }
 
         return response()->file($path, [
-            'Content-Type'  => 'audio/aac',
+            'Content-Type'  => $mime,
             'Cache-Control' => 'no-store',
         ]);
     }
@@ -131,7 +132,6 @@ class AdminDubController extends Controller
             'tts_driver'     => $dub->tts_driver,
             'total_segments' => 0,
             'segments_ready' => 0,
-            'aac_base_dir'   => $dub->aac_dir,
             'cached_dub_id'  => $dub->id,
             'created_at'     => now()->toIso8601String(),
         ];
@@ -192,7 +192,7 @@ class AdminDubController extends Controller
         $dub->segments()->update(['needs_retts' => true, 'approved' => false]);
 
         if ($dub->aac_dir && is_dir($dub->aac_dir)) {
-            foreach (glob($dub->aac_dir . '/*.aac') as $f) {
+            foreach (glob($dub->aac_dir . '/*.{aac,mp3}', GLOB_BRACE) as $f) {
                 if (!in_array(basename($f), ['lead.aac', 'tail.aac'])) {
                     @unlink($f);
                 }

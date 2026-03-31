@@ -11,7 +11,7 @@ class InstantDubSegment extends Model
         'instant_dub_id', 'segment_index', 'speaker',
         'start_time', 'end_time', 'slot_end',
         'source_text', 'translated_text',
-        'aac_path', 'aac_duration', 'needs_retts', 'approved',
+        'aac_path', 'aac_duration', 'tts_path', 'tts_duration', 'needs_retts', 'approved',
     ];
 
     protected $casts = [

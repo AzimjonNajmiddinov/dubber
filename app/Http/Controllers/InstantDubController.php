@@ -52,8 +52,12 @@ class InstantDubController extends Controller
                 Redis::setex("instant-dub:{$sessionId}", 50400, json_encode($session));
 
                 if ($cached->status === 'complete') {
-                    // Populate chunk keys from DB — no processing needed
+                    // Populate chunk keys from DB — load saved TTS mp3 as base64 for on-demand mixing
                     foreach ($cached->segments as $seg) {
+                        $audioBase64 = null;
+                        if ($seg->tts_path && file_exists($seg->tts_path)) {
+                            $audioBase64 = base64_encode(file_get_contents($seg->tts_path));
+                        }
                         Redis::setex("instant-dub:{$sessionId}:chunk:{$seg->segment_index}", 50400, json_encode([
                             'index'          => $seg->segment_index,
                             'start_time'     => $seg->start_time,
@@ -62,9 +66,9 @@ class InstantDubController extends Controller
                             'text'           => $seg->translated_text,
                             'source_text'    => $seg->source_text,
                             'speaker'        => $seg->speaker,
-                            'audio_base64'   => null,
-                            'audio_duration' => $seg->aac_duration,
-                            'aac_duration'   => $seg->aac_duration,
+                            'audio_base64'   => $audioBase64,
+                            'audio_duration' => $seg->tts_duration,
+                            'aac_duration'   => $seg->tts_duration,
                         ]));
                     }
                     Log::info("[DUB] Cache hit (complete) for: {$urlWithoutQuery} [{$language}]", ['session' => $sessionId]);
@@ -941,7 +945,6 @@ class InstantDubController extends Controller
             'total_segments' => $dub->total_segments,
             'segments_ready' => $dub->status === 'complete' ? $dub->total_segments : 0,
             'cached_dub_id'  => $dub->id,
-            'aac_base_dir'   => $dub->aac_dir,
             'created_at'     => now()->toIso8601String(),
         ];
     }
