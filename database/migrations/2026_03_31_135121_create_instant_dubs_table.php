@@ -2,6 +2,7 @@
 
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
 return new class extends Migration
@@ -21,9 +22,10 @@ return new class extends Migration
             $table->string('session_id', 64)->nullable();
             $table->timestamps();
 
-            $table->index(['video_url', 'language']);
+            // Use prefix lengths to stay within MySQL 3072-byte index limit
+            $table->index([DB::raw('video_url(191)'), 'language']);
             $table->index('status');
-            $table->index('title');
+            $table->index(DB::raw('title(191)'));
         });
     }
 
