@@ -52,6 +52,7 @@
         <span class="brand">Dubber Admin</span>
         <a href="{{ route('admin.dubs.index') }}">Dubs</a>
         <a href="{{ route('admin.users.index') }}">Users</a>
+        <span style="color:#718096;font-size:0.85rem">{{ auth()->user()->name }}</span>
         <form method="POST" action="{{ route('admin.logout') }}">
             @csrf
             <button type="submit">Logout</button>

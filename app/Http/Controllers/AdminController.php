@@ -3,12 +3,13 @@
 namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
 
 class AdminController extends Controller
 {
     public function loginForm()
     {
-        if (session('admin_logged_in')) {
+        if (Auth::check()) {
             return redirect()->route('admin.dubs.index');
         }
 
@@ -17,22 +18,25 @@ class AdminController extends Controller
 
     public function login(Request $request)
     {
-        $request->validate(['password' => 'required|string']);
+        $request->validate([
+            'phone'    => 'required|string',
+            'password' => 'required|string',
+        ]);
 
-        $correct = config('dubber.admin_password');
-
-        if (!$correct || $request->input('password') !== $correct) {
-            return back()->withErrors(['password' => 'Incorrect password']);
+        if (!Auth::attempt(['email' => $request->input('phone'), 'password' => $request->input('password')])) {
+            return back()->withErrors(['phone' => 'Incorrect phone or password'])->withInput(['phone' => $request->input('phone')]);
         }
 
-        $request->session()->put('admin_logged_in', true);
+        $request->session()->regenerate();
 
         return redirect()->route('admin.dubs.index');
     }
 
     public function logout(Request $request)
     {
-        $request->session()->forget('admin_logged_in');
+        Auth::logout();
+        $request->session()->invalidate();
+        $request->session()->regenerateToken();
 
         return redirect()->route('admin.login');
     }
