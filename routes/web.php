@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\AdminController;
 use App\Http\Controllers\AdminDubController;
+use App\Http\Controllers\AdminUserController;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\VideoController;
 use App\Http\Controllers\StreamDubController;
@@ -57,5 +58,9 @@ Route::middleware('admin.auth')->prefix('admin')->name('admin.')->group(function
     Route::get('/dubs/{dub}', [AdminDubController::class, 'show'])->name('dubs.show');
     Route::patch('/dubs/{dub}/segments/{segment}', [AdminDubController::class, 'updateSegment'])->name('dubs.segment.update');
     Route::delete('/dubs/{dub}', [AdminDubController::class, 'destroy'])->name('dubs.destroy');
+
+    Route::get('/users', [AdminUserController::class, 'index'])->name('users.index');
+    Route::post('/users', [AdminUserController::class, 'store'])->name('users.store');
+    Route::delete('/users/{user}', [AdminUserController::class, 'destroy'])->name('users.destroy');
 });
 
