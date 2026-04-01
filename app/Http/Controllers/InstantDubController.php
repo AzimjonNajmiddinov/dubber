@@ -691,6 +691,21 @@ class InstantDubController extends Controller
             ]);
         }
 
+        // File missing (e.g. cache hit with TTS-only storage) — generate silent lead of exact duration
+        $session = $this->getSession($sessionId);
+        $total = (int) ($session['total_segments'] ?? 0);
+        if ($total > 0) {
+            $firstChunkJson = Redis::get("instant-dub:{$sessionId}:chunk:0");
+            if ($firstChunkJson) {
+                $firstChunk = json_decode($firstChunkJson, true);
+                $firstStart = (float) ($firstChunk['start_time'] ?? 0);
+                if ($firstStart > 1.0) {
+                    $duration = round($this->frameAlignedDuration(0, $firstStart), 6);
+                    return $this->silentAacOfDuration($duration);
+                }
+            }
+        }
+
         return $this->silentAacResponse();
     }
 
@@ -928,6 +943,36 @@ class InstantDubController extends Controller
             'Content-Type' => 'audio/aac',
             'Access-Control-Allow-Origin' => '*',
         ]);
+    }
+
+    /**
+     * Generate a silent AAC ADTS segment of the given duration (for lead/tail gaps).
+     * Result is NOT cached to disk — generated fresh per request (durations vary).
+     */
+    private function silentAacOfDuration(float $duration): \Illuminate\Http\Response
+    {
+        $duration = max(0.1, round($duration, 3));
+        $tmpFile = sys_get_temp_dir() . '/silent-' . (int)($duration * 1000) . 'ms.aac';
+
+        if (!file_exists($tmpFile) || filesize($tmpFile) < 10) {
+            Process::timeout(15)->run([
+                'ffmpeg', '-y', '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=mono',
+                '-t', (string) $duration,
+                '-c:a', 'aac', '-b:a', '32k', '-f', 'adts', $tmpFile,
+            ]);
+        }
+
+        if (file_exists($tmpFile) && filesize($tmpFile) > 10) {
+            $data = file_get_contents($tmpFile);
+            return response($data, 200, [
+                'Content-Type'  => 'audio/aac',
+                'Content-Length' => strlen($data),
+                'Access-Control-Allow-Origin' => '*',
+                'Cache-Control' => 'max-age=3600',
+            ]);
+        }
+
+        return $this->silentAacResponse();
     }
 
     private function buildSessionFromCache(InstantDub $dub, string $sessionId, string $videoUrl, string $videoBaseUrl, string $videoQuery, string $title): array
