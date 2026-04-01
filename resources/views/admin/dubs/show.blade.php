@@ -121,8 +121,8 @@
                 <th style="width:40px">#</th>
                 <th style="width:90px">Time</th>
                 <th style="width:70px">Speaker</th>
-                <th>Source</th>
-                <th>Translation</th>
+                <th>Original</th>
+                <th>Translation (editable)</th>
                 <th style="width:70px;text-align:center">Dur / Slot</th>
                 <th style="width:50px;text-align:center">✓</th>
                 <th style="width:44px;text-align:center">▶</th>
@@ -149,7 +149,11 @@
                     <input type="text" class="speaker-input" value="{{ $seg->speaker }}"
                         style="width:58px;font-size:0.82rem;padding:4px 7px;text-align:center;font-weight:600">
                 </td>
-                <td style="font-size:0.8rem;color:#475569;max-width:200px;line-height:1.5">{{ $seg->source_text }}</td>
+                <td>
+                    <textarea readonly rows="2"
+                        style="font-size:0.8rem;min-width:180px;line-height:1.5;color:#94a3b8;background:#0a0a0f;border:1px solid #1e1e2e;resize:vertical;cursor:default"
+                        title="Original text">{{ $seg->source_text }}</textarea>
+                </td>
                 <td>
                     <textarea class="translation-input" rows="2"
                         style="font-size:0.85rem;min-width:180px;line-height:1.5">{{ $seg->translated_text }}</textarea>
