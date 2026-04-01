@@ -691,7 +691,7 @@ class InstantDubController extends Controller
             ]);
         }
 
-        // File missing (e.g. cache hit with TTS-only storage) — generate silent lead of exact duration
+        // File missing (cache hit with TTS-only storage) — pull background from HLS
         $session = $this->getSession($sessionId);
         $total = (int) ($session['total_segments'] ?? 0);
         if ($total > 0) {
@@ -701,6 +701,13 @@ class InstantDubController extends Controller
                 $firstStart = (float) ($firstChunk['start_time'] ?? 0);
                 if ($firstStart > 1.0) {
                     $duration = round($this->frameAlignedDuration(0, $firstStart), 6);
+                    if ($this->generateLeadFromHls($sessionId, $duration)) {
+                        return response()->file($aacFile, [
+                            'Content-Type'  => 'audio/aac',
+                            'Access-Control-Allow-Origin' => '*',
+                            'Cache-Control' => 'max-age=86400',
+                        ]);
+                    }
                     return $this->silentAacOfDuration($duration);
                 }
             }
@@ -943,6 +950,79 @@ class InstantDubController extends Controller
             'Content-Type' => 'audio/aac',
             'Access-Control-Allow-Origin' => '*',
         ]);
+    }
+
+    /**
+     * Download the first $duration seconds of the HLS audio track and save as lead.aac.
+     * Uses a file lock to prevent parallel downloads for the same session.
+     */
+    private function generateLeadFromHls(string $sessionId, float $duration): bool
+    {
+        $session = $this->getSession($sessionId);
+        $videoUrl = $session['video_url'] ?? '';
+        if (!$videoUrl || !str_contains($videoUrl, '.m3u8')) return false;
+
+        $aacDir = storage_path("app/instant-dub/{$sessionId}/aac");
+        @mkdir($aacDir, 0755, true);
+        $leadFile = "{$aacDir}/lead.aac";
+
+        // File lock — only one request generates; others fall through to silence
+        $lockFile = "{$aacDir}/lead.lock";
+        $lock = @fopen($lockFile, 'c');
+        if (!$lock || !flock($lock, LOCK_EX | LOCK_NB)) {
+            if ($lock) fclose($lock);
+            return false;
+        }
+
+        try {
+            // Re-check after acquiring lock — may have been generated while waiting
+            if (file_exists($leadFile) && filesize($leadFile) > 100) {
+                return true;
+            }
+
+            $audioPlaylistUrl = $this->findHlsAudioPlaylist($videoUrl);
+            if (!$audioPlaylistUrl) return false;
+
+            $result = Process::timeout(60)->run([
+                'ffmpeg', '-y',
+                '-protocol_whitelist', 'file,http,https,tcp,tls,crypto',
+                '-i', $audioPlaylistUrl,
+                '-t', (string) round($duration, 3),
+                '-af', 'volume=0.2',
+                '-ac', '1', '-ar', '44100',
+                '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $leadFile,
+            ]);
+
+            return file_exists($leadFile) && filesize($leadFile) > 100;
+        } finally {
+            flock($lock, LOCK_UN);
+            fclose($lock);
+            @unlink($lockFile);
+        }
+    }
+
+    /**
+     * Parse HLS master playlist and return the URL of the first audio rendition playlist.
+     */
+    private function findHlsAudioPlaylist(string $masterUrl): ?string
+    {
+        try {
+            $urlWithoutQuery = strtok($masterUrl, '?');
+            $baseUrl = preg_replace('#/[^/]+$#', '/', $urlWithoutQuery);
+            $query = parse_url($masterUrl, PHP_URL_QUERY) ?? '';
+
+            $master = Http::timeout(10)->get($masterUrl)->body();
+
+            preg_match_all('/^#EXT-X-MEDIA:.*TYPE=AUDIO.*$/m', $master, $audioLines);
+            foreach ($audioLines[0] ?? [] as $line) {
+                if (preg_match('/URI="([^"]+)"/', $line, $m)) {
+                    $url = str_starts_with($m[1], 'http') ? $m[1] : $baseUrl . $m[1];
+                    if ($query) $url .= (str_contains($url, '?') ? '&' : '?') . $query;
+                    return $url;
+                }
+            }
+        } catch (\Throwable) {}
+        return null;
     }
 
     /**
