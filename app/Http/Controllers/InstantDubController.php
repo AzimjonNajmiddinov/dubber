@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Jobs\DownloadOriginalAudioJob;
 use App\Jobs\PrepareInstantDubJob;
 use App\Models\InstantDub;
 use App\Services\ElevenLabs\ElevenLabsClient;
@@ -52,7 +53,7 @@ class InstantDubController extends Controller
                 Redis::setex("instant-dub:{$sessionId}", 50400, json_encode($session));
 
                 if ($cached->status === 'complete') {
-                    // Populate chunk keys from DB — load saved TTS mp3 as base64 for on-demand mixing
+                    // Populate chunk keys with saved TTS audio — background will be downloaded separately
                     foreach ($cached->segments as $seg) {
                         $audioBase64 = null;
                         if ($seg->tts_path && file_exists($seg->tts_path)) {
@@ -71,7 +72,12 @@ class InstantDubController extends Controller
                             'aac_duration'   => $seg->tts_duration,
                         ]));
                     }
-                    Log::info("[DUB] Cache hit (complete) for: {$urlWithoutQuery} [{$language}]", ['session' => $sessionId]);
+
+                    // Download background audio — DownloadAudioChunkJob will remix all
+                    // segments and set playable=true once done (same flow as live dub)
+                    DownloadOriginalAudioJob::dispatch($sessionId, $videoUrl)->onQueue('default');
+
+                    Log::info("[DUB] Cache hit (complete) for: {$urlWithoutQuery} [{$language}] — background downloading", ['session' => $sessionId]);
                     return response()->json(['session_id' => $sessionId, 'cached' => true]);
                 }
 
@@ -1057,6 +1063,8 @@ class InstantDubController extends Controller
 
     private function buildSessionFromCache(InstantDub $dub, string $sessionId, string $videoUrl, string $videoBaseUrl, string $videoQuery, string $title): array
     {
+        $isComplete = $dub->status === 'complete';
+
         return [
             'id'             => $sessionId,
             'title'          => $dub->title ?: $title,
@@ -1064,11 +1072,13 @@ class InstantDubController extends Controller
             'video_url'      => $videoUrl,
             'video_base_url' => $videoBaseUrl,
             'video_query'    => $videoQuery,
-            'status'         => $dub->status === 'complete' ? 'complete' : 'preparing',
-            'playable'       => $dub->status === 'complete',
+            // TTS is done but background not yet downloaded — same as live dub:
+            // playable is set by DownloadAudioChunkJob once background is mixed in
+            'status'         => 'processing',
+            'playable'       => false,
             'tts_driver'     => $dub->tts_driver,
             'total_segments' => $dub->total_segments,
-            'segments_ready' => $dub->status === 'complete' ? $dub->total_segments : 0,
+            'segments_ready' => $isComplete ? $dub->total_segments : 0,
             'cached_dub_id'  => $dub->id,
             'created_at'     => now()->toIso8601String(),
         ];
