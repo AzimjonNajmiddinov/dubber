@@ -5,7 +5,7 @@ echo "=== XTTS Uzbek Fine-tuning Setup ==="
 echo
 
 pip install -q --upgrade pip
-pip install -q TTS==0.22.0 trainer torchaudio datasets huggingface_hub
+pip install -q --ignore-installed TTS==0.22.0 trainer torchaudio datasets huggingface_hub soundfile
 
 echo
 echo "=== Versions ==="
