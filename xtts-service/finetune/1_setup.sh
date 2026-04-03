@@ -15,8 +15,8 @@ pip install -q \
     torchaudio==2.2.0+cu121 \
     --index-url https://download.pytorch.org/whl/cu121
 
-pip install -q "transformers>=4.33.0,<4.46.0"
-pip install -q TTS==0.22.0 trainer "datasets==2.20.0" huggingface_hub soundfile
+pip install -q --ignore-installed "transformers>=4.33.0,<4.46.0"
+pip install -q --ignore-installed TTS==0.22.0 trainer "datasets==2.20.0" huggingface_hub soundfile
 
 echo
 echo "=== Versions ==="
