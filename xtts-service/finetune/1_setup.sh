@@ -6,13 +6,16 @@ echo
 
 pip install -q --upgrade pip
 
+# Eski torch ni o'chirish
+pip uninstall -y torch torchaudio torchvision 2>/dev/null || true
+
 # CUDA 12.8 driver bilan mos torch (cu121 = forward compatible)
-pip install -q --ignore-installed \
+pip install -q \
     torch==2.2.0+cu121 \
     torchaudio==2.2.0+cu121 \
     --index-url https://download.pytorch.org/whl/cu121
 
-pip install -q --ignore-installed TTS==0.22.0 trainer datasets huggingface_hub soundfile
+pip install -q TTS==0.22.0 trainer datasets huggingface_hub soundfile
 
 echo
 echo "=== Versions ==="
