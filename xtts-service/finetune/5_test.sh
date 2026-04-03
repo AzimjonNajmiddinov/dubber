@@ -55,7 +55,7 @@ config = XttsConfig()
 config.load_json(str(ckpt_dir / "config.json"))
 
 model = Xtts.init_from_config(config)
-model.load_checkpoint(config, checkpoint_path=str(ckpt), eval=True, strict=False)
+model.load_checkpoint(config, checkpoint_path=str(ckpt), checkpoint_dir=str(ckpt_dir), eval=True, strict=False)
 model = model.to(device).eval()
 print(f"Model loaded on {device}")
 
