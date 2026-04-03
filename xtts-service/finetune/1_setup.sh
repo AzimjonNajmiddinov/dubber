@@ -8,6 +8,7 @@ pip install -q --upgrade pip
 
 # Eski torch ni o'chirish
 pip uninstall -y torch torchaudio torchvision 2>/dev/null || true
+rm -rf /usr/local/lib/python3.10/dist-packages/torchaudio* 2>/dev/null || true
 
 # CUDA 12.8 driver bilan mos torch (cu121 = forward compatible)
 pip install -q \
@@ -15,7 +16,7 @@ pip install -q \
     torchaudio==2.2.0+cu121 \
     --index-url https://download.pytorch.org/whl/cu121
 
-pip install -q --ignore-installed "transformers>=4.33.0,<4.46.0"
+pip install -q --ignore-installed "transformers>=4.33.0,<4.46.0" "tokenizers>=0.13.0,<0.16.0"
 pip install -q --ignore-installed TTS==0.22.0 trainer "datasets==2.20.0" huggingface_hub soundfile
 
 echo
