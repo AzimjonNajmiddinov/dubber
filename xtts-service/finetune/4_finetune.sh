@@ -1,11 +1,6 @@
 #!/bin/bash
 set -e
 
-VENV="/workspace/venv"
-if [ -f "$VENV/bin/activate" ]; then
-    source "$VENV/bin/activate"
-fi
-
 DATASET_DIR="/workspace/uz_tts"
 OUTPUT_DIR="/workspace/xtts-uz-finetuned"
 EPOCHS=10
