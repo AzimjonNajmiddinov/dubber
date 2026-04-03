@@ -17,7 +17,7 @@ mkdir -p "$OUTPUT_DIR"
 export COQUI_TOS_AGREED=1
 
 python3 - <<EOF
-import os, torch
+import os, json, torch
 from pathlib import Path
 
 os.environ["COQUI_TOS_AGREED"] = "1"
@@ -31,8 +31,27 @@ output_dir  = Path("$OUTPUT_DIR")
 epochs      = int("$EPOCHS")
 batch_size  = int("$BATCH_SIZE")
 
-# metadata.csv: stem|text|text  →  train_gpt CSV: full_path|text|speaker
-print("CSV tayyorlanmoqda...")
+# 1. Base model config ga "uz" qo'shish
+model_dir = Path.home() / ".local/share/tts/tts_models--multilingual--multi-dataset--xtts_v2"
+if not model_dir.exists():
+    model_dir = Path("/root/.local/share/tts/tts_models--multilingual--multi-dataset--xtts_v2")
+
+config_path = model_dir / "config.json"
+with open(config_path, encoding="utf-8") as f:
+    cfg = json.load(f)
+
+if "uz" not in cfg.get("languages", []):
+    cfg["languages"].append("uz")
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2, ensure_ascii=False)
+    print("'uz' tili base model config ga qo'shildi")
+else:
+    print("'uz' allaqachon config da bor")
+
+print(f"Supported languages: {cfg['languages']}")
+
+# 2. CSV tayyorlash — language="uz"
+print("\nCSV tayyorlanmoqda...")
 all_lines = []
 with open(dataset_dir / "metadata.csv", encoding="utf-8") as f:
     for line in f:
@@ -44,7 +63,6 @@ with open(dataset_dir / "metadata.csv", encoding="utf-8") as f:
         if wav.exists():
             all_lines.append(f"{wav}|{text}|speaker")
 
-# 85% train, 15% eval
 split = int(len(all_lines) * 0.85)
 train_lines = all_lines[:split]
 eval_lines  = all_lines[split:]
@@ -53,13 +71,12 @@ train_csv = output_dir / "train.csv"
 eval_csv  = output_dir / "eval.csv"
 
 header = "audio_file|text|speaker_name|language"
-train_lines_lang = [f"{l}|tr" for l in train_lines]
-eval_lines_lang  = [f"{l}|tr" for l in eval_lines]
-
 with open(train_csv, "w", encoding="utf-8") as f:
-    f.write(header + "\n" + "\n".join(train_lines_lang))
+    f.write(header + "\n")
+    f.write("\n".join(f"{l}|uz" for l in train_lines))
 with open(eval_csv, "w", encoding="utf-8") as f:
-    f.write(header + "\n" + "\n".join(eval_lines_lang))
+    f.write(header + "\n")
+    f.write("\n".join(f"{l}|uz" for l in eval_lines))
 
 print(f"Train: {len(train_lines)}, Eval: {len(eval_lines)}")
 
@@ -69,12 +86,12 @@ if device == "cuda":
     print(f"GPU   : {torch.cuda.get_device_name(0)}")
     print(f"VRAM  : {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
 
-# Coqui XTTS fine-tuning utility
+# 3. Fine-tune
 from TTS.demos.xtts_ft_demo.utils.gpt_train import train_gpt
 
-print("\nFine-tuning boshlandi...")
+print("\nFine-tuning boshlandi (language=uz)...")
 train_gpt(
-    language="tr",  # "uz" base modelda yo'q; "tr" bilan Uzbek audio o'rganadi
+    language="uz",
     num_epochs=epochs,
     batch_size=batch_size,
     grad_acumm=1,
