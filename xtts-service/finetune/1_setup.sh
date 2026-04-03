@@ -13,9 +13,9 @@ pip install \
     torchaudio==2.2.0+cu121 \
     --index-url https://download.pytorch.org/whl/cu121
 
-pip install -q --force-reinstall "tokenizers>=0.13.0,<0.16.0" "huggingface_hub>=0.16.4,<0.22.0"
-pip install -q "transformers>=4.33.0,<4.46.0"
 pip install -q TTS==0.22.0 trainer "datasets==2.20.0" soundfile
+# Pin after TTS (TTS pulls newer versions, we downgrade)
+pip install -q --force-reinstall "huggingface_hub>=0.16.4,<0.22.0" "tokenizers>=0.13.0,<0.16.0" "transformers>=4.33.0,<4.46.0"
 
 echo
 echo "=== Versions ==="
