@@ -52,10 +52,11 @@ eval_lines  = all_lines[split:]
 train_csv = output_dir / "train.csv"
 eval_csv  = output_dir / "eval.csv"
 
+header = "audio_file|text|speaker_name"
 with open(train_csv, "w", encoding="utf-8") as f:
-    f.write("\n".join(train_lines))
+    f.write(header + "\n" + "\n".join(train_lines))
 with open(eval_csv, "w", encoding="utf-8") as f:
-    f.write("\n".join(eval_lines))
+    f.write(header + "\n" + "\n".join(eval_lines))
 
 print(f"Train: {len(train_lines)}, Eval: {len(eval_lines)}")
 
