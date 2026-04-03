@@ -52,11 +52,14 @@ eval_lines  = all_lines[split:]
 train_csv = output_dir / "train.csv"
 eval_csv  = output_dir / "eval.csv"
 
-header = "audio_file|text|speaker_name"
+header = "audio_file|text|speaker_name|language"
+train_lines_lang = [f"{l}|tr" for l in train_lines]
+eval_lines_lang  = [f"{l}|tr" for l in eval_lines]
+
 with open(train_csv, "w", encoding="utf-8") as f:
-    f.write(header + "\n" + "\n".join(train_lines))
+    f.write(header + "\n" + "\n".join(train_lines_lang))
 with open(eval_csv, "w", encoding="utf-8") as f:
-    f.write(header + "\n" + "\n".join(eval_lines))
+    f.write(header + "\n" + "\n".join(eval_lines_lang))
 
 print(f"Train: {len(train_lines)}, Eval: {len(eval_lines)}")
 
@@ -71,7 +74,7 @@ from TTS.demos.xtts_ft_demo.utils.gpt_train import train_gpt
 
 print("\nFine-tuning boshlandi...")
 train_gpt(
-    language="uz",
+    language="tr",  # "uz" base modelda yo'q; "tr" bilan Uzbek audio o'rganadi
     num_epochs=epochs,
     batch_size=batch_size,
     grad_acumm=1,
