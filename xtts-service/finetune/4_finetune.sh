@@ -31,35 +31,20 @@ output_dir  = Path("$OUTPUT_DIR")
 epochs      = int("$EPOCHS")
 batch_size  = int("$BATCH_SIZE")
 
-# 0. Tokenizer.py ga "uz" support qo'shish
-tokenizer_path = "/usr/local/lib/python3.10/dist-packages/TTS/tts/layers/xtts/tokenizer.py"
-with open(tokenizer_path, "r") as f:
-    src = f.read()
+# 0. Tokenizer ni runtime monkey-patch qilish ("uz" → "tr" kabi ishlaydi)
+from TTS.tts.layers.xtts import tokenizer as _xtts_tok
 
-# preprocess_text: "uz" ni "tr" bilan birgalikda ishlatish
-old = 'if lang in {"ar", "cs", "de", "en", "es", "fr", "hu", "it", "nl", "pl", "pt", "ru", "tr", "zh", "ko"}:'
-new = 'if lang in {"ar", "cs", "de", "en", "es", "fr", "hu", "it", "nl", "pl", "pt", "ru", "tr", "zh", "ko", "uz"}:'
-if old in src:
-    src = src.replace(old, new)
-    print("Tokenizer preprocess_text patched")
+_orig_preprocess = _xtts_tok.VoiceBpeTokenizer.preprocess_text
+def _uz_preprocess(self, txt, lang):
+    return _orig_preprocess(self, txt, "tr" if lang == "uz" else lang)
+_xtts_tok.VoiceBpeTokenizer.preprocess_text = _uz_preprocess
 
-# multilingual_cleaners ga "uz" kirsa "tr" kabi tozalash
-old2 = '        if lang in {"ar", "cs", "de", "en", "es", "fr", "hu", "it", "nl", "pl", "pt", "ru", "tr", "zh", "ko"}:\n            txt = multilingual_cleaners(txt, lang)'
-new2 = '        if lang in {"ar", "cs", "de", "en", "es", "fr", "hu", "it", "nl", "pl", "pt", "ru", "tr", "zh", "ko", "uz"}:\n            txt = multilingual_cleaners(txt, "tr" if lang == "uz" else lang)'
-if old2 in src:
-    src = src.replace(old2, new2)
-    print("Tokenizer multilingual_cleaners patched")
+_orig_encode = _xtts_tok.VoiceBpeTokenizer.encode
+def _uz_encode(self, txt, lang):
+    return _orig_encode(self, txt, "tr" if lang == "uz" else lang)
+_xtts_tok.VoiceBpeTokenizer.encode = _uz_encode
 
-# encode: [uz] token yo'q — [tr] ishlatamiz
-old3 = '        lang = "zh-cn" if lang == "zh" else lang\n        txt = f"[{lang}]{txt}"'
-new3 = '        lang = "zh-cn" if lang == "zh" else lang\n        lang = "tr" if lang == "uz" else lang  # uz uses tr token\n        txt = f"[{lang}]{txt}"'
-if old3 in src:
-    src = src.replace(old3, new3)
-    print("Tokenizer encode patched")
-
-with open(tokenizer_path, "w") as f:
-    f.write(src)
-print("Tokenizer patch done")
+print("Tokenizer monkey-patched: uz → tr")
 
 # 1. Base model config ga "uz" qo'shish
 model_dir = Path.home() / ".local/share/tts/tts_models--multilingual--multi-dataset--xtts_v2"
