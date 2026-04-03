@@ -12,7 +12,7 @@ echo "=== Google FLEURS Uzbek dataset yuklash ==="
 echo "Output: $OUTPUT_DIR"
 echo
 
-python3 - <<EOF
+HF_DATASETS_TRUST_REMOTE_CODE=1 python3 - <<EOF
 from datasets import load_dataset, concatenate_datasets
 import soundfile as sf
 import numpy as np
@@ -27,7 +27,7 @@ print("FLEURS uz_uz yuklanmoqda (train + validation + test)...")
 splits = []
 for split in ["train", "validation", "test"]:
     try:
-        ds = load_dataset("google/fleurs", "uz_uz", split=split)
+        ds = load_dataset("google/fleurs", "uz_uz", split=split, trust_remote_code=True)
         splits.append(ds)
         print(f"  {split}: {len(ds)} samples")
     except Exception as e:
