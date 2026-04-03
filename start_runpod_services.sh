@@ -205,6 +205,18 @@ echo "  Starting Demucs on port 8000..."
 cd /workspace/dubber/demucs-service
 nohup python -m uvicorn app_runpod:app --host 0.0.0.0 --port 8000 > /tmp/demucs.log 2>&1 &
 
+# Start XTTS on port 8001 (fine-tuned Uzbek model)
+echo "  Starting XTTS on port 8001..."
+FINETUNED_DIR="/workspace/xtts-uz-finetuned/run/training/GPT_XTTS_FT-April-03-2026_05+59PM-b483a33"
+if [ -d "$FINETUNED_DIR" ]; then
+    export XTTS_FINETUNED_DIR="$FINETUNED_DIR"
+    echo "    Fine-tuned model: $FINETUNED_DIR"
+else
+    echo "    WARNING: Fine-tuned model not found, using base model"
+fi
+cd /workspace/dubber
+nohup python -m uvicorn xtts-service.app:app --host 0.0.0.0 --port 8001 > /tmp/xtts.log 2>&1 &
+
 # Start WhisperX on port 8002
 echo "  Starting WhisperX on port 8002..."
 cd /workspace/dubber/whisperx-service

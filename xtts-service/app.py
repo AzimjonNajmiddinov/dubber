@@ -39,6 +39,10 @@ def _patched_torch_load(*args, **kwargs):
     return _original_torch_load(*args, **kwargs)
 torch.load = _patched_torch_load
 
+# Fine-tuned model directory (set via env var)
+XTTS_FINETUNED_DIR = os.getenv("XTTS_FINETUNED_DIR", "")
+_using_finetuned = False
+
 import torchaudio
 import numpy as np
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
@@ -72,65 +76,95 @@ class SynthesizeRequest(BaseModel):
     language: str = "uz"
     emotion: str = "neutral"
     speed: float = 1.0
-    output_path: str
+    output_path: Optional[str] = None
 
 
 def load_xtts_model():
-    """Load XTTS model with optimizations."""
-    global xtts_model
+    """Load XTTS model (fine-tuned if XTTS_FINETUNED_DIR is set, else base)."""
+    global xtts_model, _using_finetuned
 
     if xtts_model is not None:
         return xtts_model
 
-    logger.info("Loading XTTS model with CPU optimizations...")
-
     try:
         from TTS.tts.configs.xtts_config import XttsConfig
         from TTS.tts.models.xtts import Xtts
-        from TTS.utils.manage import ModelManager
-        from pathlib import Path
+        from TTS.tts.layers.xtts import tokenizer as _xtts_tok
 
-        # Get model path using ModelManager
-        manager = ModelManager()
+        # Tokenizer monkey-patch: map "uz" → "tr" at tokenizer level
+        # so Turkish BPE is used for Uzbek Latin script
+        _orig_preprocess = _xtts_tok.VoiceBpeTokenizer.preprocess_text
+        def _uz_preprocess(self, txt, lang):
+            return _orig_preprocess(self, txt, "tr" if lang == "uz" else lang)
+        _xtts_tok.VoiceBpeTokenizer.preprocess_text = _uz_preprocess
 
-        # First ensure model is downloaded
-        model_name = "tts_models/multilingual/multi-dataset/xtts_v2"
-        model_item = manager.download_model(model_name)
+        _orig_encode = _xtts_tok.VoiceBpeTokenizer.encode
+        def _uz_encode(self, txt, lang):
+            return _orig_encode(self, txt, "tr" if lang == "uz" else lang)
+        _xtts_tok.VoiceBpeTokenizer.encode = _uz_encode
 
-        # Find the model directory
-        model_dir = Path.home() / ".local/share/tts" / model_name.replace("/", "--")
+        finetuned_dir = Path(XTTS_FINETUNED_DIR) if XTTS_FINETUNED_DIR else None
 
-        if not model_dir.exists():
-            # Try alternate location
-            model_dir = Path("/root/.local/share/tts") / model_name.replace("/", "--")
+        if finetuned_dir and finetuned_dir.exists():
+            logger.info(f"Loading fine-tuned XTTS model from {finetuned_dir}")
 
-        config_path = model_dir / "config.json"
+            config = XttsConfig()
+            config.load_json(str(finetuned_dir / "config.json"))
 
-        if not config_path.exists():
-            raise FileNotFoundError(f"Config not found at {config_path}")
+            # Find best checkpoint
+            checkpoints = sorted(finetuned_dir.glob("best_model*.pth"))
+            if not checkpoints:
+                checkpoints = sorted(finetuned_dir.glob("*.pth"))
+            ckpt = checkpoints[0] if checkpoints else None
+            if not ckpt:
+                raise FileNotFoundError(f"No checkpoint found in {finetuned_dir}")
 
-        logger.info(f"Loading model from {model_dir}")
+            # vocab.json from base model files copied alongside fine-tuned model
+            base_files = finetuned_dir.parent / "XTTS_v2.0_original_model_files"
+            vocab_path = base_files / "vocab.json"
+            if not vocab_path.exists():
+                vocab_path = Path.home() / ".local/share/tts/tts_models--multilingual--multi-dataset--xtts_v2/vocab.json"
 
-        # Load config
-        config = XttsConfig()
-        config.load_json(str(config_path))
+            xtts_model = Xtts.init_from_config(config)
+            xtts_model.load_checkpoint(
+                config,
+                checkpoint_path=str(ckpt),
+                checkpoint_dir=str(finetuned_dir),
+                vocab_path=str(vocab_path),
+                eval=True,
+                strict=False,
+            )
+            _using_finetuned = True
+            logger.info(f"Fine-tuned model loaded from checkpoint: {ckpt.name}")
 
-        # Load model directly (faster than TTS wrapper)
-        xtts_model = Xtts.init_from_config(config)
-        xtts_model.load_checkpoint(config, checkpoint_dir=str(model_dir), eval=True)
+        else:
+            logger.info("Loading base XTTS v2 model...")
+            from TTS.utils.manage import ModelManager
 
-        # Move to GPU if available
+            manager = ModelManager()
+            model_name = "tts_models/multilingual/multi-dataset/xtts_v2"
+            manager.download_model(model_name)
+
+            model_dir = Path.home() / ".local/share/tts" / model_name.replace("/", "--")
+            if not model_dir.exists():
+                model_dir = Path("/root/.local/share/tts") / model_name.replace("/", "--")
+
+            config = XttsConfig()
+            config.load_json(str(model_dir / "config.json"))
+
+            xtts_model = Xtts.init_from_config(config)
+            xtts_model.load_checkpoint(config, checkpoint_dir=str(model_dir), eval=True)
+            _using_finetuned = False
+
         if torch.cuda.is_available():
-            xtts_model = xtts_model.cuda()
-            logger.info(f"XTTS model loaded on GPU: {torch.cuda.get_device_name(0)}")
+            xtts_model.cuda()
+            logger.info(f"XTTS loaded on GPU: {torch.cuda.get_device_name(0)}")
         else:
             torch.set_num_threads(2)
-            logger.info("XTTS model loaded on CPU")
+            logger.info("XTTS loaded on CPU")
 
         xtts_model.eval()
         torch.set_grad_enabled(False)
-
-        logger.info("XTTS model loaded with CPU optimizations")
         return xtts_model
 
     except Exception as e:
@@ -509,12 +543,19 @@ async def synthesize(request: SynthesizeRequest):
         # Get cached speaker embedding
         gpt_cond_latent, speaker_embedding = get_speaker_embedding(request.voice_id)
 
-        output_path = STORAGE_PATH / request.output_path
-        output_path.parent.mkdir(parents=True, exist_ok=True)
+        if request.output_path:
+            output_path = STORAGE_PATH / request.output_path
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            cleanup_output = False
+        else:
+            output_path = CACHE_PATH / f"{uuid.uuid4()}.wav"
+            cleanup_output = True
 
-        # Map language
+        # "uz" stays "uz" — tokenizer monkey-patch maps it to "tr" internally.
+        # For base model, fall back to "tr" since "uz" may not be in its config.
         lang_map = {
-            "uz": "tr", "ru": "ru", "en": "en", "tr": "tr",
+            "uz": "uz" if _using_finetuned else "tr",
+            "ru": "ru", "en": "en", "tr": "tr",
             "ar": "ar", "zh": "zh-cn", "ja": "ja", "ko": "ko",
             "es": "es", "fr": "fr", "de": "de", "it": "it",
         }
@@ -553,17 +594,35 @@ async def synthesize(request: SynthesizeRequest):
 
         logger.info(f"Synthesis complete: {output_path} ({len(chunks)} chunks)")
 
-        # Return the audio file directly so remote clients can download it
-        return FileResponse(
-            str(output_path),
-            media_type="audio/wav",
-            filename=output_path.name,
-            headers={
-                "X-Output-Path": request.output_path,
-                "X-Chunks": str(len(chunks)),
-                "X-Size": str(output_path.stat().st_size),
-            },
-        )
+        headers = {
+            "X-Chunks": str(len(chunks)),
+            "X-Size": str(output_path.stat().st_size),
+        }
+        if request.output_path:
+            headers["X-Output-Path"] = request.output_path
+
+        # Return audio bytes; schedule temp file cleanup if needed
+        if cleanup_output:
+            import asyncio
+            response = FileResponse(
+                str(output_path),
+                media_type="audio/wav",
+                filename=output_path.name,
+                headers=headers,
+            )
+            # Cleanup after response is sent
+            async def _cleanup():
+                await asyncio.sleep(30)
+                output_path.unlink(missing_ok=True)
+            asyncio.create_task(_cleanup())
+            return response
+        else:
+            return FileResponse(
+                str(output_path),
+                media_type="audio/wav",
+                filename=output_path.name,
+                headers=headers,
+            )
 
     except HTTPException:
         raise
@@ -613,4 +672,4 @@ async def delete_voice(voice_id: str):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8001")))

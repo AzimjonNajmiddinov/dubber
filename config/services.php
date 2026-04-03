@@ -64,6 +64,10 @@ return [
         'api_key' => env('UZBEKVOICE_API_KEY', ''),
     ],
 
+    'xtts' => [
+        'url' => env('XTTS_SERVICE_URL', 'http://localhost:8001'),
+    ],
+
     'elevenlabs' => [
         'api_key' => env('ELEVENLABS_API_KEY', ''),
     ],

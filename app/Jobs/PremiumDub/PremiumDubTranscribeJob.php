@@ -2,9 +2,8 @@
 
 namespace App\Jobs\PremiumDub;
 
-use App\Services\RunPod\RunPodClient;
-use App\Services\RunPod\RunPodStorage;
 use Illuminate\Bus\Queueable;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
@@ -36,31 +35,26 @@ class PremiumDubTranscribeJob implements ShouldQueue
 
         $this->updateStatus('transcribing', 'Transcribing audio with WhisperX...');
 
-        $storage = new RunPodStorage();
-        $client = new RunPodClient();
-        $endpointId = config('services.runpod.whisperx_endpoint_id');
+        $serviceUrl = rtrim(config('services.whisperx.url'), '/');
 
         try {
-            // Upload audio to S3
-            $s3Path = "premium-dub/{$this->dubId}/audio_whisperx.wav";
-            $audioUrl = $storage->upload($audioPath, $s3Path);
+            // Upload audio to WhisperX service
+            $response = Http::timeout(1800)
+                ->attach('audio', file_get_contents($audioPath), 'audio.wav')
+                ->post("{$serviceUrl}/analyze-upload");
 
-            // Submit to RunPod WhisperX (kodxana hub worker API)
-            $jobId = $client->submitJob($endpointId, [
-                'audio_file' => $audioUrl,
-                'diarization' => true,
-                'align_output' => true,
-                'batch_size' => 32,
-            ]);
+            if (!$response->successful()) {
+                throw new \RuntimeException("WhisperX failed: " . $response->body());
+            }
 
-            // Poll until complete (up to 20 min)
-            $result = $client->pollJob($endpointId, $jobId, 1200, 8);
+            $result = $response->json();
 
-            // Cleanup S3
-            $storage->delete($s3Path);
+            if (isset($result['error'])) {
+                throw new \RuntimeException("WhisperX error: " . $result['error']);
+            }
 
             $segments = $result['segments'] ?? [];
-            $language = $result['detected_language'] ?? $result['language'] ?? 'unknown';
+            $language = $result['language'] ?? 'unknown';
 
             // Hub worker puts speaker in each segment, extract unique speakers
             $speakers = [];

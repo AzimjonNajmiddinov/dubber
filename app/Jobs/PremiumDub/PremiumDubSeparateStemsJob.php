@@ -2,9 +2,8 @@
 
 namespace App\Jobs\PremiumDub;
 
-use App\Services\RunPod\RunPodClient;
-use App\Services\RunPod\RunPodStorage;
 use Illuminate\Bus\Queueable;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
@@ -36,39 +35,33 @@ class PremiumDubSeparateStemsJob implements ShouldQueue
 
         $this->updateStatus('separating_stems', 'Separating vocals from background...');
 
-        $storage = new RunPodStorage();
-        $client = new RunPodClient();
-        $endpointId = config('services.runpod.demucs_endpoint_id');
-
+        $serviceUrl = rtrim(config('services.demucs.url'), '/');
         $workDir = storage_path("app/premium-dub/{$this->dubId}");
 
         try {
-            // Upload audio to S3
-            $s3Path = "premium-dub/{$this->dubId}/audio.wav";
-            $audioUrl = $storage->upload($audioPath, $s3Path);
+            // Upload audio to Demucs service and separate stems
+            $response = Http::timeout(1800)
+                ->attach('audio', file_get_contents($audioPath), 'audio.wav')
+                ->post("{$serviceUrl}/separate");
 
-            // Submit to RunPod Demucs
-            $jobId = $client->submitJob($endpointId, [
-                'audio_url' => $audioUrl,
-                'model' => 'htdemucs',
-            ]);
+            if (!$response->successful()) {
+                throw new \RuntimeException("Demucs failed: " . $response->body());
+            }
 
-            // Poll until complete (up to 25 min)
-            $result = $client->pollJob($endpointId, $jobId, 1500, 10);
+            $result = $response->json();
 
-            // Download results
+            // Download stem files
             $vocalsPath = "{$workDir}/vocals.wav";
             $noVocalsPath = "{$workDir}/no_vocals.wav";
 
             if (!empty($result['vocals_url'])) {
-                $storage->download($result['vocals_url'], $vocalsPath);
+                $url = str_starts_with($result['vocals_url'], 'http') ? $result['vocals_url'] : $serviceUrl . $result['vocals_url'];
+                file_put_contents($vocalsPath, Http::timeout(120)->get($url)->body());
             }
             if (!empty($result['no_vocals_url'])) {
-                $storage->download($result['no_vocals_url'], $noVocalsPath);
+                $url = str_starts_with($result['no_vocals_url'], 'http') ? $result['no_vocals_url'] : $serviceUrl . $result['no_vocals_url'];
+                file_put_contents($noVocalsPath, Http::timeout(120)->get($url)->body());
             }
-
-            // Cleanup S3
-            $storage->delete($s3Path);
 
             if (!file_exists($noVocalsPath)) {
                 $this->updateStatus('error', 'Stem separation produced no results');
@@ -81,7 +74,7 @@ class PremiumDubSeparateStemsJob implements ShouldQueue
                 'stems_ready' => true,
             ]);
 
-            Log::info("[PREMIUM] [{$this->dubId}] Stems separated ({$result['elapsed_seconds']}s)");
+            Log::info("[PREMIUM] [{$this->dubId}] Stems separated (" . ($result['elapsed_seconds'] ?? '?') . "s)");
 
             // Check if transcription is also done → dispatch next step
             $this->checkAndDispatchNext();

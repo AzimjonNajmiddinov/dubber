@@ -2,7 +2,7 @@
 
 namespace App\Jobs\PremiumDub;
 
-use App\Services\ElevenLabs\ElevenLabsClient;
+use App\Services\Xtts\XttsClient;
 use App\Services\TextNormalizer;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -51,7 +51,7 @@ class PremiumDubCloneAndSynthesizeJob implements ShouldQueue
             return;
         }
 
-        $client = new ElevenLabsClient();
+        $client = new XttsClient();
         $workDir = storage_path("app/premium-dub/{$this->dubId}");
         $ttsDir = "{$workDir}/tts";
         @mkdir($ttsDir, 0755, true);
@@ -79,29 +79,29 @@ class PremiumDubCloneAndSynthesizeJob implements ShouldQueue
                 $emotion = $seg['emotion'] ?? 'neutral';
                 $voiceId = $clonedVoices[$speaker] ?? null;
 
-                $outputMp3 = "{$ttsDir}/{$i}.mp3";
+                $outputWav = "{$ttsDir}/{$i}.wav";
+
+                $text = TextNormalizer::normalize($text, $language);
 
                 if ($voiceId) {
-                    // ElevenLabs with cloned voice + emotion
-                    $settings = self::EMOTION_SETTINGS[$emotion] ?? self::EMOTION_SETTINGS['neutral'];
-                    $text = TextNormalizer::normalize($text, $language);
-
                     try {
-                        $mp3Data = $client->synthesize($voiceId, $text, $settings);
-                        file_put_contents($outputMp3, $mp3Data);
+                        $wavData = $client->synthesize($voiceId, $text, [
+                            'emotion'   => $emotion,
+                            'language'  => $language,
+                        ]);
+                        file_put_contents($outputWav, $wavData);
                     } catch (\Throwable $e) {
-                        Log::warning("[PREMIUM] [{$this->dubId}] ElevenLabs synthesis failed for segment {$i}, falling back to Edge TTS: " . $e->getMessage());
-                        $this->synthesizeWithEdgeTts($text, $language, $speaker, $outputMp3);
+                        Log::warning("[PREMIUM] [{$this->dubId}] XTTS synthesis failed for segment {$i}, falling back to Edge TTS: " . $e->getMessage());
+                        $this->synthesizeWithEdgeTts($text, $language, $speaker, $outputWav);
                     }
                 } else {
-                    // Fallback to Edge TTS
-                    $this->synthesizeWithEdgeTts($text, $language, $speaker, $outputMp3);
+                    $this->synthesizeWithEdgeTts($text, $language, $speaker, $outputWav);
                 }
 
                 // Adjust tempo to fit time slot
-                if (file_exists($outputMp3) && filesize($outputMp3) > 200) {
+                if (file_exists($outputWav) && filesize($outputWav) > 200) {
                     $slotDuration = ($seg['end'] ?? 0) - ($seg['start'] ?? 0);
-                    $this->adjustTempo($outputMp3, $slotDuration);
+                    $this->adjustTempo($outputWav, $slotDuration);
                 }
 
                 $synthesized++;
@@ -133,7 +133,7 @@ class PremiumDubCloneAndSynthesizeJob implements ShouldQueue
         }
     }
 
-    private function cloneVoices(ElevenLabsClient $client, array $segments, string $vocalsPath, string $workDir): array
+    private function cloneVoices(XttsClient $client, array $segments, string $vocalsPath, string $workDir): array
     {
         // Group segments by speaker
         $speakerSegments = [];
@@ -201,7 +201,7 @@ class PremiumDubCloneAndSynthesizeJob implements ShouldQueue
 
             if (!file_exists($sampleFile) || filesize($sampleFile) < 2000) continue;
 
-            // Clone voice via ElevenLabs
+            // Clone voice via XTTS
             try {
                 $voiceId = $client->addVoice("dub-{$this->dubId}-{$speaker}", [$sampleFile]);
                 $cloned[$speaker] = $voiceId;
@@ -216,14 +216,16 @@ class PremiumDubCloneAndSynthesizeJob implements ShouldQueue
         return $cloned;
     }
 
-    private function synthesizeWithEdgeTts(string $text, string $language, string $speaker, string $outputMp3): void
+    private function synthesizeWithEdgeTts(string $text, string $language, string $speaker, string $outputWav): void
     {
         $variants = \App\Services\VoiceVariants::forLanguage($language);
         $isFemale = str_contains(strtolower($speaker), 'female') || str_contains($speaker, 'F');
         $voice = $isFemale ? $variants['female'][0] : $variants['male'][0];
 
-        $tmpDir = dirname($outputMp3);
-        $tmpTxt = "{$tmpDir}/text_{basename($outputMp3, '.mp3')}.txt";
+        $tmpDir = dirname($outputWav);
+        $stem = pathinfo($outputWav, PATHINFO_FILENAME);
+        $tmpTxt = "{$tmpDir}/text_{$stem}.txt";
+        $tmpMp3 = "{$tmpDir}/{$stem}_edge.mp3";
         file_put_contents($tmpTxt, $text);
 
         $edgeTts = trim(shell_exec('which edge-tts 2>/dev/null') ?? '') ?: 'edge-tts';
@@ -232,10 +234,20 @@ class PremiumDubCloneAndSynthesizeJob implements ShouldQueue
             $edgeTts, '-f', $tmpTxt,
             '--voice', $voice['voice'],
             "--pitch={$voice['pitch']}", "--rate={$voice['rate']}",
-            '--write-media', $outputMp3,
+            '--write-media', $tmpMp3,
         ]);
 
         @unlink($tmpTxt);
+
+        // Convert mp3 → wav so MixJob always gets wav files
+        if (file_exists($tmpMp3) && filesize($tmpMp3) > 200) {
+            Process::timeout(15)->run([
+                'ffmpeg', '-y', '-i', $tmpMp3,
+                '-ac', '1', '-ar', '24000', '-c:a', 'pcm_s16le',
+                $outputWav,
+            ]);
+            @unlink($tmpMp3);
+        }
     }
 
     private function adjustTempo(string $mp3Path, float $slotDuration): void
@@ -257,11 +269,11 @@ class PremiumDubCloneAndSynthesizeJob implements ShouldQueue
 
         if ($tempo === null) return;
 
-        $adjusted = $mp3Path . '.adj.mp3';
+        $adjusted = $mp3Path . '.adj.wav';
         $result = Process::timeout(15)->run([
             'ffmpeg', '-y', '-i', $mp3Path,
             '-filter:a', "atempo={$tempo}",
-            '-codec:a', 'libmp3lame', '-b:a', '128k',
+            '-c:a', 'pcm_s16le',
             $adjusted,
         ]);
 
@@ -311,7 +323,7 @@ class PremiumDubCloneAndSynthesizeJob implements ShouldQueue
         // Cleanup cloned voices
         $session = $this->getSession();
         $clonedVoices = $session['cloned_voices'] ?? [];
-        $client = new ElevenLabsClient();
+        $client = new XttsClient();
         foreach ($clonedVoices as $voiceId) {
             try { $client->deleteVoice($voiceId); } catch (\Throwable) {}
         }

@@ -2,7 +2,7 @@
 
 namespace App\Jobs\PremiumDub;
 
-use App\Services\ElevenLabs\ElevenLabsClient;
+use App\Services\Xtts\XttsClient;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -70,7 +70,10 @@ class PremiumDubMixJob implements ShouldQueue
             $inputIdx = 1;
 
             foreach ($segments as $i => $seg) {
-                $ttsFile = "{$ttsDir}/{$i}.mp3";
+                $ttsFile = "{$ttsDir}/{$i}.wav";
+                if (!file_exists($ttsFile) || filesize($ttsFile) < 200) {
+                    $ttsFile = "{$ttsDir}/{$i}.mp3"; // fallback
+                }
                 if (!file_exists($ttsFile) || filesize($ttsFile) < 200) continue;
 
                 $inputs[] = '-i';
@@ -156,10 +159,10 @@ class PremiumDubMixJob implements ShouldQueue
             // 6. Cleanup intermediate files
             @unlink($dubbedAudioPath);
 
-            // 7. Cleanup ElevenLabs cloned voices
+            // 7. Cleanup XTTS cloned voices
             $clonedVoices = $session['cloned_voices'] ?? [];
             if (!empty($clonedVoices)) {
-                $client = new ElevenLabsClient();
+                $client = new XttsClient();
                 foreach ($clonedVoices as $voiceId) {
                     try { $client->deleteVoice($voiceId); } catch (\Throwable) {}
                 }
