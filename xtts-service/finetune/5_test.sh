@@ -54,8 +54,16 @@ print(f"Checkpoint: {ckpt}")
 config = XttsConfig()
 config.load_json(str(ckpt_dir / "config.json"))
 
+# vocab.json base model papkasida
+base_files_dir = Path("/workspace/xtts-uz-finetuned/run/training/XTTS_v2.0_original_model_files")
+vocab_path = base_files_dir / "vocab.json"
+if not vocab_path.exists():
+    # fallback: base model dir
+    vocab_path = Path.home() / ".local/share/tts/tts_models--multilingual--multi-dataset--xtts_v2/vocab.json"
+print(f"Vocab: {vocab_path}")
+
 model = Xtts.init_from_config(config)
-model.load_checkpoint(config, checkpoint_path=str(ckpt), checkpoint_dir=str(ckpt_dir), eval=True, strict=False)
+model.load_checkpoint(config, checkpoint_path=str(ckpt), checkpoint_dir=str(ckpt_dir), vocab_path=str(vocab_path), eval=True, strict=False)
 model.to(device)
 model.eval()
 print(f"Model loaded on {device}")
