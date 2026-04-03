@@ -22,7 +22,7 @@ os.environ["COQUI_TOS_AGREED"] = "1"
 
 def normalize_uzbek(text):
     """Uzbek → Turkish harflarga o'girish (XTTS Turkish tokenizer uchun)"""
-    apostrophe_variants = ['\u2018', '\u2019', '\u02bb', '\u02bc', '`', '\xb4', '\u02c8', '\u055a']
+    apostrophe_variants = ['\u2018', '\u2019', '\u02bb', '\u02bc', '\x60', '\xb4', '\u02c8', '\u055a']
     for v in apostrophe_variants:
         text = text.replace(v, "'")
     text = re.sub(r"[Oo][']", lambda m: 'Ö' if m.group()[0].isupper() else 'ö', text)
