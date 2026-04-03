@@ -15,21 +15,10 @@ echo
 export COQUI_TOS_AGREED=1
 
 python3 - <<EOF
-import os, re, torch
+import os, torch
 from pathlib import Path
 
 os.environ["COQUI_TOS_AGREED"] = "1"
-
-def normalize_uzbek(text):
-    """Uzbek → Turkish harflarga o'girish (XTTS Turkish tokenizer uchun)"""
-    apostrophe_variants = ['\u2018', '\u2019', '\u02bb', '\u02bc', '\x60', '\xb4', '\u02c8', '\u055a']
-    for v in apostrophe_variants:
-        text = text.replace(v, "'")
-    text = re.sub(r"[Oo][']", lambda m: 'Ö' if m.group()[0].isupper() else 'ö', text)
-    text = re.sub(r"[Gg][']", lambda m: 'Ğ' if m.group()[0].isupper() else 'ğ', text)
-    text = re.sub(r'[Ss]h', lambda m: 'Ş' if m.group()[0].isupper() else 'ş', text)
-    text = re.sub(r'[Cc]h', lambda m: 'Ç' if m.group()[0].isupper() else 'ç', text)
-    return text
 
 _orig = torch.load
 def _p(*a, **kw): kw.setdefault("weights_only", False); return _orig(*a, **kw)
@@ -51,8 +40,8 @@ from TTS.tts.models.xtts import Xtts
 device = "cuda" if torch.cuda.is_available() else "cpu"
 reference_wav = "$REFERENCE_WAV"
 ckpt_dir = Path("$CHECKPOINT_DIR")
-text = normalize_uzbek("$TEST_TEXT")
-print(f"Normalized: {text}")
+text = "$TEST_TEXT"
+print(f"Text: {text}")
 output = "$OUTPUT"
 
 # Find best checkpoint
