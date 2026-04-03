@@ -1,6 +1,11 @@
 #!/bin/bash
 set -e
 
+VENV="/workspace/venv"
+if [ -f "$VENV/bin/activate" ]; then
+    source "$VENV/bin/activate"
+fi
+
 REFERENCE_WAV="${1:-/workspace/reference.wav}"
 CHECKPOINT_DIR="/workspace/xtts-uz-finetuned/run/training/GPT_XTTS_FT-April-03-2026_05+59PM-b483a33"
 OUTPUT="/workspace/test_output.wav"
