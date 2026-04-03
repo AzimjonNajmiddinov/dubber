@@ -31,6 +31,36 @@ output_dir  = Path("$OUTPUT_DIR")
 epochs      = int("$EPOCHS")
 batch_size  = int("$BATCH_SIZE")
 
+# 0. Tokenizer.py ga "uz" support qo'shish
+tokenizer_path = "/usr/local/lib/python3.10/dist-packages/TTS/tts/layers/xtts/tokenizer.py"
+with open(tokenizer_path, "r") as f:
+    src = f.read()
+
+# preprocess_text: "uz" ni "tr" bilan birgalikda ishlatish
+old = 'if lang in {"ar", "cs", "de", "en", "es", "fr", "hu", "it", "nl", "pl", "pt", "ru", "tr", "zh", "ko"}:'
+new = 'if lang in {"ar", "cs", "de", "en", "es", "fr", "hu", "it", "nl", "pl", "pt", "ru", "tr", "zh", "ko", "uz"}:'
+if old in src:
+    src = src.replace(old, new)
+    print("Tokenizer preprocess_text patched")
+
+# multilingual_cleaners ga "uz" kirsa "tr" kabi tozalash
+old2 = '        if lang in {"ar", "cs", "de", "en", "es", "fr", "hu", "it", "nl", "pl", "pt", "ru", "tr", "zh", "ko"}:\n            txt = multilingual_cleaners(txt, lang)'
+new2 = '        if lang in {"ar", "cs", "de", "en", "es", "fr", "hu", "it", "nl", "pl", "pt", "ru", "tr", "zh", "ko", "uz"}:\n            txt = multilingual_cleaners(txt, "tr" if lang == "uz" else lang)'
+if old2 in src:
+    src = src.replace(old2, new2)
+    print("Tokenizer multilingual_cleaners patched")
+
+# encode: [uz] token yo'q — [tr] ishlatamiz
+old3 = '        lang = "zh-cn" if lang == "zh" else lang\n        txt = f"[{lang}]{txt}"'
+new3 = '        lang = "zh-cn" if lang == "zh" else lang\n        lang = "tr" if lang == "uz" else lang  # uz uses tr token\n        txt = f"[{lang}]{txt}"'
+if old3 in src:
+    src = src.replace(old3, new3)
+    print("Tokenizer encode patched")
+
+with open(tokenizer_path, "w") as f:
+    f.write(src)
+print("Tokenizer patch done")
+
 # 1. Base model config ga "uz" qo'shish
 model_dir = Path.home() / ".local/share/tts/tts_models--multilingual--multi-dataset--xtts_v2"
 if not model_dir.exists():
