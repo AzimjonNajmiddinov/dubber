@@ -27,7 +27,7 @@ print("FLEURS uz_uz yuklanmoqda (train + validation + test)...")
 splits = []
 for split in ["train", "validation", "test"]:
     try:
-        ds = load_dataset("google/fleurs", "uz_uz", split=split, trust_remote_code=True)
+        ds = load_dataset("google/fleurs", "uz_uz", split=split)
         splits.append(ds)
         print(f"  {split}: {len(ds)} samples")
     except Exception as e:
