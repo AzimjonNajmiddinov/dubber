@@ -59,7 +59,7 @@ class PremiumDubCloneAndSynthesizeJob implements ShouldQueue
         $clonedVoices = []; // speaker → voice_id
 
         try {
-            // 1. Clone voices — use a language-appropriate reference
+            // 1. Clone voices
             $this->updateStatus('cloning_voices', 'Cloning speaker voices...');
             $clonedVoices = $this->cloneVoices($client, $segments, $vocalsPath, $workDir, $language);
             Log::info("[PREMIUM] [{$this->dubId}] Cloned " . count($clonedVoices) . " voices");
@@ -134,100 +134,95 @@ class PremiumDubCloneAndSynthesizeJob implements ShouldQueue
     private function cloneVoices(XttsClient $client, array $segments, ?string $vocalsPath, string $workDir, string $language = 'uz'): array
     {
         $speakers = array_unique(array_map(fn($s) => $s['speaker'] ?? 'SPEAKER_0', $segments));
+        $speakersInfo = $this->getSession()['speakers_info'] ?? [];
 
-        // For Uzbek: generate reference via Edge TTS so the fine-tuned model
-        // receives Uzbek conditioning (not Russian from the original video).
-        // The fine-tuned model was trained on Uzbek audio only — Russian reference
-        // produces out-of-distribution embeddings → silence.
-        if ($language === 'uz') {
-            $refFile = $this->generateEdgeTtsReference($workDir, $language);
-            if ($refFile) {
-                try {
-                    $voiceId = $client->addVoice("dub-{$this->dubId}-uz-default", [$refFile]);
-                    @unlink($refFile);
-                    $cloned = [];
-                    foreach ($speakers as $speaker) {
-                        $cloned[$speaker] = $voiceId;
-                        Log::info("[PREMIUM] [{$this->dubId}] Cloned voice for {$speaker}: {$voiceId} (uz-default reference)");
-                    }
-                    return $cloned;
-                } catch (\Throwable $e) {
-                    Log::warning("[PREMIUM] [{$this->dubId}] XTTS clone with uz reference failed: " . $e->getMessage());
-                }
-            }
-            // If Edge TTS reference generation failed, fall through to no cloning
-            return [];
+        // Try voice pool first (pre-recorded Uzbek actor voices)
+        $poolVoices = $this->loadVoicePool();
+        if (!empty($poolVoices)) {
+            return $this->assignPoolVoices($client, $speakers, $speakersInfo, $poolVoices);
         }
 
-        // For non-Uzbek: extract from original vocals as before
-        if (!$vocalsPath || !file_exists($vocalsPath)) {
-            return [];
-        }
-
-        $speakerSegments = [];
-        foreach ($segments as $seg) {
-            $speakerSegments[$seg['speaker'] ?? 'SPEAKER_0'][] = $seg;
-        }
-
-        $cloned = [];
-        $samplesDir = "{$workDir}/voice_samples";
-        @mkdir($samplesDir, 0755, true);
-
-        foreach ($speakerSegments as $speaker => $segs) {
-            usort($segs, fn($a, $b) => ($b['end'] - $b['start']) <=> ($a['end'] - $a['start']));
-
-            $totalDur = 0;
-            $sampleParts = [];
-            foreach ($segs as $seg) {
-                $dur = ($seg['end'] ?? 0) - ($seg['start'] ?? 0);
-                if ($dur < 1.0) continue;
-
-                $partFile = "{$samplesDir}/{$speaker}_part_" . count($sampleParts) . ".wav";
-                $result = Process::timeout(10)->run([
-                    'ffmpeg', '-y',
-                    '-ss', (string) round($seg['start'], 3),
-                    '-t', (string) round($dur, 3),
-                    '-i', $vocalsPath,
-                    '-af', 'highpass=f=80,lowpass=f=12000,afftdn=nf=-20',
-                    '-ac', '1', '-ar', '22050', '-c:a', 'pcm_s16le',
-                    $partFile,
-                ]);
-
-                if ($result->successful() && file_exists($partFile) && filesize($partFile) > 1000) {
-                    $sampleParts[] = $partFile;
-                    $totalDur += $dur;
-                    if ($totalDur >= 25) break;
-                }
-            }
-
-            if (empty($sampleParts)) continue;
-
-            $sampleFile = "{$samplesDir}/{$speaker}.wav";
-            if (count($sampleParts) === 1) {
-                rename($sampleParts[0], $sampleFile);
-            } else {
-                $concatList = "{$samplesDir}/{$speaker}_list.txt";
-                file_put_contents($concatList, implode("\n", array_map(fn($p) => "file '{$p}'", $sampleParts)));
-                Process::timeout(15)->run([
-                    'ffmpeg', '-y', '-f', 'concat', '-safe', '0',
-                    '-i', $concatList, '-c:a', 'pcm_s16le', $sampleFile,
-                ]);
-                @unlink($concatList);
-            }
-
-            foreach ($sampleParts as $part) { @unlink($part); }
-
-            if (!file_exists($sampleFile) || filesize($sampleFile) < 2000) continue;
-
+        // Fallback: generate Edge TTS Uzbek reference
+        Log::info("[PREMIUM] [{$this->dubId}] No voice pool found, using Edge TTS reference");
+        $refFile = $this->generateEdgeTtsReference($workDir, $language);
+        if ($refFile) {
             try {
-                $voiceId = $client->addVoice("dub-{$this->dubId}-{$speaker}", [$sampleFile]);
-                $cloned[$speaker] = $voiceId;
-                Log::info("[PREMIUM] [{$this->dubId}] Cloned voice for {$speaker}: {$voiceId}");
+                $voiceId = $client->addVoice("dub-{$this->dubId}-fallback", [$refFile]);
+                @unlink($refFile);
+                $cloned = [];
+                foreach ($speakers as $speaker) {
+                    $cloned[$speaker] = $voiceId;
+                }
+                Log::info("[PREMIUM] [{$this->dubId}] Using Edge TTS fallback voice for all speakers");
+                return $cloned;
             } catch (\Throwable $e) {
-                Log::warning("[PREMIUM] [{$this->dubId}] Voice clone failed for {$speaker}: " . $e->getMessage());
+                Log::warning("[PREMIUM] [{$this->dubId}] Fallback voice clone failed: " . $e->getMessage());
+            }
+        }
+
+        return [];
+    }
+
+    /**
+     * Load voice pool files from storage/app/voice-pool/{male,female,child}/
+     * Returns ['male' => [...paths], 'female' => [...paths], 'child' => [...paths]]
+     */
+    private function loadVoicePool(): array
+    {
+        $pool = [];
+        $poolDir = storage_path('app/voice-pool');
+        foreach (['male', 'female', 'child'] as $gender) {
+            $dir = "{$poolDir}/{$gender}";
+            if (!is_dir($dir)) continue;
+            $files = glob("{$dir}/*.{wav,mp3,m4a,ogg,flac}", GLOB_BRACE);
+            if (!empty($files)) {
+                $pool[$gender] = array_values($files);
+            }
+        }
+        return $pool;
+    }
+
+    /**
+     * Assign pool voices to speakers, cycling through pool if more speakers than voices.
+     * Uses gender info from WhisperX if available, otherwise defaults to 'male'.
+     * Caches voice_ids in Redis so the same file isn't re-cloned on next dub.
+     */
+    private function assignPoolVoices(XttsClient $client, array $speakers, array $speakersInfo, array $pool): array
+    {
+        $counters = ['male' => 0, 'female' => 0, 'child' => 0];
+        $cloned = [];
+
+        foreach ($speakers as $speaker) {
+            $gender = $speakersInfo[$speaker]['gender'] ?? 'unknown';
+            // Map unknown/ambiguous to male
+            if (!isset($pool[$gender]) || empty($pool[$gender])) {
+                $gender = isset($pool['male']) ? 'male' : array_key_first($pool);
             }
 
-            @unlink($sampleFile);
+            $files = $pool[$gender];
+            $file = $files[$counters[$gender] % count($files)];
+            $counters[$gender]++;
+
+            // Cache key: hash of file path so same file → same voice_id across runs
+            $cacheKey = 'voice-pool-id:' . md5($file);
+            $voiceId = \Illuminate\Support\Facades\Redis::get($cacheKey);
+
+            if (!$voiceId) {
+                try {
+                    $name = pathinfo($file, PATHINFO_FILENAME);
+                    $voiceId = $client->addVoice("pool-{$name}", [$file]);
+                    // Cache for 7 days (pod restarts clear XTTS voices anyway)
+                    \Illuminate\Support\Facades\Redis::setex($cacheKey, 604800, $voiceId);
+                    Log::info("[PREMIUM] [{$this->dubId}] Cloned pool voice '{$name}' → {$voiceId}");
+                } catch (\Throwable $e) {
+                    Log::warning("[PREMIUM] [{$this->dubId}] Pool voice clone failed for {$file}: " . $e->getMessage());
+                    continue;
+                }
+            } else {
+                Log::info("[PREMIUM] [{$this->dubId}] Using cached pool voice for {$speaker}: {$voiceId}");
+            }
+
+            $cloned[$speaker] = $voiceId;
         }
 
         return $cloned;
@@ -239,23 +234,16 @@ class PremiumDubCloneAndSynthesizeJob implements ShouldQueue
         $voice = $voices['male'][0] ?? $voices['female'][0] ?? null;
         if (!$voice) return null;
 
-        $refMp3 = "{$workDir}/uz_ref.mp3";
-        $refWav = "{$workDir}/uz_ref.wav";
-
-        // A few natural Uzbek sentences for a good embedding
-        $text = "Salom, bu ovoz namunasi. Men o'zbek tilida gapiraman. Bu sun'iy intellekt yordamida yaratilgan.";
+        $refMp3 = "{$workDir}/ref_edge.mp3";
+        $refWav = "{$workDir}/ref_edge.wav";
+        $text = "Salom, bu ovoz namunasi. Men o'zbek tilida gapiraman.";
 
         $edgeTts = trim(shell_exec('which edge-tts 2>/dev/null') ?? '') ?: 'edge-tts';
         $result = Process::timeout(20)->run([
-            $edgeTts, '--text', $text,
-            '--voice', $voice['voice'],
-            '--write-media', $refMp3,
+            $edgeTts, '--text', $text, '--voice', $voice['voice'], '--write-media', $refMp3,
         ]);
 
-        if (!$result->successful() || !file_exists($refMp3)) {
-            Log::warning("[PREMIUM] [{$this->dubId}] Edge TTS reference generation failed: " . $result->errorOutput());
-            return null;
-        }
+        if (!$result->successful() || !file_exists($refMp3)) return null;
 
         Process::timeout(10)->run([
             'ffmpeg', '-y', '-i', $refMp3,
