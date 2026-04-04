@@ -72,6 +72,7 @@ Route::middleware('admin.auth')->prefix('admin')->name('admin.')->group(function
 
     Route::get('/voice-pool', [AdminVoicePoolController::class, 'index'])->name('voice-pool.index');
     Route::post('/voice-pool', [AdminVoicePoolController::class, 'add'])->name('voice-pool.add');
+    Route::post('/voice-pool/upload', [AdminVoicePoolController::class, 'upload'])->name('voice-pool.upload');
     Route::delete('/voice-pool/{gender}/{name}', [AdminVoicePoolController::class, 'delete'])->name('voice-pool.delete');
 
     // Premium dub (admin only)

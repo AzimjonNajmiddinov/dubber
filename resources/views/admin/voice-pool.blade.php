@@ -27,6 +27,12 @@
         .badge.child { background: #dcfce7; color: #166534; }
         .hint { font-size: 12px; color: #9ca3af; margin-top: 4px; }
         #loading { display: none; color: #6b7280; font-size: 13px; margin-top: 8px; }
+        /* Tabs */
+        .tabs { display: flex; gap: 0; margin-bottom: 20px; border-bottom: 2px solid #e5e7eb; }
+        .tab { padding: 10px 20px; cursor: pointer; font-size: 14px; font-weight: 600; color: #6b7280; border-bottom: 2px solid transparent; margin-bottom: -2px; }
+        .tab.active { color: #2563eb; border-bottom-color: #2563eb; }
+        .tab-panel { display: none; }
+        .tab-panel.active { display: block; }
     </style>
 </head>
 <body>
@@ -44,43 +50,91 @@
     @endif
 
     <div class="card">
-        <h3 style="margin-top:0">Add voice from YouTube</h3>
-        <form method="POST" action="{{ route('admin.voice-pool.add') }}" onsubmit="showLoading()">
-            @csrf
+        <h3 style="margin-top:0">Add voice</h3>
 
-            <label>YouTube URL</label>
-            <input type="text" name="youtube_url" placeholder="https://youtube.com/watch?v=..." value="{{ old('youtube_url') }}" required>
-            <div class="hint">Paste any YouTube video URL. The audio will be downloaded and trimmed.</div>
+        <div class="tabs">
+            <div class="tab active" onclick="switchTab('upload')">📁 Upload file</div>
+            <div class="tab" onclick="switchTab('youtube')">▶️ YouTube URL</div>
+        </div>
 
-            <div class="row" style="margin-top:4px">
-                <div>
-                    <label>Voice name</label>
-                    <input type="text" name="name" placeholder="actor1" pattern="[a-zA-Z0-9_-]+" value="{{ old('name') }}" required>
-                    <div class="hint">Letters, numbers, - _ only</div>
-                </div>
-                <div>
-                    <label>Gender</label>
-                    <select name="gender">
-                        <option value="male" {{ old('gender')=='male'?'selected':'' }}>Male</option>
-                        <option value="female" {{ old('gender')=='female'?'selected':'' }}>Female</option>
-                        <option value="child" {{ old('gender')=='child'?'selected':'' }}>Child</option>
-                    </select>
-                </div>
-                <div>
-                    <label>Start (seconds)</label>
-                    <input type="number" name="start" placeholder="0" min="0" value="{{ old('start', 0) }}">
-                    <div class="hint">Skip intro/music</div>
-                </div>
-                <div>
-                    <label>Duration (seconds)</label>
-                    <input type="number" name="duration" placeholder="25" min="5" max="60" value="{{ old('duration', 25) }}">
-                    <div class="hint">5–60 sec, aim for 20–30</div>
-                </div>
-            </div>
+        <!-- Upload tab -->
+        <div class="tab-panel active" id="panel-upload">
+            <form method="POST" action="{{ route('admin.voice-pool.upload') }}" enctype="multipart/form-data" onsubmit="showLoading()">
+                @csrf
+                <label>Audio file</label>
+                <input type="file" name="audio" accept="audio/*,.wav,.mp3,.ogg,.flac,.m4a,.webm" required>
+                <div class="hint">WAV, MP3, OGG, FLAC, M4A — max 50 MB</div>
 
-            <button type="submit" class="primary">⬇️ Download &amp; Add</button>
-            <div id="loading">⏳ Downloading... this takes 10–30 seconds</div>
-        </form>
+                <div class="row" style="margin-top:4px">
+                    <div>
+                        <label>Voice name</label>
+                        <input type="text" name="name" placeholder="actor1" pattern="[a-zA-Z0-9_-]+" value="{{ old('name') }}" required>
+                        <div class="hint">Letters, numbers, - _ only</div>
+                    </div>
+                    <div>
+                        <label>Gender</label>
+                        <select name="gender">
+                            <option value="male" {{ old('gender')=='male'?'selected':'' }}>Male</option>
+                            <option value="female" {{ old('gender')=='female'?'selected':'' }}>Female</option>
+                            <option value="child" {{ old('gender')=='child'?'selected':'' }}>Child</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label>Start (seconds)</label>
+                        <input type="number" name="start" placeholder="0" min="0" value="{{ old('start', 0) }}">
+                        <div class="hint">Skip intro/music</div>
+                    </div>
+                    <div>
+                        <label>Duration (seconds)</label>
+                        <input type="number" name="duration" placeholder="25" min="5" max="60" value="{{ old('duration', 25) }}">
+                        <div class="hint">5–60 sec, aim for 20–30</div>
+                    </div>
+                </div>
+
+                <button type="submit" class="primary">⬆️ Upload &amp; Add</button>
+                <div id="loading">⏳ Processing... this takes a few seconds</div>
+            </form>
+        </div>
+
+        <!-- YouTube tab -->
+        <div class="tab-panel" id="panel-youtube">
+            <form method="POST" action="{{ route('admin.voice-pool.add') }}" onsubmit="showLoading()">
+                @csrf
+
+                <label>YouTube URL</label>
+                <input type="text" name="youtube_url" placeholder="https://youtube.com/watch?v=..." value="{{ old('youtube_url') }}" required>
+                <div class="hint">Paste any YouTube video URL. The audio will be downloaded and trimmed.</div>
+
+                <div class="row" style="margin-top:4px">
+                    <div>
+                        <label>Voice name</label>
+                        <input type="text" name="name" placeholder="actor1" pattern="[a-zA-Z0-9_-]+" value="{{ old('name') }}" required>
+                        <div class="hint">Letters, numbers, - _ only</div>
+                    </div>
+                    <div>
+                        <label>Gender</label>
+                        <select name="gender">
+                            <option value="male" {{ old('gender')=='male'?'selected':'' }}>Male</option>
+                            <option value="female" {{ old('gender')=='female'?'selected':'' }}>Female</option>
+                            <option value="child" {{ old('gender')=='child'?'selected':'' }}>Child</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label>Start (seconds)</label>
+                        <input type="number" name="start" placeholder="0" min="0" value="{{ old('start', 0) }}">
+                        <div class="hint">Skip intro/music</div>
+                    </div>
+                    <div>
+                        <label>Duration (seconds)</label>
+                        <input type="number" name="duration" placeholder="25" min="5" max="60" value="{{ old('duration', 25) }}">
+                        <div class="hint">5–60 sec, aim for 20–30</div>
+                    </div>
+                </div>
+
+                <button type="submit" class="primary">⬇️ Download &amp; Add</button>
+                <div id="loading">⏳ Downloading... this takes 10–30 seconds</div>
+            </form>
+        </div>
     </div>
 
     <div class="card">
@@ -131,6 +185,15 @@
     <script>
         function showLoading() {
             document.getElementById('loading').style.display = 'block';
+        }
+
+        function switchTab(name) {
+            document.querySelectorAll('.tab').forEach((t, i) => {
+                t.classList.toggle('active', ['upload','youtube'][i] === name);
+            });
+            document.querySelectorAll('.tab-panel').forEach(p => {
+                p.classList.toggle('active', p.id === 'panel-' + name);
+            });
         }
     </script>
 </body>

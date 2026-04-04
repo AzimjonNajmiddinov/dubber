@@ -100,6 +100,52 @@ class AdminVoicePoolController extends Controller
         return back()->with('success', "Voice '{$name}' added to {$gender} pool ({$duration}s).");
     }
 
+    public function upload(Request $request)
+    {
+        $request->validate([
+            'audio'    => 'required|file|mimes:wav,mp3,ogg,flac,m4a,webm|max:51200',
+            'gender'   => 'required|in:male,female,child',
+            'name'     => 'required|string|max:50|regex:/^[a-zA-Z0-9_-]+$/',
+            'start'    => 'nullable|integer|min:0',
+            'duration' => 'nullable|integer|min:5|max:60',
+        ]);
+
+        $gender   = $request->input('gender');
+        $name     = $request->input('name');
+        $start    = (int) ($request->input('start', 0));
+        $duration = (int) ($request->input('duration', 25));
+
+        $dir = storage_path("app/voice-pool/{$gender}");
+        @mkdir($dir, 0775, true);
+
+        $tmpFile = $request->file('audio')->store('voice-pool/tmp');
+        $tmpPath = storage_path("app/{$tmpFile}");
+        $outWav  = "{$dir}/{$name}.wav";
+
+        $ffResult = Process::timeout(30)->run([
+            'ffmpeg', '-y',
+            '-ss', (string) $start,
+            '-t',  (string) $duration,
+            '-i',  $tmpPath,
+            '-af', 'highpass=f=80,lowpass=f=12000,afftdn=nf=-20',
+            '-ac', '1', '-ar', '22050', '-c:a', 'pcm_s16le',
+            $outWav,
+        ]);
+
+        @unlink($tmpPath);
+
+        if (!$ffResult->successful() || !file_exists($outWav) || filesize($outWav) < 2000) {
+            return back()->withErrors(['audio' => 'Audio extraction failed: ' . substr($ffResult->errorOutput(), -200)]);
+        }
+
+        $cacheKey = 'voice-pool-id:' . md5($outWav);
+        \Illuminate\Support\Facades\Redis::del($cacheKey);
+
+        Log::info("[VOICE POOL] Uploaded {$gender}/{$name} (start={$start}s, dur={$duration}s)");
+
+        return back()->with('success', "Voice '{$name}' added to {$gender} pool ({$duration}s).");
+    }
+
     public function delete(string $gender, string $name)
     {
         if (!in_array($gender, self::GENDERS)) abort(400);
