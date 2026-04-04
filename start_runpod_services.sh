@@ -112,6 +112,45 @@ else
 fi
 
 # ===========================================
+# XTTS VENV SETUP (isolated: torch 2.2.0+cu121 + TTS 0.22.0)
+# ===========================================
+echo "Checking XTTS venv..."
+cd /workspace/dubber/xtts-service
+
+XTTS_VENV_OK=false
+if [ -d "venv" ] && venv/bin/python -c "import TTS; import uvicorn" 2>/dev/null; then
+    echo "  XTTS venv OK"
+    XTTS_VENV_OK=true
+fi
+
+if [ "$XTTS_VENV_OK" = false ]; then
+    echo "  Creating XTTS venv (downloads torch 2.2.0+cu121 ~2GB, takes 5-10 min)..."
+    rm -rf venv
+    python -m venv venv
+
+    venv/bin/pip install -q --upgrade pip
+
+    echo "    Installing torch 2.2.0+cu121..."
+    venv/bin/pip install -q \
+        torch==2.2.0+cu121 torchaudio==2.2.0+cu121 \
+        --index-url https://download.pytorch.org/whl/cu121
+
+    echo "    Installing TTS + deps..."
+    venv/bin/pip install -q TTS==0.22.0 uvicorn fastapi python-multipart soundfile
+    venv/bin/pip install -q --force-reinstall \
+        "numpy<2.0.0" \
+        "huggingface_hub>=0.16.4,<0.22.0" \
+        "tokenizers>=0.13.0,<0.16.0" \
+        "transformers>=4.33.0,<4.46.0"
+
+    if venv/bin/python -c "import TTS; import torch; print(f'XTTS venv OK - torch {torch.__version__}')" 2>/dev/null; then
+        echo "  XTTS venv created successfully"
+    else
+        echo "  ERROR: XTTS venv creation failed! Check manually."
+    fi
+fi
+
+# ===========================================
 # OPENVOICE VENV SETUP (always check, even with --skip-deps)
 # ===========================================
 echo "Checking OpenVoice venv..."
@@ -205,7 +244,7 @@ echo "  Starting Demucs on port 8000..."
 cd /workspace/dubber/demucs-service
 nohup python -m uvicorn app_runpod:app --host 0.0.0.0 --port 8000 > /tmp/demucs.log 2>&1 &
 
-# Start XTTS on port 8001 (fine-tuned Uzbek model)
+# Start XTTS on port 8001 (fine-tuned Uzbek model, isolated venv)
 echo "  Starting XTTS on port 8001..."
 FINETUNED_DIR="/workspace/xtts-uz-finetuned/run/training/GPT_XTTS_FT-April-03-2026_05+59PM-b483a33"
 if [ -d "$FINETUNED_DIR" ]; then
@@ -214,8 +253,8 @@ if [ -d "$FINETUNED_DIR" ]; then
 else
     echo "    WARNING: Fine-tuned model not found, using base model"
 fi
-cd /workspace/dubber
-nohup python -m uvicorn xtts-service.app:app --host 0.0.0.0 --port 8001 > /tmp/xtts.log 2>&1 &
+cd /workspace/dubber/xtts-service
+nohup venv/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8001 > /tmp/xtts.log 2>&1 &
 
 # Start WhisperX on port 8002
 echo "  Starting WhisperX on port 8002..."
@@ -247,6 +286,13 @@ if check_health "Demucs" 8000 "import sys,json; d=json.load(sys.stdin); assert d
     curl -s http://localhost:8000/health | python -c "import sys,json; d=json.load(sys.stdin); print(f'OK - GPU: {d.get(\"gpu_name\", \"N/A\")}')" 2>/dev/null
 else
     echo "FAILED (check: tail /tmp/demucs.log)"
+fi
+
+echo -n "  XTTS    (8001):   "
+if check_health "XTTS" 8001 "import sys,json; d=json.load(sys.stdin); assert d.get('status')=='healthy'"; then
+    curl -s http://localhost:8001/health | python -c "import sys,json; d=json.load(sys.stdin); print(f'OK - CUDA: {d.get(\"cuda_available\")}')" 2>/dev/null
+else
+    echo "FAILED (check: tail /tmp/xtts.log)"
 fi
 
 echo -n "  WhisperX (8002):  "
