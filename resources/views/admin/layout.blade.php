@@ -294,6 +294,15 @@
                class="nav-item {{ request()->routeIs('admin.dubs*') ? 'active' : '' }}">
                 <span class="icon">🎬</span> Dubs
             </a>
+            <div class="nav-label">Tools</div>
+            <a href="{{ route('admin.premium-dub') }}"
+               class="nav-item {{ request()->routeIs('admin.premium-dub') ? 'active' : '' }}">
+                <span class="icon">🎬</span> Premium Dub
+            </a>
+            <a href="{{ route('admin.voice-pool.index') }}"
+               class="nav-item {{ request()->routeIs('admin.voice-pool*') ? 'active' : '' }}">
+                <span class="icon">🎙</span> Voice Pool
+            </a>
             <div class="nav-label">Settings</div>
             <a href="{{ route('admin.users.index') }}"
                class="nav-item {{ request()->routeIs('admin.users*') ? 'active' : '' }}">

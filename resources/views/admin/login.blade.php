@@ -120,8 +120,8 @@
             <form method="POST" action="{{ route('admin.login.post') }}">
                 @csrf
                 <div class="field">
-                    <label for="phone">Phone</label>
-                    <input type="text" id="phone" name="phone" value="{{ old('phone') }}" autofocus autocomplete="username" inputmode="numeric">
+                    <label for="phone">Email</label>
+                    <input type="email" id="phone" name="phone" value="{{ old('phone') }}" autofocus autocomplete="username">
                 </div>
                 <div class="field">
                     <label for="password">Password</label>
