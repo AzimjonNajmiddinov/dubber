@@ -146,6 +146,14 @@ class AdminVoicePoolController extends Controller
         return back()->with('success', "Voice '{$name}' added to {$gender} pool ({$duration}s).");
     }
 
+    public function play(string $gender, string $name)
+    {
+        if (!in_array($gender, self::GENDERS)) abort(400);
+        $file = storage_path("app/voice-pool/{$gender}/{$name}.wav");
+        if (!file_exists($file)) abort(404);
+        return response()->file($file, ['Content-Type' => 'audio/wav']);
+    }
+
     public function delete(string $gender, string $name)
     {
         if (!in_array($gender, self::GENDERS)) abort(400);

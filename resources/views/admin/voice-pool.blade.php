@@ -27,6 +27,8 @@
         .badge.child { background: #dcfce7; color: #166534; }
         .hint { font-size: 12px; color: #9ca3af; margin-top: 4px; }
         #loading { display: none; color: #6b7280; font-size: 13px; margin-top: 8px; }
+        .play-btn { background: #059669; color: white; border: none; padding: 5px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; white-space: nowrap; }
+        .play-btn.playing { background: #dc2626; }
         /* Tabs */
         .tabs { display: flex; gap: 0; margin-bottom: 20px; border-bottom: 2px solid #e5e7eb; }
         .tab { padding: 10px 20px; cursor: pointer; font-size: 14px; font-weight: 600; color: #6b7280; border-bottom: 2px solid transparent; margin-bottom: -2px; }
@@ -160,7 +162,8 @@
                         <td><span class="badge {{ $voice['gender'] }}">{{ $voice['gender'] }}</span></td>
                         <td>{{ $voice['duration'] }}</td>
                         <td>{{ $voice['size'] }}</td>
-                        <td>
+                        <td style="display:flex;gap:6px;align-items:center">
+                            <button type="button" class="play-btn" onclick="togglePlay(this, '{{ route('admin.voice-pool.play', [$voice['gender'], $voice['name']]) }}')">▶ Play</button>
                             <form method="POST" action="{{ route('admin.voice-pool.delete', [$voice['gender'], $voice['name']]) }}" style="display:inline" onsubmit="return confirm('Delete {{ $voice['name'] }}?')">
                                 @csrf
                                 @method('DELETE')
@@ -183,6 +186,25 @@
     </div>
 
     <script>
+        let currentAudio = null;
+        let currentBtn = null;
+
+        function togglePlay(btn, url) {
+            if (currentAudio && currentBtn) {
+                currentAudio.pause();
+                currentBtn.textContent = '▶ Play';
+                currentBtn.classList.remove('playing');
+                if (currentBtn === btn) { currentAudio = null; currentBtn = null; return; }
+            }
+            const audio = new Audio(url);
+            audio.play();
+            btn.textContent = '⏹ Stop';
+            btn.classList.add('playing');
+            currentAudio = audio;
+            currentBtn = btn;
+            audio.onended = () => { btn.textContent = '▶ Play'; btn.classList.remove('playing'); currentAudio = null; currentBtn = null; };
+        }
+
         function showLoading() {
             document.getElementById('loading').style.display = 'block';
         }
