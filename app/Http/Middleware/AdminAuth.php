@@ -11,6 +11,9 @@ class AdminAuth
     public function handle(Request $request, Closure $next)
     {
         if (!Auth::check()) {
+            if ($request->expectsJson()) {
+                return response()->json(['error' => 'Unauthorized'], 401);
+            }
             return redirect()->route('admin.login');
         }
 

@@ -49,8 +49,6 @@ Route::get('/dub/{video}', [OnlineDubController::class, 'progress'])->name('dub.
 // Instant dub (SRT → TTS over video)
 Route::get('/instant-dub', fn() => view('instant-dub'))->name('instant-dub');
 
-// Premium dub (Demucs + WhisperX + XTTS)
-Route::get('/premium-dub', fn() => view('premium-dub'))->name('premium-dub');
 
 // Admin panel
 Route::get('/admin/login', [AdminController::class, 'loginForm'])->name('admin.login');
@@ -74,5 +72,8 @@ Route::middleware('admin.auth')->prefix('admin')->name('admin.')->group(function
     Route::get('/voice-pool', [AdminVoicePoolController::class, 'index'])->name('voice-pool.index');
     Route::post('/voice-pool', [AdminVoicePoolController::class, 'add'])->name('voice-pool.add');
     Route::delete('/voice-pool/{gender}/{name}', [AdminVoicePoolController::class, 'delete'])->name('voice-pool.delete');
+
+    // Premium dub (admin only)
+    Route::get('/premium-dub', fn() => view('premium-dub'))->name('premium-dub');
 });
 

@@ -58,8 +58,8 @@ Route::prefix('instant-dub')->group(function () {
     Route::get('/{sessionId}/proxy/{path}', [InstantDubController::class, 'hlsProxy'])->where('path', '.*')->name('api.instant-dub.proxy');
 });
 
-// Premium dub API (full pipeline: Demucs + WhisperX + ElevenLabs)
-Route::prefix('premium-dub')->group(function () {
+// Premium dub API (admin only)
+Route::middleware('admin.auth')->prefix('premium-dub')->group(function () {
     Route::post('/start', [PremiumDubController::class, 'start'])->name('api.premium-dub.start');
     Route::post('/start-upload', [PremiumDubController::class, 'startUpload'])->name('api.premium-dub.start-upload');
     Route::get('/{dubId}/status', [PremiumDubController::class, 'status'])->name('api.premium-dub.status');
