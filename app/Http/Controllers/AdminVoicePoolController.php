@@ -3,8 +3,10 @@
 namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Process;
+use Illuminate\Support\Facades\Redis;
 
 class AdminVoicePoolController extends Controller
 {
@@ -144,6 +146,61 @@ class AdminVoicePoolController extends Controller
         Log::info("[VOICE POOL] Uploaded {$gender}/{$name} (start={$start}s, dur={$duration}s)");
 
         return back()->with('success', "Voice '{$name}' added to {$gender} pool ({$duration}s).");
+    }
+
+    public function test(Request $request)
+    {
+        $request->validate([
+            'gender'   => 'required|in:male,female,child',
+            'name'     => 'required|string|max:50|regex:/^[a-zA-Z0-9_-]+$/',
+            'text'     => 'required|string|max:500',
+            'language' => 'required|string|max:10',
+        ]);
+
+        $gender = $request->input('gender');
+        $name   = $request->input('name');
+        $file   = storage_path("app/voice-pool/{$gender}/{$name}.wav");
+
+        if (!file_exists($file)) {
+            return response()->json(['error' => 'Voice file not found'], 404);
+        }
+
+        $xttsUrl = rtrim(config('services.xtts.url', env('XTTS_SERVICE_URL')), '/');
+
+        // Get or create voice_id (same cache pattern as the dub job)
+        $cacheKey = 'voice-pool-id:' . md5($file);
+        $voiceId  = Redis::get($cacheKey);
+
+        if (!$voiceId) {
+            $cloneResp = Http::timeout(60)->attach('audio', file_get_contents($file), $name . '.wav')
+                ->post("{$xttsUrl}/clone", [
+                    'name'     => $name,
+                    'language' => $request->input('language'),
+                ]);
+
+            if (!$cloneResp->successful()) {
+                return response()->json(['error' => 'Clone failed: ' . $cloneResp->body()], 500);
+            }
+
+            $voiceId = $cloneResp->json('voice_id');
+            Redis::setex($cacheKey, 7 * 86400, $voiceId);
+        }
+
+        // Synthesize — returns audio bytes directly
+        $synthResp = Http::timeout(120)->post("{$xttsUrl}/synthesize", [
+            'text'     => $request->input('text'),
+            'voice_id' => $voiceId,
+            'language' => $request->input('language'),
+        ]);
+
+        if (!$synthResp->successful()) {
+            return response()->json(['error' => 'Synthesis failed: ' . $synthResp->body()], 500);
+        }
+
+        return response($synthResp->body(), 200, [
+            'Content-Type'        => 'audio/wav',
+            'Content-Disposition' => 'inline; filename="preview.wav"',
+        ]);
     }
 
     public function play(string $gender, string $name)

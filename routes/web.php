@@ -73,6 +73,7 @@ Route::middleware('admin.auth')->prefix('admin')->name('admin.')->group(function
     Route::get('/voice-pool', [AdminVoicePoolController::class, 'index'])->name('voice-pool.index');
     Route::post('/voice-pool', [AdminVoicePoolController::class, 'add'])->name('voice-pool.add');
     Route::post('/voice-pool/upload', [AdminVoicePoolController::class, 'upload'])->name('voice-pool.upload');
+    Route::post('/voice-pool/test', [AdminVoicePoolController::class, 'test'])->name('voice-pool.test');
     Route::get('/voice-pool/{gender}/{name}/play', [AdminVoicePoolController::class, 'play'])->name('voice-pool.play');
     Route::delete('/voice-pool/{gender}/{name}', [AdminVoicePoolController::class, 'delete'])->name('voice-pool.delete');
 

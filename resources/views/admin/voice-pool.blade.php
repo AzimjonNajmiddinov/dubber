@@ -185,6 +185,41 @@
         @endif
     </div>
 
+    <div class="card" id="test-card">
+        <h3 style="margin-top:0">🧪 Test XTTS synthesis</h3>
+        <div class="row" style="margin-bottom:12px">
+            <div>
+                <label>Voice</label>
+                <select id="test-voice">
+                    @foreach($pool as $voice)
+                    <option value="{{ $voice['gender'] }}|{{ $voice['name'] }}">{{ $voice['name'] }} ({{ $voice['gender'] }})</option>
+                    @endforeach
+                </select>
+            </div>
+            <div>
+                <label>Language</label>
+                <select id="test-lang">
+                    <option value="uz">Uzbek (uz)</option>
+                    <option value="ru">Russian (ru)</option>
+                    <option value="en">English (en)</option>
+                    <option value="tr">Turkish (tr)</option>
+                </select>
+            </div>
+        </div>
+        <label>Text</label>
+        <textarea id="test-text" rows="3" style="width:100%;padding:9px 12px;border:1px solid #ddd;border-radius:6px;box-sizing:border-box;font-size:14px;font-family:sans-serif" placeholder="Enter text to synthesize...">Salom, men o'zbek tilida gapiraman. Bu sinov matni.</textarea>
+        <div style="margin-top:12px;display:flex;gap:10px;align-items:center">
+            <button class="primary" onclick="runTest()" id="test-btn">▶ Synthesize</button>
+            <span id="test-status" style="font-size:13px;color:#6b7280"></span>
+        </div>
+        <div id="test-player" style="margin-top:14px;display:none">
+            <audio id="test-audio" controls style="width:100%"></audio>
+        </div>
+        @if(empty($pool))
+        <p style="color:#9ca3af;font-size:13px;margin-top:8px">Add voices to the pool first.</p>
+        @endif
+    </div>
+
     <script>
         let currentAudio = null;
         let currentBtn = null;
@@ -203,6 +238,49 @@
             currentAudio = audio;
             currentBtn = btn;
             audio.onended = () => { btn.textContent = '▶ Play'; btn.classList.remove('playing'); currentAudio = null; currentBtn = null; };
+        }
+
+        async function runTest() {
+            const voiceVal = document.getElementById('test-voice').value;
+            if (!voiceVal) { alert('No voices in pool.'); return; }
+            const [gender, name] = voiceVal.split('|');
+            const text = document.getElementById('test-text').value.trim();
+            const lang = document.getElementById('test-lang').value;
+            if (!text) { alert('Enter text first.'); return; }
+
+            const btn = document.getElementById('test-btn');
+            const status = document.getElementById('test-status');
+            btn.disabled = true;
+            status.textContent = '⏳ Synthesizing…';
+
+            try {
+                const resp = await fetch('{{ route('admin.voice-pool.test') }}', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-CSRF-TOKEN': document.querySelector('meta[name=csrf-token]').content,
+                    },
+                    body: JSON.stringify({ gender, name, text, language: lang }),
+                });
+
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({ error: resp.statusText }));
+                    status.textContent = '❌ ' + (err.error || 'Error');
+                    return;
+                }
+
+                const blob = await resp.blob();
+                const url = URL.createObjectURL(blob);
+                const audio = document.getElementById('test-audio');
+                audio.src = url;
+                document.getElementById('test-player').style.display = 'block';
+                audio.play();
+                status.textContent = '✅ Done';
+            } catch (e) {
+                status.textContent = '❌ ' + e.message;
+            } finally {
+                btn.disabled = false;
+            }
         }
 
         function showLoading() {
