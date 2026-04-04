@@ -152,6 +152,7 @@
                         <th>Gender</th>
                         <th>Duration</th>
                         <th>Size</th>
+                        <th>Speed</th>
                         <th></th>
                     </tr>
                 </thead>
@@ -162,6 +163,7 @@
                         <td><span class="badge {{ $voice['gender'] }}">{{ $voice['gender'] }}</span></td>
                         <td>{{ $voice['duration'] }}</td>
                         <td>{{ $voice['size'] }}</td>
+                        <td style="color:#374151;font-size:13px" id="speed-label-{{ $voice['gender'] }}-{{ $voice['name'] }}">{{ $voice['speed'] }}×</td>
                         <td style="display:flex;gap:6px;align-items:center">
                             <button type="button" class="play-btn" onclick="togglePlay(this, '{{ route('admin.voice-pool.play', [$voice['gender'], $voice['name']]) }}')">▶ Play</button>
                             <form method="POST" action="{{ route('admin.voice-pool.delete', [$voice['gender'], $voice['name']]) }}" style="display:inline" onsubmit="return confirm('Delete {{ $voice['name'] }}?')">
@@ -206,7 +208,15 @@
                 </select>
             </div>
         </div>
-        <label>Text</label>
+        <label>Speed <span id="speed-display" style="font-weight:400;color:#6b7280">1.0×</span></label>
+        <div style="display:flex;align-items:center;gap:10px">
+            <input type="range" id="test-speed" min="0.5" max="2.0" step="0.05" value="1.0" style="flex:1;padding:0" oninput="document.getElementById('speed-display').textContent=parseFloat(this.value).toFixed(2)+'×'">
+            <button type="button" style="background:#059669;color:white;border:none;padding:5px 12px;border-radius:4px;cursor:pointer;font-size:12px;white-space:nowrap" onclick="saveSpeed()">💾 Save</button>
+            <span id="save-status" style="font-size:12px;color:#6b7280"></span>
+        </div>
+        <div class="hint">Adjust until the speaking pace sounds natural, then save — it will be used in all future dubs with this voice.</div>
+
+        <label style="margin-top:12px">Text</label>
         <textarea id="test-text" rows="3" style="width:100%;padding:9px 12px;border:1px solid #ddd;border-radius:6px;box-sizing:border-box;font-size:14px;font-family:sans-serif" placeholder="Enter text to synthesize...">Salom, men o'zbek tilida gapiraman. Bu sinov matni.</textarea>
         <div style="margin-top:12px;display:flex;gap:10px;align-items:center">
             <button class="primary" onclick="runTest()" id="test-btn">▶ Synthesize</button>
@@ -240,6 +250,61 @@
             audio.onended = () => { btn.textContent = '▶ Play'; btn.classList.remove('playing'); currentAudio = null; currentBtn = null; };
         }
 
+        // Speed data per voice (preloaded from server)
+        const voiceSpeeds = {
+            @foreach($pool as $v)
+            '{{ $v['gender'] }}|{{ $v['name'] }}': {{ $v['speed'] }},
+            @endforeach
+        };
+
+        // When voice selection changes, pre-fill speed slider
+        document.getElementById('test-voice').addEventListener('change', function() {
+            const speed = voiceSpeeds[this.value] ?? 1.0;
+            document.getElementById('test-speed').value = speed;
+            document.getElementById('speed-display').textContent = speed.toFixed(2) + '×';
+            document.getElementById('save-status').textContent = '';
+        });
+
+        // Pre-fill on load
+        (function() {
+            const sel = document.getElementById('test-voice');
+            if (sel && sel.value) {
+                const speed = voiceSpeeds[sel.value] ?? 1.0;
+                document.getElementById('test-speed').value = speed;
+                document.getElementById('speed-display').textContent = speed.toFixed(2) + '×';
+            }
+        })();
+
+        async function saveSpeed() {
+            const voiceVal = document.getElementById('test-voice').value;
+            if (!voiceVal) return;
+            const [gender, name] = voiceVal.split('|');
+            const speed = parseFloat(document.getElementById('test-speed').value);
+            const saveStatus = document.getElementById('save-status');
+            saveStatus.textContent = '⏳ Saving…';
+
+            try {
+                const resp = await fetch(`/admin/voice-pool/${gender}/${name}/speed`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-CSRF-TOKEN': document.querySelector('meta[name=csrf-token]').content,
+                    },
+                    body: JSON.stringify({ speed }),
+                });
+                if (resp.ok) {
+                    voiceSpeeds[voiceVal] = speed;
+                    const label = document.getElementById(`speed-label-${gender}-${name}`);
+                    if (label) label.textContent = speed.toFixed(2) + '×';
+                    saveStatus.textContent = '✅ Saved';
+                } else {
+                    saveStatus.textContent = '❌ Failed';
+                }
+            } catch(e) {
+                saveStatus.textContent = '❌ ' + e.message;
+            }
+        }
+
         async function runTest() {
             const voiceVal = document.getElementById('test-voice').value;
             if (!voiceVal) { alert('No voices in pool.'); return; }
@@ -260,7 +325,7 @@
                         'Content-Type': 'application/json',
                         'X-CSRF-TOKEN': document.querySelector('meta[name=csrf-token]').content,
                     },
-                    body: JSON.stringify({ gender, name, text, language: lang }),
+                    body: JSON.stringify({ gender, name, text, language: lang, speed: parseFloat(document.getElementById('test-speed').value) }),
                 });
 
                 if (!resp.ok) {

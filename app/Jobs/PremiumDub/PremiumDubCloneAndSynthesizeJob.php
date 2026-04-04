@@ -73,9 +73,11 @@ class PremiumDubCloneAndSynthesizeJob implements ShouldQueue
                 $text = trim($seg['text'] ?? '');
                 if ($text === '') continue;
 
-                $speaker = $seg['speaker'] ?? 'SPEAKER_0';
-                $emotion = $seg['emotion'] ?? 'neutral';
-                $voiceId = $clonedVoices[$speaker] ?? null;
+                $speaker   = $seg['speaker'] ?? 'SPEAKER_0';
+                $emotion   = $seg['emotion'] ?? 'neutral';
+                $voiceInfo = $clonedVoices[$speaker] ?? null;
+                $voiceId   = is_array($voiceInfo) ? ($voiceInfo['voice_id'] ?? null) : $voiceInfo;
+                $speed     = is_array($voiceInfo) ? ($voiceInfo['speed'] ?? 1.0) : 1.0;
 
                 $outputWav = "{$ttsDir}/{$i}.wav";
 
@@ -86,6 +88,7 @@ class PremiumDubCloneAndSynthesizeJob implements ShouldQueue
                         $wavData = $client->synthesize($voiceId, $text, [
                             'emotion'   => $emotion,
                             'language'  => $language,
+                            'speed'     => $speed,
                         ]);
                         file_put_contents($outputWav, $wavData);
                     } catch (\Throwable $e) {
@@ -222,7 +225,13 @@ class PremiumDubCloneAndSynthesizeJob implements ShouldQueue
                 Log::info("[PREMIUM] [{$this->dubId}] Using cached pool voice for {$speaker}: {$voiceId}");
             }
 
-            $cloned[$speaker] = $voiceId;
+            $cloned[$speaker] = [
+                'voice_id' => $voiceId,
+                'speed'    => \App\Http\Controllers\AdminVoicePoolController::getSpeed(
+                    pathinfo(dirname($file), PATHINFO_FILENAME),
+                    pathinfo($file, PATHINFO_FILENAME)
+                ),
+            ];
         }
 
         return $cloned;
