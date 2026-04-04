@@ -4,6 +4,7 @@ use App\Http\Controllers\AdminController;
 use App\Http\Controllers\AdminDubController;
 use App\Http\Controllers\AdminUserController;
 use App\Http\Controllers\AdminVoicePoolController;
+use App\Http\Controllers\PremiumDubController;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\VideoController;
 use App\Http\Controllers\StreamDubController;
@@ -75,5 +76,13 @@ Route::middleware('admin.auth')->prefix('admin')->name('admin.')->group(function
 
     // Premium dub (admin only)
     Route::get('/premium-dub', fn() => view('premium-dub'))->name('premium-dub');
+
+    // Premium dub API (session-auth, admin only)
+    Route::prefix('api/premium-dub')->group(function () {
+        Route::post('/start', [PremiumDubController::class, 'start'])->name('api.premium-dub.start');
+        Route::post('/start-upload', [PremiumDubController::class, 'startUpload'])->name('api.premium-dub.start-upload');
+        Route::get('/{dubId}/status', [PremiumDubController::class, 'status'])->name('api.premium-dub.status');
+        Route::get('/{dubId}/download', [PremiumDubController::class, 'download'])->name('api.premium-dub.download');
+    });
 });
 
