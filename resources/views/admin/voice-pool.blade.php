@@ -62,8 +62,8 @@
             <form method="POST" action="{{ route('admin.voice-pool.upload') }}" enctype="multipart/form-data" onsubmit="showLoading()">
                 @csrf
                 <label>Audio file</label>
-                <input type="file" name="audio" accept="audio/*,.wav,.mp3,.ogg,.flac,.m4a,.webm" required>
-                <div class="hint">WAV, MP3, OGG, FLAC, M4A — max 50 MB</div>
+                <input type="file" name="audio" accept="audio/*,video/*,.wav,.mp3,.ogg,.flac,.m4a,.webm,.mp4,.mkv" required>
+                <div class="hint">Any audio or video file — max 200 MB (audio will be extracted)</div>
 
                 <div class="row" style="margin-top:4px">
                     <div>

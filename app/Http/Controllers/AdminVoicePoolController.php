@@ -103,7 +103,7 @@ class AdminVoicePoolController extends Controller
     public function upload(Request $request)
     {
         $request->validate([
-            'audio'    => 'required|file|mimes:wav,mp3,ogg,flac,m4a,webm|max:51200',
+            'audio'    => 'required|file|max:204800',
             'gender'   => 'required|in:male,female,child',
             'name'     => 'required|string|max:50|regex:/^[a-zA-Z0-9_-]+$/',
             'start'    => 'nullable|integer|min:0',
