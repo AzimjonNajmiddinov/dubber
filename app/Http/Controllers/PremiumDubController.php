@@ -14,21 +14,24 @@ class PremiumDubController extends Controller
     public function start(Request $request): JsonResponse
     {
         $request->validate([
-            'video_url' => 'required|string',
-            'language' => 'required|string|max:10',
+            'video_url'      => 'required|string',
+            'language'       => 'required|string|max:10',
             'translate_from' => 'nullable|string|max:10',
+            'speakers'       => 'nullable|integer|min:1|max:20',
         ]);
 
         $dubId = Str::uuid()->toString();
         $language = $request->input('language', 'uz');
         $videoUrl = $request->input('video_url');
         $translateFrom = $request->input('translate_from', 'auto');
+        $speakers = $request->input('speakers'); // null = auto-detect
 
         $session = [
             'id' => $dubId,
             'language' => $language,
             'translate_from' => $translateFrom,
             'video_url' => $videoUrl,
+            'speakers' => $speakers,
             'status' => 'pending',
             'progress' => 'Starting...',
             'created_at' => now()->toIso8601String(),

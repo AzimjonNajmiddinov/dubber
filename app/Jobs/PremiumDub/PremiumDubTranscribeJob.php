@@ -38,10 +38,19 @@ class PremiumDubTranscribeJob implements ShouldQueue
         $serviceUrl = rtrim(config('services.whisperx.url'), '/');
 
         try {
+            $session = $this->getSession();
+            $speakers = $session['speakers'] ?? null;
+
             // Upload audio to WhisperX service
+            $formData = [];
+            if ($speakers !== null) {
+                $formData['min_speakers'] = (int) $speakers;
+                $formData['max_speakers'] = (int) $speakers;
+            }
+
             $response = Http::timeout(1800)
                 ->attach('audio', file_get_contents($audioPath), 'audio.wav')
-                ->post("{$serviceUrl}/analyze-upload");
+                ->post("{$serviceUrl}/analyze-upload", $formData);
 
             if (!$response->successful()) {
                 throw new \RuntimeException("WhisperX failed: " . $response->body());
