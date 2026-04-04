@@ -26,7 +26,6 @@ echo "=== Starting RunPod GPU Services ==="
 pkill -f "uvicorn.*8000" 2>/dev/null || true
 pkill -f "uvicorn.*8002" 2>/dev/null || true
 pkill -f "uvicorn.*8003" 2>/dev/null || true
-pkill -f "uvicorn.*8005" 2>/dev/null || true
 sleep 2
 
 # Pull latest code
@@ -151,55 +150,6 @@ if [ "$XTTS_VENV_OK" = false ]; then
     fi
 fi
 
-# ===========================================
-# OPENVOICE VENV SETUP (always check, even with --skip-deps)
-# ===========================================
-echo "Checking OpenVoice venv..."
-cd /workspace/dubber/openvoice-service
-
-VENV_OK=false
-if [ -d "venv" ] && venv/bin/python -c "import uvicorn; import openvoice" 2>/dev/null; then
-    echo "  OpenVoice venv OK"
-    VENV_OK=true
-fi
-
-if [ "$VENV_OK" = false ]; then
-    echo "  Creating OpenVoice venv (this takes 1-2 minutes)..."
-    rm -rf venv
-
-    # Use --system-site-packages to inherit torch, av, numpy etc. from system Python.
-    # This avoids duplicating ~8GB of PyTorch and saves disk space on RunPod.
-    python -m venv --system-site-packages venv
-
-    # Upgrade pip
-    echo "    Upgrading pip..."
-    venv/bin/pip install --no-warn-script-location -q --upgrade pip
-
-    # Install web framework (not in system Python)
-    echo "    Installing uvicorn + fastapi..."
-    venv/bin/pip install --no-warn-script-location -q uvicorn fastapi python-multipart pydantic
-
-    # Install OpenVoice with --no-deps to avoid rebuilding av/torch from source.
-    # System Python already has: torch, av, numpy, scipy, soundfile, torchaudio
-    # We only need to install OpenVoice code + its few unique deps (librosa, wavmark)
-    echo "    Installing OpenVoice (no-deps)..."
-    venv/bin/pip install --no-warn-script-location -q --no-deps git+https://github.com/myshell-ai/OpenVoice.git
-
-    # Install OpenVoice-specific deps not in system Python
-    echo "    Installing OpenVoice deps (librosa, wavmark, inflect, unidecode)..."
-    venv/bin/pip install --no-warn-script-location -q librosa wavmark inflect unidecode
-
-    # Final verification
-    if venv/bin/python -c "import uvicorn; import torch; import openvoice; print('OpenVoice venv OK')" 2>/dev/null; then
-        echo "  OpenVoice venv created successfully"
-    else
-        echo "  ERROR: OpenVoice venv creation failed!"
-        echo "  Trying to diagnose..."
-        venv/bin/python -c "import torch; print(f'  torch: {torch.__version__}')" 2>&1 || echo "  torch: MISSING"
-        venv/bin/python -c "import uvicorn; print('  uvicorn: OK')" 2>&1 || echo "  uvicorn: MISSING"
-        venv/bin/python -c "import openvoice; print('  openvoice: OK')" 2>&1 || echo "  openvoice: MISSING"
-    fi
-fi
 
 # Exit early if only installing dependencies
 if [ "$DEPS_ONLY" = true ]; then
@@ -262,10 +212,6 @@ echo "  Starting WhisperX on port 8002..."
 cd /workspace/dubber/whisperx-service
 nohup python -m uvicorn app:app --host 0.0.0.0 --port 8002 > /tmp/whisperx.log 2>&1 &
 
-# Start OpenVoice on port 8005 (isolated venv)
-echo "  Starting OpenVoice on port 8005..."
-cd /workspace/dubber/openvoice-service
-nohup venv/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8005 > /tmp/openvoice.log 2>&1 &
 
 echo ""
 echo "Waiting for services to load models..."
@@ -303,12 +249,6 @@ else
     echo "FAILED (check: tail /tmp/whisperx.log)"
 fi
 
-echo -n "  OpenVoice (8005): "
-if check_health "OpenVoice" 8005 "import sys,json; d=json.load(sys.stdin); assert d.get('status')=='healthy'"; then
-    echo "OK"
-else
-    echo "FAILED (check: tail /tmp/openvoice.log)"
-fi
 
 echo ""
 nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader 2>/dev/null || echo "nvidia-smi not available"
@@ -317,7 +257,7 @@ echo ""
 echo "=== READY ==="
 echo "Logs:"
 echo "  tail -f /tmp/demucs.log"
+echo "  tail -f /tmp/xtts.log"
 echo "  tail -f /tmp/whisperx.log"
-echo "  tail -f /tmp/openvoice.log"
 echo ""
 echo "All logs: tail -f /tmp/*.log"
