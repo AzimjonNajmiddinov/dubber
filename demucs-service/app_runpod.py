@@ -3,6 +3,7 @@ Demucs GPU service for RunPod.
 Accepts audio file uploads, runs GPU-accelerated stem separation, returns stems.
 """
 import os
+import sys
 import shutil
 import subprocess
 import tempfile
@@ -126,7 +127,7 @@ async def separate(
 
         # Run demucs with GPU
         cmd = [
-            "python", "-m", "demucs.separate",
+            sys.executable, "-m", "demucs.separate",
             "-n", model,
             f"--two-stems={two_stems}",
             "-o", str(output_dir),
