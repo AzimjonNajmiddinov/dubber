@@ -120,7 +120,7 @@
             const videoUrl = document.getElementById('video-url').value.trim();
             if (!videoUrl) { alert('Enter video URL'); document.getElementById('start-btn').disabled = false; return; }
 
-            const resp = await fetch('/api/premium-dub/start', {
+            const resp = await fetch('{{ route('admin.api.premium-dub.start') }}', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -178,7 +178,7 @@
                 document.getElementById('start-btn').disabled = false;
                 setStep('s-downloading', 'error');
             });
-            xhr.open('POST', '/api/premium-dub/start-upload');
+            xhr.open('POST', '{{ route('admin.api.premium-dub.start-upload') }}');
             xhr.send(formData);
         }
 
@@ -209,7 +209,7 @@
         }
 
         async function poll() {
-            const resp = await fetch(`/api/premium-dub/${dubId}/status`, { headers: { 'Accept': 'application/json' } });
+            const resp = await fetch(`/admin/api/premium-dub/${dubId}/status`, { headers: { 'Accept': 'application/json' } });
             const data = await resp.json();
 
             document.getElementById('progress-text').textContent = data.progress || '';
@@ -235,7 +235,7 @@
             if (data.status === 'complete') {
                 clearInterval(pollInterval);
                 setStep('s-complete', 'done');
-                document.getElementById('download-btn').href = `/api/premium-dub/${dubId}/download`;
+                document.getElementById('download-btn').href = `/admin/api/premium-dub/${dubId}/download`;
                 document.getElementById('download-btn').style.display = 'block';
             } else if (data.status === 'error') {
                 clearInterval(pollInterval);
