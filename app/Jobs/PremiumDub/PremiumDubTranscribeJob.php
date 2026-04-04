@@ -38,6 +38,9 @@ class PremiumDubTranscribeJob implements ShouldQueue
         $serviceUrl = rtrim(config('services.whisperx.url'), '/');
 
         try {
+            // Ensure gender/emotion models are loaded (lazy by default)
+            Http::timeout(60)->get("{$serviceUrl}/ready");
+
             $session = $this->getSession();
             $speakers = $session['speakers'] ?? null;
 
