@@ -61,6 +61,7 @@ Route::prefix('instant-dub')->group(function () {
 // Premium dub API (full pipeline: Demucs + WhisperX + ElevenLabs)
 Route::prefix('premium-dub')->group(function () {
     Route::post('/start', [PremiumDubController::class, 'start'])->name('api.premium-dub.start');
+    Route::post('/start-upload', [PremiumDubController::class, 'startUpload'])->name('api.premium-dub.start-upload');
     Route::get('/{dubId}/status', [PremiumDubController::class, 'status'])->name('api.premium-dub.status');
     Route::get('/{dubId}/download', [PremiumDubController::class, 'download'])->name('api.premium-dub.download');
 });

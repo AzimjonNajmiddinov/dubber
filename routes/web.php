@@ -48,6 +48,9 @@ Route::get('/dub/{video}', [OnlineDubController::class, 'progress'])->name('dub.
 // Instant dub (SRT → TTS over video)
 Route::get('/instant-dub', fn() => view('instant-dub'))->name('instant-dub');
 
+// Premium dub (Demucs + WhisperX + XTTS)
+Route::get('/premium-dub', fn() => view('premium-dub'))->name('premium-dub');
+
 // Admin panel
 Route::get('/admin/login', [AdminController::class, 'loginForm'])->name('admin.login');
 Route::post('/admin/login', [AdminController::class, 'login'])->name('admin.login.post');
