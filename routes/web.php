@@ -3,6 +3,7 @@
 use App\Http\Controllers\AdminController;
 use App\Http\Controllers\AdminDubController;
 use App\Http\Controllers\AdminUserController;
+use App\Http\Controllers\AdminVoicePoolController;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\VideoController;
 use App\Http\Controllers\StreamDubController;
@@ -69,5 +70,9 @@ Route::middleware('admin.auth')->prefix('admin')->name('admin.')->group(function
     Route::get('/users', [AdminUserController::class, 'index'])->name('users.index');
     Route::post('/users', [AdminUserController::class, 'store'])->name('users.store');
     Route::delete('/users/{user}', [AdminUserController::class, 'destroy'])->name('users.destroy');
+
+    Route::get('/voice-pool', [AdminVoicePoolController::class, 'index'])->name('voice-pool.index');
+    Route::post('/voice-pool', [AdminVoicePoolController::class, 'add'])->name('voice-pool.add');
+    Route::delete('/voice-pool/{gender}/{name}', [AdminVoicePoolController::class, 'delete'])->name('voice-pool.delete');
 });
 
