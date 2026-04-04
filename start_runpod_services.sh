@@ -25,6 +25,7 @@ echo "=== Starting RunPod GPU Services ==="
 # Kill any existing services
 pkill -f "uvicorn.*8000" 2>/dev/null || true
 pkill -f "uvicorn.*8002" 2>/dev/null || true
+pkill -f "uvicorn.*8003" 2>/dev/null || true
 pkill -f "uvicorn.*8005" 2>/dev/null || true
 sleep 2
 
@@ -254,7 +255,7 @@ else
     echo "    WARNING: Fine-tuned model not found, using base model"
 fi
 cd /workspace/dubber/xtts-service
-nohup venv/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8001 > /tmp/xtts.log 2>&1 &
+nohup venv/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8003 > /tmp/xtts.log 2>&1 &
 
 # Start WhisperX on port 8002
 echo "  Starting WhisperX on port 8002..."
@@ -288,9 +289,9 @@ else
     echo "FAILED (check: tail /tmp/demucs.log)"
 fi
 
-echo -n "  XTTS    (8001):   "
-if check_health "XTTS" 8001 "import sys,json; d=json.load(sys.stdin); assert d.get('status')=='healthy'"; then
-    curl -s http://localhost:8001/health | python -c "import sys,json; d=json.load(sys.stdin); print(f'OK - CUDA: {d.get(\"cuda_available\")}')" 2>/dev/null
+echo -n "  XTTS    (8003):   "
+if check_health "XTTS" 8003 "import sys,json; d=json.load(sys.stdin); assert d.get('status')=='healthy'"; then
+    curl -s http://localhost:8003/health | python -c "import sys,json; d=json.load(sys.stdin); print(f'OK - CUDA: {d.get(\"cuda_available\")}')" 2>/dev/null
 else
     echo "FAILED (check: tail /tmp/xtts.log)"
 fi
