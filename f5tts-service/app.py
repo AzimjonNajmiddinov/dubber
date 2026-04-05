@@ -12,9 +12,11 @@ import logging
 import hashlib
 from pathlib import Path
 
+import math
+import numpy as np
 import torch
-import torchaudio
 import soundfile as sf
+from scipy.signal import resample_poly
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -97,19 +99,19 @@ async def clone_voice(
         voice_dir.mkdir(parents=True, exist_ok=True)
 
         audio_bytes = await audio.read()
-        audio_tensor, sr = torchaudio.load(io.BytesIO(audio_bytes))
+        audio_np, sr = sf.read(io.BytesIO(audio_bytes), always_2d=False)
+
+        # Mono
+        if audio_np.ndim > 1:
+            audio_np = audio_np.mean(axis=1)
 
         # Resample to 24000Hz (F5-TTS native)
         if sr != 24000:
-            resampler = torchaudio.transforms.Resample(sr, 24000)
-            audio_tensor = resampler(audio_tensor)
-
-        # Mono
-        if audio_tensor.shape[0] > 1:
-            audio_tensor = torch.mean(audio_tensor, dim=0, keepdim=True)
+            gcd = math.gcd(sr, 24000)
+            audio_np = resample_poly(audio_np, 24000 // gcd, sr // gcd).astype(np.float32)
 
         sample_path = voice_dir / "sample.wav"
-        torchaudio.save(str(sample_path), audio_tensor, 24000)
+        sf.write(str(sample_path), audio_np, 24000)
 
         import json
         from datetime import datetime
