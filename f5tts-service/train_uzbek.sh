@@ -236,7 +236,6 @@ $VENV/bin/accelerate launch \
     --save_per_updates 500 \
     --keep_last_n_checkpoints 3 \
     --last_per_updates 100 \
-    --logger None \
     2>&1 | tee /tmp/f5tts_train.log
 
 echo ""
