@@ -231,9 +231,8 @@ def normalize_uzbek_for_xtts(text: str) -> str:
     text = re.sub(r'[Ss]h', lambda m: 'Ş' if m.group()[0].isupper() else 'ş', text)
     # ch → ç, Ch → Ç
     text = re.sub(r'[Cc]h', lambda m: 'Ç' if m.group()[0].isupper() else 'ç', text)
-
-    # Remove any remaining stray apostrophes that aren't part of words
-    # (but keep contractions like don't if any)
+    # x → h (Uzbek /x/ velar fricative — Turkish has no x, phonemizer says "iks" otherwise)
+    text = re.sub(r'[Xx]', lambda m: 'H' if m.group().isupper() else 'h', text)
 
     return text
 
@@ -562,6 +561,8 @@ async def synthesize(request: SynthesizeRequest):
         language = lang_map.get(request.language, "en")
 
         text = request.text
+        if request.language == "uz":
+            text = normalize_uzbek_for_xtts(text)
 
         # Split into chunks
         chunks = split_text_into_chunks(text)
