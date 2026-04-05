@@ -1,11 +1,14 @@
 #!/bin/bash
-# Fine-tune F5-TTS on Uzbek (Google FLEURS uz_uz dataset)
-# Run from: /workspace/dubber/f5tts-service
+# Fine-tune F5-TTS on Uzbek (Google FLEURS uz_uz)
 #
 # Usage:
-#   ./train_uzbek.sh              # Download data + prepare + launch training UI
-#   ./train_uzbek.sh --skip-download  # Skip download (wavs already exist)
-#   ./train_uzbek.sh --train-only     # Skip data prep, go straight to training UI
+#   ./train_uzbek.sh                  # Full pipeline: download → prepare → train
+#   ./train_uzbek.sh --skip-download  # Skip FLEURS download (wavs already exist)
+#   ./train_uzbek.sh --skip-prepare   # Skip data prep (already prepared)
+#
+# Output:
+#   Checkpoints → /workspace/f5tts-uz-finetuned/
+#   Logs        → /tmp/f5tts_train.log
 
 set -o pipefail
 
@@ -13,24 +16,31 @@ VENV=/workspace/tts-venv
 WAVS_DIR=/workspace/uz_tts/wavs
 TRAIN_CSV=/workspace/xtts-uz-finetuned/train.csv
 EVAL_CSV=/workspace/xtts-uz-finetuned/eval.csv
-F5_DATA=/workspace/f5tts-uz-data
+DATASET_DIR=/workspace/f5tts-uz-data
+CKPT_DIR=/workspace/f5tts-uz-finetuned
+PREPARE_SCRIPT=$VENV/lib/python3.10/site-packages/f5_tts/train/datasets/prepare_csv_wavs.py
+FINETUNE_SCRIPT=$VENV/lib/python3.10/site-packages/f5_tts/train/finetune_cli.py
 
 SKIP_DOWNLOAD=false
-TRAIN_ONLY=false
+SKIP_PREPARE=false
 for arg in "$@"; do
     case $arg in
         --skip-download) SKIP_DOWNLOAD=true ;;
-        --train-only) SKIP_DOWNLOAD=true; TRAIN_ONLY=true ;;
+        --skip-prepare)  SKIP_DOWNLOAD=true; SKIP_PREPARE=true ;;
     esac
 done
 
 echo "=== F5-TTS Uzbek Fine-tuning ==="
+echo ""
 
 # ─── Step 1: Download FLEURS uz_uz ───────────────────────────────────────────
 if [ "$SKIP_DOWNLOAD" = false ]; then
-    echo ""
-    echo "[1/3] Downloading Google FLEURS uz_uz dataset..."
+    echo "[1/3] Downloading FLEURS uz_uz..."
     mkdir -p "$WAVS_DIR"
+
+    # Downgrade datasets temporarily — newer versions dropped script support
+    echo "  Pinning datasets==2.14.7 for FLEURS download..."
+    $VENV/bin/pip install -q "datasets==2.14.7"
 
     $VENV/bin/python <<'PYEOF'
 from pathlib import Path
@@ -40,19 +50,19 @@ import numpy as np
 wavs_dir = Path("/workspace/uz_tts/wavs")
 wavs_dir.mkdir(parents=True, exist_ok=True)
 
-print("  Loading FLEURS uz_uz from HuggingFace (all splits)...")
 from datasets import load_dataset
 
+print("  Downloading train+validation+test splits...")
 ds = load_dataset("google/fleurs", "uz_uz",
                   split="train+validation+test",
                   trust_remote_code=True)
 
-print(f"  Total samples: {len(ds)}")
-saved, skipped = 0, 0
+print(f"  Total: {len(ds)} samples")
+saved = skipped = 0
 for item in ds:
-    audio    = item["audio"]
-    text     = item.get("transcription") or item.get("raw_transcription", "")
-    if not text.strip():
+    audio = item["audio"]
+    text  = (item.get("transcription") or item.get("raw_transcription", "")).strip()
+    if not text:
         skipped += 1
         continue
     stem     = Path(audio.get("path", f"fleurs_{saved:05d}")).stem
@@ -62,98 +72,113 @@ for item in ds:
         sf.write(str(out_path), arr, audio["sampling_rate"])
     saved += 1
     if saved % 200 == 0:
-        print(f"  Saved {saved}/{len(ds) - skipped}")
+        print(f"  {saved}/{len(ds) - skipped} saved...")
 
-print(f"  Done — {saved} WAV files saved, {skipped} skipped (no text)")
+print(f"  Done — {saved} WAVs, {skipped} skipped")
 PYEOF
 
+    echo "  Restoring latest datasets..."
+    $VENV/bin/pip install -q "datasets>=2.20"
 else
     echo "[1/3] Skipping download"
 fi
 
-# ─── Step 2: Prepare F5-TTS dataset ──────────────────────────────────────────
-if [ "$TRAIN_ONLY" = false ]; then
+WAV_COUNT=$(ls "$WAVS_DIR"/*.wav 2>/dev/null | wc -l)
+echo "  WAVs available: $WAV_COUNT"
+if [ "$WAV_COUNT" -lt 100 ]; then
+    echo "ERROR: Too few WAV files in $WAVS_DIR. Check download."
+    exit 1
+fi
+
+# ─── Step 2: Prepare dataset ──────────────────────────────────────────────────
+if [ "$SKIP_PREPARE" = false ]; then
     echo ""
     echo "[2/3] Preparing F5-TTS dataset..."
 
+    # Build metadata CSV with absolute paths from train.csv
+    META_CSV=/tmp/uzbek_f5tts_meta.csv
     $VENV/bin/python <<PYEOF
-import csv, shutil
+import csv
 from pathlib import Path
 
 train_csv = Path("$TRAIN_CSV")
 eval_csv  = Path("$EVAL_CSV")
-f5_data   = Path("$F5_DATA")
+wavs_dir  = Path("$WAVS_DIR")
+out_csv   = Path("$META_CSV")
 
-# F5-TTS expects: dataset_dir/audio/*.wav + dataset_dir/metadata.csv
-# metadata.csv format: audio_file|text  (filename only, not full path)
-audio_out = f5_data / "audio"
-audio_out.mkdir(parents=True, exist_ok=True)
-
-def process(csv_path, split):
-    rows, missing = [], 0
+rows, missing = [], 0
+for csv_path in [train_csv, eval_csv]:
     with open(csv_path) as f:
         reader = csv.DictReader(f, delimiter="|")
         for row in reader:
-            src = Path(row["audio_file"])
-            if not src.exists():
+            src  = Path(row["audio_file"])
+            name = src.name
+            wav  = wavs_dir / name
+            if not wav.exists():
                 missing += 1
                 continue
-            dst = audio_out / src.name
-            if not dst.exists():
-                shutil.copy2(src, dst)
-            rows.append((src.name, row["text"].strip()))
-    print(f"  {split}: {len(rows)} samples ({missing} missing wavs skipped)")
-    return rows
+            rows.append((str(wav.absolute()), row["text"].strip()))
 
-train_rows = process(train_csv, "train")
-eval_rows  = process(eval_csv,  "eval")
-
-# Write combined metadata.csv (F5-TTS uses one file, splits by ratio internally)
-with open(f5_data / "metadata.csv", "w") as f:
+with open(out_csv, "w", encoding="utf-8") as f:
     f.write("audio_file|text\n")
-    for name, text in train_rows + eval_rows:
-        f.write(f"{name}|{text}\n")
+    for path, text in rows:
+        f.write(f"{path}|{text}\n")
 
-# Also write separate files for reference
-with open(f5_data / "metadata_train.csv", "w") as f:
-    f.write("audio_file|text\n")
-    for name, text in train_rows:
-        f.write(f"{name}|{text}\n")
-
-with open(f5_data / "metadata_eval.csv", "w") as f:
-    f.write("audio_file|text\n")
-    for name, text in eval_rows:
-        f.write(f"{name}|{text}\n")
-
-total = len(train_rows) + len(eval_rows)
-print(f"  Total: {total} samples → {f5_data}")
+print(f"  Metadata: {len(rows)} samples, {missing} skipped (missing wav)")
 PYEOF
 
+    SAMPLE_COUNT=$(wc -l < "$META_CSV")
+    echo "  Samples in metadata: $((SAMPLE_COUNT - 1))"
+
+    mkdir -p "$DATASET_DIR"
+    echo "  Running prepare_csv_wavs.py..."
+    $VENV/bin/python "$PREPARE_SCRIPT" "$META_CSV" "$DATASET_DIR"
+
+    echo "  Dataset prepared at: $DATASET_DIR"
+    ls -lh "$DATASET_DIR"
 else
-    echo "[2/3] Skipping data prep (--train-only)"
+    echo "[2/3] Skipping data preparation"
 fi
 
-# ─── Step 3: Launch Gradio fine-tuning UI ────────────────────────────────────
+if [ ! -f "$DATASET_DIR/raw.arrow" ]; then
+    echo "ERROR: Dataset not prepared. Missing $DATASET_DIR/raw.arrow"
+    exit 1
+fi
+
+# ─── Step 3: Fine-tune ───────────────────────────────────────────────────────
 echo ""
-echo "[3/3] Launching F5-TTS fine-tuning UI on port 7860..."
-echo ""
-echo "  Access at: https://gf7d4njyfe95a4-7860.proxy.runpod.net"
-echo ""
-echo "  In the UI:"
-echo "    1. Dataset dir: $F5_DATA"
-echo "    2. Epochs: 15"
-echo "    3. Batch size: 4"
-echo "    4. Learning rate: 1e-5"
-echo "    5. Click 'Start Training'"
-echo ""
-echo "  Checkpoint will be saved to: /root/.cache/... (shown in UI)"
-echo "  Training log: tail -f /tmp/f5tts_train.log"
+echo "[3/3] Starting F5-TTS fine-tuning..."
+echo "  Dataset:      $DATASET_DIR"
+echo "  Checkpoints:  $CKPT_DIR"
+echo "  Log:          /tmp/f5tts_train.log"
 echo ""
 
-nohup $VENV/bin/python -m f5_tts.train.finetune_gradio \
-    --port 7860 \
-    --share false \
-    > /tmp/f5tts_train.log 2>&1 &
+mkdir -p "$CKPT_DIR"
+cd "$CKPT_DIR"
 
-echo "  Gradio UI PID: $!"
-echo "  Starting up... wait 10s then open the URL above."
+# accelerate config — single GPU, no distributed training
+$VENV/bin/accelerate config default --config-file /tmp/accelerate_default.yaml 2>/dev/null || true
+
+$VENV/bin/accelerate launch \
+    --config_file /tmp/accelerate_default.yaml \
+    "$FINETUNE_SCRIPT" \
+    --exp_name F5TTS_v1_Base \
+    --dataset_name "$DATASET_DIR" \
+    --tokenizer char \
+    --finetune \
+    --epochs 15 \
+    --learning_rate 1e-5 \
+    --batch_size_per_gpu 1600 \
+    --batch_size_type frame \
+    --max_samples 32 \
+    --grad_accumulation_steps 4 \
+    --num_warmup_updates 50 \
+    --save_per_updates 500 \
+    --keep_last_n_checkpoints 3 \
+    --last_per_updates 100 \
+    --logger None \
+    2>&1 | tee /tmp/f5tts_train.log
+
+echo ""
+echo "=== Training complete ==="
+echo "Checkpoints: $CKPT_DIR/ckpts/F5TTS_v1_Base/"
