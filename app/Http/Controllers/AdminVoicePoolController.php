@@ -172,7 +172,7 @@ class AdminVoicePoolController extends Controller
         $cacheKey = 'voice-pool-id:' . md5($file);
         $voiceId  = Redis::get($cacheKey);
 
-        if (!$voiceId) {
+        $cloneIfNeeded = function () use ($xttsUrl, $file, $name, $request, $cacheKey, &$voiceId) {
             $cloneResp = Http::timeout(60)
                 ->attach('audio', file_get_contents($file), $name . '.wav')
                 ->post("{$xttsUrl}/clone", [
@@ -186,6 +186,11 @@ class AdminVoicePoolController extends Controller
 
             $voiceId = $cloneResp->json('voice_id');
             Redis::setex($cacheKey, 7 * 86400, $voiceId);
+            return null;
+        };
+
+        if (!$voiceId) {
+            if ($err = $cloneIfNeeded()) return $err;
         }
 
         $synthResp = Http::timeout(120)->post("{$xttsUrl}/synthesize", [
@@ -194,6 +199,19 @@ class AdminVoicePoolController extends Controller
             'language' => $request->input('language'),
             'speed'    => $speed,
         ]);
+
+        // Voice lost after pod restart — re-clone and retry once
+        if ($synthResp->status() === 404 && str_contains($synthResp->body(), 'not found')) {
+            Redis::del($cacheKey);
+            if ($err = $cloneIfNeeded()) return $err;
+
+            $synthResp = Http::timeout(120)->post("{$xttsUrl}/synthesize", [
+                'text'     => $request->input('text'),
+                'voice_id' => $voiceId,
+                'language' => $request->input('language'),
+                'speed'    => $speed,
+            ]);
+        }
 
         if (!$synthResp->successful()) {
             return response()->json(['error' => 'Synthesis failed: ' . $synthResp->body()], 500);

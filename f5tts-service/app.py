@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
-VOICES_PATH = Path("/tmp/f5tts-voices")
+VOICES_PATH = Path("/workspace/f5tts-voices")
 CACHE_PATH  = Path("/tmp/f5tts-cache")
 VOICES_PATH.mkdir(parents=True, exist_ok=True)
 CACHE_PATH.mkdir(parents=True, exist_ok=True)
