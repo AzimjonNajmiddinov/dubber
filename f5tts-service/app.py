@@ -25,6 +25,16 @@ from typing import Optional
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Ensure ffmpeg is on PATH — use imageio-ffmpeg bundled binary if system ffmpeg missing
+try:
+    import imageio_ffmpeg
+    import os
+    ffmpeg_dir = os.path.dirname(imageio_ffmpeg.get_ffmpeg_exe())
+    os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
+    logger.info(f"Using ffmpeg from imageio-ffmpeg: {ffmpeg_dir}")
+except ImportError:
+    pass  # system ffmpeg will be used
+
 app = FastAPI()
 
 VOICES_PATH = Path("/workspace/f5tts-voices")
