@@ -234,7 +234,7 @@ $VENV/bin/accelerate launch \
     --exp_name F5TTS_v1_Base \
     --dataset_name "$DATASET_NAME" \
     --tokenizer char \
-    --finetune \
+    --pretrain \
     --epochs 15 \
     --learning_rate 1e-5 \
     --batch_size_per_gpu 1600 \
