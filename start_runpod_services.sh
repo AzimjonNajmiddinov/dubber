@@ -57,7 +57,7 @@ if [ "$SKIP_DEPS" = false ]; then
     rm -rf /usr/local/lib/python3.11/dist-packages/{numpy,pandas,scipy}* 2>/dev/null || true
     rm -rf /usr/lib/python3/dist-packages/{numpy,pandas,scipy}* 2>/dev/null || true
     rm -rf /usr/lib/python3/dist-packages/blinker* 2>/dev/null || true
-    pip install $PIP_FLAGS numpy==2.3.0 "pandas>=2.2.3,<3" "scipy>=1.12"
+    pip install $PIP_FLAGS "numpy>=2.0.0,<2.3.0" "pandas>=2.2.3,<3" "scipy>=1.12"
 
     # Step 3: PyTorch 2.8.0 with CUDA 12.6 (pinned to match whisperx ~=2.8.0)
     echo "  [3/5] Installing PyTorch 2.8.0 with CUDA 12.6..."
