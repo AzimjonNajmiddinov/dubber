@@ -94,14 +94,17 @@ def load_xtts_model():
         # Tokenizer monkey-patch: map "uz" → "tr" at tokenizer level
         # so Turkish BPE is used for Uzbek Latin script
         _orig_preprocess = _xtts_tok.VoiceBpeTokenizer.preprocess_text
-        def _uz_preprocess(self, txt, lang):
-            return _orig_preprocess(self, txt, "tr" if lang == "uz" else lang)
-        _xtts_tok.VoiceBpeTokenizer.preprocess_text = _uz_preprocess
+        # Only apply uz→tr tokenizer fallback for base model.
+        # Fine-tuned model was trained with lang="uz" directly — patching to "tr" breaks it.
+        if not (Path(XTTS_FINETUNED_DIR).exists() if XTTS_FINETUNED_DIR else False):
+            def _uz_preprocess(self, txt, lang):
+                return _orig_preprocess(self, txt, "tr" if lang == "uz" else lang)
+            _xtts_tok.VoiceBpeTokenizer.preprocess_text = _uz_preprocess
 
-        _orig_encode = _xtts_tok.VoiceBpeTokenizer.encode
-        def _uz_encode(self, txt, lang):
-            return _orig_encode(self, txt, "tr" if lang == "uz" else lang)
-        _xtts_tok.VoiceBpeTokenizer.encode = _uz_encode
+            _orig_encode = _xtts_tok.VoiceBpeTokenizer.encode
+            def _uz_encode(self, txt, lang):
+                return _orig_encode(self, txt, "tr" if lang == "uz" else lang)
+            _xtts_tok.VoiceBpeTokenizer.encode = _uz_encode
 
         finetuned_dir = Path(XTTS_FINETUNED_DIR) if XTTS_FINETUNED_DIR else None
 
@@ -231,8 +234,6 @@ def normalize_uzbek_for_xtts(text: str) -> str:
     text = re.sub(r'[Ss]h', lambda m: 'Ş' if m.group()[0].isupper() else 'ş', text)
     # ch → ç, Ch → Ç
     text = re.sub(r'[Cc]h', lambda m: 'Ç' if m.group()[0].isupper() else 'ç', text)
-    # x → h (Uzbek /x/ velar fricative — Turkish has no x, phonemizer says "iks" otherwise)
-    text = re.sub(r'[Xx]', lambda m: 'H' if m.group().isupper() else 'h', text)
 
     return text
 
@@ -553,7 +554,7 @@ async def synthesize(request: SynthesizeRequest):
         # "uz" stays "uz" — tokenizer monkey-patch maps it to "tr" internally.
         # For base model, fall back to "tr" since "uz" may not be in its config.
         lang_map = {
-            "uz": "uz" if _using_finetuned else "tr",
+            "uz": "uz",  # fine-tuned model trained with lang="uz" directly
             "ru": "ru", "en": "en", "tr": "tr",
             "ar": "ar", "zh": "zh-cn", "ja": "ja", "ko": "ko",
             "es": "es", "fr": "fr", "de": "de", "it": "it",
@@ -561,8 +562,6 @@ async def synthesize(request: SynthesizeRequest):
         language = lang_map.get(request.language, "en")
 
         text = request.text
-        if request.language == "uz":
-            text = normalize_uzbek_for_xtts(text)
 
         # Split into chunks
         chunks = split_text_into_chunks(text)
