@@ -14,9 +14,11 @@ set -o pipefail
 
 VENV=/workspace/tts-venv
 WAVS_DIR=/workspace/uz_tts/wavs
-TRAIN_CSV=/workspace/xtts-uz-finetuned/train.csv
-EVAL_CSV=/workspace/xtts-uz-finetuned/eval.csv
-DATASET_DIR=/workspace/f5tts-uz-data
+DATASET_NAME=f5tts-uz-data          # short name passed to --dataset_name
+DATASET_DIR=/workspace/f5tts-uz-data_char  # actual files on disk (prepare outputs here)
+# finetune_cli constructs path as {f5_tts_pkg}/../../data/{DATASET_NAME}_char
+# so we symlink: {venv}/site-packages/data/f5tts-uz-data_char → $DATASET_DIR
+F5_DATA_DIR=$VENV/lib/python3.10/site-packages/data
 CKPT_DIR=/workspace/f5tts-uz-finetuned
 PREPARE_SCRIPT=$VENV/lib/python3.10/site-packages/f5_tts/train/datasets/prepare_csv_wavs.py
 FINETUNE_SCRIPT=$VENV/lib/python3.10/site-packages/f5_tts/train/finetune_cli.py
@@ -190,27 +192,31 @@ PYEOF
     SAMPLE_COUNT=$(wc -l < "$META_CSV")
     echo "  Samples in metadata: $((SAMPLE_COUNT - 1))"
 
-    mkdir -p "${DATASET_DIR}_char"
+    mkdir -p "$DATASET_DIR"
     echo "  Running prepare_csv_wavs.py (--pretrain builds Uzbek char vocab from scratch)..."
-    $VENV/bin/python "$PREPARE_SCRIPT" "$META_CSV" "${DATASET_DIR}_char" --pretrain
+    $VENV/bin/python "$PREPARE_SCRIPT" "$META_CSV" "$DATASET_DIR" --pretrain
 
-    echo "  Dataset prepared at: ${DATASET_DIR}_char"
-    ls -lh "${DATASET_DIR}_char"
+    echo "  Dataset prepared at: $DATASET_DIR"
+    ls -lh "$DATASET_DIR"
 else
     echo "[2/3] Skipping data preparation"
 fi
 
-# finetune_cli.py appends _char to dataset_name for the tokenizer path,
-# and prepare_csv_wavs.py outputs to DATASET_DIR directly — so raw.arrow is in DATASET_DIR_char
-if [ ! -f "${DATASET_DIR}_char/raw.arrow" ]; then
-    echo "ERROR: Dataset not prepared. Missing ${DATASET_DIR}_char/raw.arrow"
+if [ ! -f "$DATASET_DIR/raw.arrow" ]; then
+    echo "ERROR: Dataset not prepared. Missing $DATASET_DIR/raw.arrow"
     exit 1
 fi
+
+# Create symlink so finetune_cli can find data via its relative path resolution:
+#   {venv}/site-packages/data/{DATASET_NAME}_char → $DATASET_DIR
+mkdir -p "$F5_DATA_DIR"
+ln -sfn "$DATASET_DIR" "$F5_DATA_DIR/${DATASET_NAME}_char"
+echo "  Symlink: $F5_DATA_DIR/${DATASET_NAME}_char → $DATASET_DIR"
 
 # ─── Step 3: Fine-tune ───────────────────────────────────────────────────────
 echo ""
 echo "[3/3] Starting F5-TTS fine-tuning..."
-echo "  Dataset:      $DATASET_DIR"
+echo "  Dataset:      $DATASET_NAME (files at $DATASET_DIR)"
 echo "  Checkpoints:  $CKPT_DIR"
 echo "  Log:          /tmp/f5tts_train.log"
 echo ""
@@ -225,7 +231,7 @@ $VENV/bin/accelerate launch \
     --config_file /tmp/accelerate_default.yaml \
     "$FINETUNE_SCRIPT" \
     --exp_name F5TTS_v1_Base \
-    --dataset_name "$DATASET_DIR" \
+    --dataset_name "$DATASET_NAME" \
     --tokenizer char \
     --finetune \
     --epochs 15 \
