@@ -2,7 +2,7 @@
 
 namespace App\Jobs\PremiumDub;
 
-use App\Services\Xtts\XttsClient;
+use App\Services\F5Tts\F5TtsClient;
 use App\Services\TextNormalizer;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -51,7 +51,7 @@ class PremiumDubCloneAndSynthesizeJob implements ShouldQueue
             return;
         }
 
-        $client = new XttsClient();
+        $client = new F5TtsClient();
         $workDir = storage_path("app/premium-dub/{$this->dubId}");
         $ttsDir = "{$workDir}/tts";
         @mkdir($ttsDir, 0755, true);
@@ -134,7 +134,7 @@ class PremiumDubCloneAndSynthesizeJob implements ShouldQueue
         }
     }
 
-    private function cloneVoices(XttsClient $client, array $segments, ?string $vocalsPath, string $workDir, string $language = 'uz'): array
+    private function cloneVoices(F5TtsClient $client, array $segments, ?string $vocalsPath, string $workDir, string $language = 'uz'): array
     {
         $speakers = array_unique(array_map(fn($s) => $s['speaker'] ?? 'SPEAKER_0', $segments));
         $speakersInfo = $this->getSession()['speakers_info'] ?? [];
@@ -190,7 +190,7 @@ class PremiumDubCloneAndSynthesizeJob implements ShouldQueue
      * Uses gender info from WhisperX if available, otherwise defaults to 'male'.
      * Caches voice_ids in Redis so the same file isn't re-cloned on next dub.
      */
-    private function assignPoolVoices(XttsClient $client, array $speakers, array $speakersInfo, array $pool): array
+    private function assignPoolVoices(F5TtsClient $client, array $speakers, array $speakersInfo, array $pool): array
     {
         $counters = ['male' => 0, 'female' => 0, 'child' => 0];
         $cloned = [];
@@ -370,7 +370,7 @@ class PremiumDubCloneAndSynthesizeJob implements ShouldQueue
         // Cleanup cloned voices
         $session = $this->getSession();
         $clonedVoices = $session['cloned_voices'] ?? [];
-        $client = new XttsClient();
+        $client = new F5TtsClient();
         foreach ($clonedVoices as $voiceId) {
             try { $client->deleteVoice($voiceId); } catch (\Throwable) {}
         }

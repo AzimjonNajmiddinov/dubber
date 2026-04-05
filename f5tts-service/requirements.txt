@@ -1,0 +1,7 @@
+f5-tts>=0.3.4
+fastapi
+uvicorn
+python-multipart
+soundfile
+torch
+torchaudio

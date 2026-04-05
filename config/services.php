@@ -68,6 +68,10 @@ return [
         'url' => env('XTTS_SERVICE_URL', 'http://localhost:8001'),
     ],
 
+    'f5tts' => [
+        'url' => env('F5TTS_SERVICE_URL', 'http://localhost:8004'),
+    ],
+
     'elevenlabs' => [
         'api_key' => env('ELEVENLABS_API_KEY', ''),
     ],

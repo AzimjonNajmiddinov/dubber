@@ -26,6 +26,7 @@ echo "=== Starting RunPod GPU Services ==="
 pkill -f "uvicorn.*8000" 2>/dev/null || true
 pkill -f "uvicorn.*8002" 2>/dev/null || true
 pkill -f "uvicorn.*8003" 2>/dev/null || true
+pkill -f "uvicorn.*8004" 2>/dev/null || true
 sleep 2
 
 # Pull latest code
@@ -109,6 +110,40 @@ if [ "$SKIP_DEPS" = false ]; then
     echo ""
 else
     echo "Skipping dependency check (--skip-deps)"
+fi
+
+# ===========================================
+# F5-TTS VENV SETUP (isolated: torch 2.2.0+cu121 + f5-tts)
+# ===========================================
+echo "Checking F5-TTS venv..."
+cd /workspace/dubber/f5tts-service
+
+F5TTS_VENV_OK=false
+if [ -d "venv" ] && venv/bin/python -c "import f5_tts; import uvicorn" 2>/dev/null; then
+    echo "  F5-TTS venv OK"
+    F5TTS_VENV_OK=true
+fi
+
+if [ "$F5TTS_VENV_OK" = false ]; then
+    echo "  Creating F5-TTS venv (downloads torch + f5-tts model ~3GB, takes 5-10 min)..."
+    rm -rf venv
+    python -m venv venv
+
+    venv/bin/pip install -q --upgrade pip
+
+    echo "    Installing torch 2.2.0+cu121..."
+    venv/bin/pip install -q \
+        torch==2.2.0+cu121 torchaudio==2.2.0+cu121 \
+        --index-url https://download.pytorch.org/whl/cu121
+
+    echo "    Installing F5-TTS + deps..."
+    venv/bin/pip install -q f5-tts uvicorn fastapi python-multipart soundfile
+
+    if venv/bin/python -c "import f5_tts; import torch; print(f'F5-TTS venv OK - torch {torch.__version__}')" 2>/dev/null; then
+        echo "  F5-TTS venv created successfully"
+    else
+        echo "  ERROR: F5-TTS venv creation failed! Check manually."
+    fi
 fi
 
 # ===========================================
@@ -208,6 +243,11 @@ fi
 cd /workspace/dubber/xtts-service
 nohup venv/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8003 > /tmp/xtts.log 2>&1 &
 
+# Start F5-TTS on port 8004 (isolated venv)
+echo "  Starting F5-TTS on port 8004..."
+cd /workspace/dubber/f5tts-service
+nohup venv/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8004 > /tmp/f5tts.log 2>&1 &
+
 # Start WhisperX on port 8002
 echo "  Starting WhisperX on port 8002..."
 cd /workspace/dubber/whisperx-service
@@ -243,6 +283,13 @@ else
     echo "FAILED (check: tail /tmp/xtts.log)"
 fi
 
+echo -n "  F5-TTS  (8004):   "
+if check_health "F5-TTS" 8004 "import sys,json; d=json.load(sys.stdin); assert d.get('status')=='healthy'"; then
+    curl -s http://localhost:8004/health | python -c "import sys,json; d=json.load(sys.stdin); print(f'OK - CUDA: {d.get(\"cuda_available\")}')" 2>/dev/null
+else
+    echo "FAILED (check: tail /tmp/f5tts.log)"
+fi
+
 echo -n "  WhisperX (8002):  "
 if check_health "WhisperX" 8002 "import sys,json; d=json.load(sys.stdin); assert d.get('ok')"; then
     echo "OK"
@@ -265,6 +312,7 @@ echo "=== READY ==="
 echo "Logs:"
 echo "  tail -f /tmp/demucs.log"
 echo "  tail -f /tmp/xtts.log"
+echo "  tail -f /tmp/f5tts.log"
 echo "  tail -f /tmp/whisperx.log"
 echo ""
 echo "All logs: tail -f /tmp/*.log"

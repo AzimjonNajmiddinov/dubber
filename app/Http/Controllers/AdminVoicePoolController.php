@@ -167,7 +167,7 @@ class AdminVoicePoolController extends Controller
             return response()->json(['error' => 'Voice file not found'], 404);
         }
 
-        $xttsUrl = rtrim(config('services.xtts.url', env('XTTS_SERVICE_URL')), '/');
+        $xttsUrl = rtrim(config('services.f5tts.url', env('F5TTS_SERVICE_URL')), '/');
 
         $cacheKey = 'voice-pool-id:' . md5($file);
         $voiceId  = Redis::get($cacheKey);
