@@ -140,12 +140,32 @@ async def clone_voice(
         sample_path = voice_dir / "sample.wav"
         sf.write(str(sample_path), audio_np, 24000)
 
+        # Transcribe reference audio via WhisperX (already running on port 8002)
+        # Cached so synthesis never needs to run Whisper itself
+        ref_text = " "  # fallback: skip f5-tts internal transcription
+        try:
+            import httpx
+            with open(sample_path, "rb") as f:
+                resp = httpx.post(
+                    "http://localhost:8002/analyze-upload",
+                    files={"audio": ("sample.wav", f, "audio/wav")},
+                    data={"lite": "1"},
+                    timeout=60,
+                )
+            if resp.status_code == 200:
+                segments = resp.json().get("segments", [])
+                ref_text = " ".join(s.get("text", "") for s in segments).strip() or " "
+                logger.info(f"Reference transcribed via WhisperX: {ref_text!r}")
+        except Exception as e:
+            logger.warning(f"WhisperX transcription failed, using fallback: {e}")
+
         import json
         from datetime import datetime
         meta = {
             "name": name,
             "description": description,
             "language": language,
+            "ref_text": ref_text,
             "created_at": datetime.now().isoformat(),
         }
         (voice_dir / "meta.json").write_text(json.dumps(meta, indent=2))
@@ -174,9 +194,9 @@ async def synthesize(request: SynthesizeRequest):
         # Load cached ref_text to skip re-transcription on every call
         import json as _json
         meta_path = voice_dir / "meta.json"
-        ref_text = ""
+        ref_text = " "  # fallback: space skips f5-tts internal whisper
         if meta_path.exists():
-            ref_text = _json.loads(meta_path.read_text()).get("ref_text", "")
+            ref_text = _json.loads(meta_path.read_text()).get("ref_text", " ") or " "
 
         logger.info(f"Synthesizing {len(request.text)} chars with voice={request.voice_id}, speed={request.speed}")
 
