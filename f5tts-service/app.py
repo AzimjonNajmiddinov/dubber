@@ -25,15 +25,18 @@ from typing import Optional
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Ensure ffmpeg is on PATH — use imageio-ffmpeg bundled binary if system ffmpeg missing
-try:
-    import imageio_ffmpeg
-    import os
-    ffmpeg_dir = os.path.dirname(imageio_ffmpeg.get_ffmpeg_exe())
-    os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
-    logger.info(f"Using ffmpeg from imageio-ffmpeg: {ffmpeg_dir}")
-except ImportError:
-    pass  # system ffmpeg will be used
+# Monkey-patch torchaudio.load to use soundfile — avoids ffmpeg/torchcodec dependency.
+# F5-TTS calls torchaudio.load(ref_file) internally; soundfile handles WAV without ffmpeg.
+import torchaudio as _torchaudio
+_orig_torchaudio_load = _torchaudio.load
+def _soundfile_load(filepath, *args, **kwargs):
+    try:
+        data, sr = sf.read(str(filepath), always_2d=True)
+        return torch.from_numpy(data.T.copy()).float(), sr
+    except Exception:
+        return _orig_torchaudio_load(filepath, *args, **kwargs)
+_torchaudio.load = _soundfile_load
+logger.info("torchaudio.load patched to use soundfile backend (no ffmpeg needed)")
 
 app = FastAPI()
 
@@ -65,6 +68,12 @@ class SynthesizeRequest(BaseModel):
     emotion: str = "neutral"
     speed: float = 1.0
     output_path: Optional[str] = None
+
+
+@app.on_event("startup")
+async def startup_event():
+    import asyncio
+    asyncio.create_task(asyncio.to_thread(load_model))
 
 
 @app.get("/health")
@@ -123,22 +132,12 @@ async def clone_voice(
         sample_path = voice_dir / "sample.wav"
         sf.write(str(sample_path), audio_np, 24000)
 
-        # Pre-transcribe reference audio so synthesize doesn't do it every call
-        ref_text = ""
-        try:
-            model = load_model()
-            ref_text = model.transcribe(str(sample_path))
-            logger.info(f"Reference transcribed: {ref_text!r}")
-        except Exception as e:
-            logger.warning(f"Reference transcription failed (will auto-transcribe at synthesis): {e}")
-
         import json
         from datetime import datetime
         meta = {
             "name": name,
             "description": description,
             "language": language,
-            "ref_text": ref_text,
             "created_at": datetime.now().isoformat(),
         }
         (voice_dir / "meta.json").write_text(json.dumps(meta, indent=2))
