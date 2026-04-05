@@ -246,6 +246,12 @@ fi
 echo -n "  WhisperX (8002):  "
 if check_health "WhisperX" 8002 "import sys,json; d=json.load(sys.stdin); assert d.get('ok')"; then
     echo "OK"
+    echo -n "  WhisperX /ready (preloading gender/emotion models, ~60s): "
+    if curl -s --max-time 120 "http://localhost:8002/ready" | python -c "import sys,json; d=json.load(sys.stdin); assert d.get('status')=='ready'" 2>/dev/null; then
+        echo "OK"
+    else
+        echo "FAILED (check: tail /tmp/whisperx.log)"
+    fi
 else
     echo "FAILED (check: tail /tmp/whisperx.log)"
 fi
