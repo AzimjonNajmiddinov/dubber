@@ -25,18 +25,26 @@ from typing import Optional
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Monkey-patch torchaudio.load to use soundfile — avoids ffmpeg/torchcodec dependency.
-# F5-TTS calls torchaudio.load(ref_file) internally; soundfile handles WAV without ffmpeg.
+# Force soundfile backend for torchaudio — no ffmpeg/torchcodec needed for WAV files.
 import torchaudio as _torchaudio
+try:
+    _torchaudio.set_audio_backend("soundfile")
+    logger.info("torchaudio backend set to soundfile")
+except Exception as e:
+    logger.warning(f"set_audio_backend failed: {e}")
+
+# Patch torchaudio.load as belt-and-suspenders fallback
 _orig_torchaudio_load = _torchaudio.load
 def _soundfile_load(filepath, *args, **kwargs):
+    logger.info(f"[patch] torchaudio.load: {filepath}")
     try:
         data, sr = sf.read(str(filepath), always_2d=True)
         return torch.from_numpy(data.T.copy()).float(), sr
-    except Exception:
-        return _orig_torchaudio_load(filepath, *args, **kwargs)
+    except Exception as e:
+        logger.error(f"[patch] soundfile.read failed: {e}")
+        raise  # don't fall back to ffmpeg-dependent orig
 _torchaudio.load = _soundfile_load
-logger.info("torchaudio.load patched to use soundfile backend (no ffmpeg needed)")
+logger.info("torchaudio.load patched to soundfile")
 
 app = FastAPI()
 
