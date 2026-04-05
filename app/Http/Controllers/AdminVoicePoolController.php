@@ -75,7 +75,7 @@ class AdminVoicePoolController extends Controller
             'ffmpeg', '-y',
             '-ss', (string) $start, '-t', (string) $duration,
             '-i', $downloaded,
-            '-af', 'highpass=f=80,lowpass=f=12000,afftdn=nf=-20',
+            '-af', 'loudnorm',
             '-ac', '1', '-ar', '22050', '-c:a', 'pcm_s16le', $outWav,
         ]);
 
@@ -117,7 +117,7 @@ class AdminVoicePoolController extends Controller
             'ffmpeg', '-y',
             '-ss', (string) $start, '-t', (string) $duration,
             '-i', $tmpPath,
-            '-af', 'highpass=f=80,lowpass=f=12000,afftdn=nf=-20',
+            '-af', 'loudnorm',
             '-ac', '1', '-ar', '22050', '-c:a', 'pcm_s16le', $outWav,
         ]);
 
