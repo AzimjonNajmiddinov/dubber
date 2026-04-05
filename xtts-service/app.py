@@ -94,14 +94,11 @@ def load_xtts_model():
         # Tokenizer monkey-patch: map "uz" → "tr" at tokenizer level
         # so Turkish BPE is used for Uzbek Latin script
         _orig_preprocess = _xtts_tok.VoiceBpeTokenizer.preprocess_text
-        # preprocess_text raises NotImplementedError for "uz" — patch it to use basic
-        # English cleaning for Uzbek (no phoneme substitution), keeping lang="uz" so
-        # the [uz] token is still prepended to text during encode(), matching training.
-        from TTS.tts.layers.xtts.tokenizer import multilingual_cleaners
-
+        # preprocess_text raises NotImplementedError for "uz".
+        # Return text as-is — fine-tuned model was trained on raw Uzbek with no cleaning.
         def _uz_preprocess(self, txt, lang):
             if lang == "uz":
-                return multilingual_cleaners(txt, "en")
+                return txt
             return _orig_preprocess(self, txt, lang)
         _xtts_tok.VoiceBpeTokenizer.preprocess_text = _uz_preprocess
 
