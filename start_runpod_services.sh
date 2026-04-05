@@ -248,12 +248,9 @@ fi
 echo -n "  WhisperX (8002):  "
 if check_health "WhisperX" 8002 "import sys,json; d=json.load(sys.stdin); assert d.get('ok')"; then
     echo "OK"
-    echo -n "  WhisperX /ready (preloading gender/emotion models, ~60s): "
-    if curl -s --max-time 300 "http://localhost:8002/ready" | python -c "import sys,json; d=json.load(sys.stdin); assert d.get('status')=='ready'" 2>/dev/null; then
-        echo "OK"
-    else
-        echo "FAILED (check: tail /tmp/whisperx.log)"
-    fi
+    # Trigger /ready in background to preload gender/emotion models (~3-5 min first run)
+    echo "  WhisperX /ready: preloading gender/emotion models in background..."
+    curl -s --max-time 600 "http://localhost:8002/ready" >> /tmp/whisperx.log 2>&1 &
 else
     echo "FAILED (check: tail /tmp/whisperx.log)"
 fi
