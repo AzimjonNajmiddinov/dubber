@@ -195,14 +195,15 @@ echo "  Starting Demucs on port 8000..."
 cd /workspace/dubber/demucs-service
 nohup python -m uvicorn app_runpod:app --host 0.0.0.0 --port 8000 > /tmp/demucs.log 2>&1 &
 
-# Start XTTS on port 8001 (fine-tuned Uzbek model, isolated venv)
-echo "  Starting XTTS on port 8001..."
-FINETUNED_DIR="/workspace/xtts-uz-finetuned/run/training/GPT_XTTS_FT-April-03-2026_05+59PM-b483a33"
-if [ -d "$FINETUNED_DIR" ]; then
+# Start XTTS on port 8003 (fine-tuned Uzbek model, isolated venv)
+echo "  Starting XTTS on port 8003..."
+# Auto-find checkpoint: look for any subdir with a .pth file under /workspace/xtts-uz-finetuned
+FINETUNED_DIR=$(find /workspace/xtts-uz-finetuned -name "*.pth" 2>/dev/null | head -1 | xargs -r dirname)
+if [ -n "$FINETUNED_DIR" ] && [ -d "$FINETUNED_DIR" ]; then
     export XTTS_FINETUNED_DIR="$FINETUNED_DIR"
     echo "    Fine-tuned model: $FINETUNED_DIR"
 else
-    echo "    WARNING: Fine-tuned model not found, using base model"
+    echo "    WARNING: Fine-tuned model not found at /workspace/xtts-uz-finetuned, using base model"
 fi
 cd /workspace/dubber/xtts-service
 nohup venv/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8003 > /tmp/xtts.log 2>&1 &
