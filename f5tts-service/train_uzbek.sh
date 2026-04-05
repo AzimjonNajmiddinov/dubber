@@ -16,9 +16,10 @@ VENV=/workspace/tts-venv
 WAVS_DIR=/workspace/uz_tts/wavs
 DATASET_NAME=f5tts-uz-data          # short name passed to --dataset_name
 DATASET_DIR=/workspace/f5tts-uz-data_char  # actual files on disk (prepare outputs here)
-# finetune_cli constructs path as {f5_tts_pkg}/../../data/{DATASET_NAME}_char
-# so we symlink: {venv}/site-packages/data/f5tts-uz-data_char → $DATASET_DIR
-F5_DATA_DIR=$VENV/lib/python3.10/site-packages/data
+# finetune_cli constructs path as {site-packages}/f5_tts/../../data/{DATASET_NAME}_char
+# f5_tts/../../ = python3.10/ so data dir is {venv}/lib/python3.10/data/
+# symlink: {venv}/lib/python3.10/data/f5tts-uz-data_char → $DATASET_DIR
+F5_DATA_DIR=$VENV/lib/python3.10/data
 CKPT_DIR=/workspace/f5tts-uz-finetuned
 PREPARE_SCRIPT=$VENV/lib/python3.10/site-packages/f5_tts/train/datasets/prepare_csv_wavs.py
 FINETUNE_SCRIPT=$VENV/lib/python3.10/site-packages/f5_tts/train/finetune_cli.py
