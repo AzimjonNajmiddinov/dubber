@@ -190,18 +190,20 @@ PYEOF
     SAMPLE_COUNT=$(wc -l < "$META_CSV")
     echo "  Samples in metadata: $((SAMPLE_COUNT - 1))"
 
-    mkdir -p "$DATASET_DIR"
+    mkdir -p "${DATASET_DIR}_char"
     echo "  Running prepare_csv_wavs.py (--pretrain builds Uzbek char vocab from scratch)..."
-    $VENV/bin/python "$PREPARE_SCRIPT" "$META_CSV" "$DATASET_DIR" --pretrain
+    $VENV/bin/python "$PREPARE_SCRIPT" "$META_CSV" "${DATASET_DIR}_char" --pretrain
 
-    echo "  Dataset prepared at: $DATASET_DIR"
-    ls -lh "$DATASET_DIR"
+    echo "  Dataset prepared at: ${DATASET_DIR}_char"
+    ls -lh "${DATASET_DIR}_char"
 else
     echo "[2/3] Skipping data preparation"
 fi
 
-if [ ! -f "$DATASET_DIR/raw.arrow" ]; then
-    echo "ERROR: Dataset not prepared. Missing $DATASET_DIR/raw.arrow"
+# finetune_cli.py appends _char to dataset_name for the tokenizer path,
+# and prepare_csv_wavs.py outputs to DATASET_DIR directly — so raw.arrow is in DATASET_DIR_char
+if [ ! -f "${DATASET_DIR}_char/raw.arrow" ]; then
+    echo "ERROR: Dataset not prepared. Missing ${DATASET_DIR}_char/raw.arrow"
     exit 1
 fi
 
