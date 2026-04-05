@@ -133,29 +133,51 @@ if [ "$SKIP_PREPARE" = false ]; then
     echo ""
     echo "[2/3] Preparing F5-TTS dataset..."
 
-    # Build metadata CSV with absolute paths from train.csv
+    # Build metadata CSV from FLEURS TSV files (downloaded alongside audio)
     META_CSV=/tmp/uzbek_f5tts_meta.csv
-    $VENV/bin/python <<PYEOF
-import csv
+    $VENV/bin/python <<'PYEOF'
+import os
 from pathlib import Path
+from huggingface_hub import hf_hub_download
 
-train_csv = Path("$TRAIN_CSV")
-eval_csv  = Path("$EVAL_CSV")
-wavs_dir  = Path("$WAVS_DIR")
-out_csv   = Path("$META_CSV")
+wavs_dir = Path("/workspace/uz_tts/wavs")
+out_csv  = Path("/tmp/uzbek_f5tts_meta.csv")
+hf_token = os.environ.get("HF_TOKEN")
 
 rows, missing = [], 0
-for csv_path in [train_csv, eval_csv]:
-    with open(csv_path) as f:
-        reader = csv.DictReader(f, delimiter="|")
-        for row in reader:
-            src  = Path(row["audio_file"])
-            name = src.name
-            wav  = wavs_dir / name
+for split in ["train", "dev", "test"]:
+    # Download the TSV with transcriptions
+    try:
+        tsv_path = hf_hub_download(
+            "google/fleurs", f"data/uz_uz/{split}.tsv",
+            repo_type="dataset", token=hf_token
+        )
+    except Exception as e:
+        print(f"  Warning: could not download {split}.tsv: {e}")
+        continue
+
+    with open(tsv_path, encoding="utf-8") as f:
+        header = f.readline().strip().split("\t")
+        # FLEURS TSV columns: id, file_name, raw_transcription, transcription, ...
+        try:
+            fname_idx = header.index("file_name")
+            text_idx  = header.index("transcription")
+        except ValueError:
+            fname_idx, text_idx = 1, 3  # fallback positions
+
+        for line in f:
+            parts = line.strip().split("\t")
+            if len(parts) <= max(fname_idx, text_idx):
+                continue
+            fname = Path(parts[fname_idx]).stem  # e.g. "1234" from "1234.opus"
+            text  = parts[text_idx].strip()
+            if not text:
+                continue
+            wav = wavs_dir / f"{fname}.wav"
             if not wav.exists():
                 missing += 1
                 continue
-            rows.append((str(wav.absolute()), row["text"].strip()))
+            rows.append((str(wav.absolute()), text))
 
 with open(out_csv, "w", encoding="utf-8") as f:
     f.write("audio_file|text\n")
@@ -169,8 +191,8 @@ PYEOF
     echo "  Samples in metadata: $((SAMPLE_COUNT - 1))"
 
     mkdir -p "$DATASET_DIR"
-    echo "  Running prepare_csv_wavs.py..."
-    $VENV/bin/python "$PREPARE_SCRIPT" "$META_CSV" "$DATASET_DIR"
+    echo "  Running prepare_csv_wavs.py (--pretrain builds Uzbek char vocab from scratch)..."
+    $VENV/bin/python "$PREPARE_SCRIPT" "$META_CSV" "$DATASET_DIR" --pretrain
 
     echo "  Dataset prepared at: $DATASET_DIR"
     ls -lh "$DATASET_DIR"
