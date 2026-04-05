@@ -95,10 +95,12 @@ def load_xtts_model():
         # so Turkish BPE is used for Uzbek Latin script
         _orig_preprocess = _xtts_tok.VoiceBpeTokenizer.preprocess_text
         # preprocess_text raises NotImplementedError for "uz".
-        # Return text as-is — fine-tuned model was trained on raw Uzbek with no cleaning.
+        # Pass raw Uzbek text to preserve oʻ/gʻ phonemes.
+        # Only substitute x→h: base model BPE has no Uzbek /x/ prior,
+        # fine-tuning alone wasn't enough to teach it, so it says "iks".
         def _uz_preprocess(self, txt, lang):
             if lang == "uz":
-                return txt
+                return re.sub(r'[Xx]', lambda m: 'H' if m.group().isupper() else 'h', txt)
             return _orig_preprocess(self, txt, lang)
         _xtts_tok.VoiceBpeTokenizer.preprocess_text = _uz_preprocess
 
