@@ -12,6 +12,7 @@
 
 set -o pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV=/workspace/tts-venv
 WAVS_DIR=/workspace/uz_tts/wavs
 DATASET_NAME=f5tts-uz-data          # short name passed to --dataset_name
@@ -227,7 +228,7 @@ cd "$CKPT_DIR"
 
 # Patch trainer to use strict=False so pretrained acoustic weights load
 # even when vocab size differs (Uzbek 67 chars vs pretrained 2546 chars)
-$VENV/bin/python "$(dirname "$0")/patch_trainer.py"
+$VENV/bin/python "$SCRIPT_DIR/patch_trainer.py"
 
 # accelerate config — single GPU, no distributed training
 $VENV/bin/accelerate config default --config-file /tmp/accelerate_default.yaml 2>/dev/null || true
