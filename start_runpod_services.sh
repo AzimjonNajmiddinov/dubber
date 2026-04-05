@@ -31,12 +31,21 @@ sleep 2
 # Pull latest code
 cd /workspace/dubber
 echo "Pulling latest code..."
+OLD_HEAD=$(git rev-parse HEAD)
 if ! git pull --ff-only 2>&1; then
     echo "  Fast-forward pull failed, resetting to origin/main..."
     git fetch origin
     git reset --hard origin/main
 fi
 echo "  HEAD: $(git log --oneline -1)"
+
+# If the script itself was updated, re-exec so we run the new version
+NEW_HEAD=$(git rev-parse HEAD)
+if [ "$OLD_HEAD" != "$NEW_HEAD" ] && [ "${_RESTARTED:-false}" = "false" ]; then
+    echo "  Script updated — re-executing new version..."
+    export _RESTARTED=true
+    exec "$0" "$@"
+fi
 
 # ===========================================
 # INSTALL/FIX DEPENDENCIES
@@ -112,7 +121,7 @@ else
 fi
 
 # ===========================================
-# SHARED TTS VENV (torch 2.2.0+cu121 + f5-tts)
+# SHARED TTS VENV (torch cu126 + f5-tts)
 # Shared by F5-TTS service — one venv, one torch install
 # Location: /workspace/tts-venv
 # To rebuild: rm -rf /workspace/tts-venv && ./start_runpod_services.sh
@@ -127,7 +136,7 @@ if [ -d "$TTS_VENV" ] && $TTS_VENV/bin/python -c "import f5_tts; import uvicorn"
 fi
 
 if [ "$TTS_VENV_OK" = false ]; then
-    echo "  Creating TTS venv (torch 2.2.0+cu121 + f5-tts, ~3GB, takes 5-10 min)..."
+    echo "  Creating TTS venv (torch cu126 + f5-tts, ~3GB, takes 5-10 min)..."
     rm -rf "$TTS_VENV"
     # Also clean up old per-service venvs to reclaim disk
     rm -rf /workspace/dubber/xtts-service/venv
@@ -136,10 +145,10 @@ if [ "$TTS_VENV_OK" = false ]; then
 
     $TTS_VENV/bin/pip install -q --upgrade pip
 
-    echo "    Installing torch 2.2.0+cu121..."
+    echo "    Installing torch (cu126, matches system)..."
     $TTS_VENV/bin/pip install -q \
-        torch==2.2.0+cu121 torchaudio==2.2.0+cu121 \
-        --index-url https://download.pytorch.org/whl/cu121
+        torch torchaudio \
+        --index-url https://download.pytorch.org/whl/cu126
 
     echo "    Installing F5-TTS + deps..."
     $TTS_VENV/bin/pip install -q f5-tts uvicorn fastapi python-multipart soundfile
