@@ -205,8 +205,8 @@ async def synthesize(request: SynthesizeRequest):
             ref_text=ref_text,
             gen_text=request.text,
             speed=request.speed,
-            nfe_step=16,
-            remove_silence=True,
+            nfe_step=32,
+            remove_silence=False,
         )
 
         # Save output
