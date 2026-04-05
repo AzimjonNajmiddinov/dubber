@@ -225,6 +225,10 @@ echo ""
 mkdir -p "$CKPT_DIR"
 cd "$CKPT_DIR"
 
+# Patch trainer to use strict=False so pretrained acoustic weights load
+# even when vocab size differs (Uzbek 67 chars vs pretrained 2546 chars)
+$VENV/bin/python "$(dirname "$0")/patch_trainer.py"
+
 # accelerate config — single GPU, no distributed training
 $VENV/bin/accelerate config default --config-file /tmp/accelerate_default.yaml 2>/dev/null || true
 
@@ -234,7 +238,7 @@ $VENV/bin/accelerate launch \
     --exp_name F5TTS_v1_Base \
     --dataset_name "$DATASET_NAME" \
     --tokenizer char \
-    --pretrain \
+    --finetune \
     --epochs 15 \
     --learning_rate 1e-5 \
     --batch_size_per_gpu 1600 \
