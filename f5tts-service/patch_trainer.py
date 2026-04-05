@@ -79,3 +79,27 @@ patched = "".join(lines)
 
 trainer_path.write_text(patched)
 print(f"Patched {trainer_path}: shape-filtered load_state_dict injected")
+
+# ── Patch dataset.py: replace torchaudio.load with soundfile ──────────────────
+dataset_path = trainer_path.parent / "dataset.py"
+if not dataset_path.exists():
+    print(f"WARNING: dataset.py not found at {dataset_path}")
+else:
+    ds_text = dataset_path.read_text()
+    if "soundfile" in ds_text and "sf.read" in ds_text:
+        print(f"dataset.py already patched: {dataset_path}")
+    else:
+        # Replace torchaudio.load with soundfile to avoid torchcodec/ffmpeg dependency
+        ds_patched = ds_text.replace(
+            "audio, source_sample_rate = torchaudio.load(audio_path)",
+            (
+                "import soundfile as _sf, numpy as _np, torch as _torch\n"
+                "            _sf_data, source_sample_rate = _sf.read(str(audio_path), always_2d=True)\n"
+                "            audio = _torch.from_numpy(_sf_data.T.copy()).float()"
+            ),
+        )
+        if ds_patched == ds_text:
+            print("WARNING: dataset.py torchaudio.load pattern not found — check manually")
+        else:
+            dataset_path.write_text(ds_patched)
+            print(f"Patched {dataset_path}: torchaudio.load → soundfile")
