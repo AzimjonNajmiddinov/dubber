@@ -94,17 +94,19 @@ def load_xtts_model():
         # Tokenizer monkey-patch: map "uz" → "tr" at tokenizer level
         # so Turkish BPE is used for Uzbek Latin script
         _orig_preprocess = _xtts_tok.VoiceBpeTokenizer.preprocess_text
-        # Only apply uz→tr tokenizer fallback for base model.
-        # Fine-tuned model was trained with lang="uz" directly — patching to "tr" breaks it.
-        if not (Path(XTTS_FINETUNED_DIR).exists() if XTTS_FINETUNED_DIR else False):
-            def _uz_preprocess(self, txt, lang):
-                return _orig_preprocess(self, txt, "tr" if lang == "uz" else lang)
-            _xtts_tok.VoiceBpeTokenizer.preprocess_text = _uz_preprocess
+        # Tokenizer doesn't have "uz" in its vocab dict — patch to avoid "not supported" error.
+        # Fine-tuned model: map uz→en (neutral Latin BPE, no Turkish phoneme rules).
+        # Base model: map uz→tr (Turkish is closest phonetically).
+        _uz_fallback = "en" if (Path(XTTS_FINETUNED_DIR).exists() if XTTS_FINETUNED_DIR else False) else "tr"
 
-            _orig_encode = _xtts_tok.VoiceBpeTokenizer.encode
-            def _uz_encode(self, txt, lang):
-                return _orig_encode(self, txt, "tr" if lang == "uz" else lang)
-            _xtts_tok.VoiceBpeTokenizer.encode = _uz_encode
+        def _uz_preprocess(self, txt, lang):
+            return _orig_preprocess(self, txt, _uz_fallback if lang == "uz" else lang)
+        _xtts_tok.VoiceBpeTokenizer.preprocess_text = _uz_preprocess
+
+        _orig_encode = _xtts_tok.VoiceBpeTokenizer.encode
+        def _uz_encode(self, txt, lang):
+            return _orig_encode(self, txt, _uz_fallback if lang == "uz" else lang)
+        _xtts_tok.VoiceBpeTokenizer.encode = _uz_encode
 
         finetuned_dir = Path(XTTS_FINETUNED_DIR) if XTTS_FINETUNED_DIR else None
 
