@@ -35,50 +35,88 @@ echo ""
 
 # ─── Step 1: Download FLEURS uz_uz ───────────────────────────────────────────
 if [ "$SKIP_DOWNLOAD" = false ]; then
-    echo "[1/3] Downloading FLEURS uz_uz..."
+    echo "[1/3] Downloading FLEURS uz_uz via HuggingFace Hub..."
     mkdir -p "$WAVS_DIR"
 
-    # Downgrade datasets temporarily — newer versions dropped script support
-    echo "  Pinning datasets==2.14.7 for FLEURS download..."
-    $VENV/bin/pip install -q "datasets==2.14.7"
-
     $VENV/bin/python <<'PYEOF'
+import os, io, tarfile, subprocess
 from pathlib import Path
 import soundfile as sf
 import numpy as np
+from huggingface_hub import HfApi, hf_hub_download
 
 wavs_dir = Path("/workspace/uz_tts/wavs")
 wavs_dir.mkdir(parents=True, exist_ok=True)
+hf_token = os.environ.get("HF_TOKEN")
 
-from datasets import load_dataset
+api = HfApi()
+print("  Listing FLEURS uz_uz files on HuggingFace Hub...")
+all_files = list(api.list_repo_files("google/fleurs", repo_type="dataset", token=hf_token))
+uz_files  = [f for f in all_files if "uz_uz" in f]
+print(f"  Found {len(uz_files)} uz_uz files")
 
-print("  Downloading train+validation+test splits...")
-ds = load_dataset("google/fleurs", "uz_uz",
-                  split="train+validation+test",
-                  trust_remote_code=True)
+def convert_opus_to_wav(opus_path: Path, wav_path: Path):
+    """Convert opus file to 24kHz mono WAV using soundfile+resampy or ffmpeg."""
+    try:
+        data, sr = sf.read(str(opus_path))
+        if data.ndim > 1:
+            data = data.mean(axis=1)
+        data = data.astype(np.float32)
+        if sr != 24000:
+            from scipy.signal import resample_poly
+            import math
+            gcd = math.gcd(sr, 24000)
+            data = resample_poly(data, 24000 // gcd, sr // gcd).astype(np.float32)
+        sf.write(str(wav_path), data, 24000)
+        return True
+    except Exception as e:
+        print(f"    soundfile failed for {opus_path.name}: {e}")
+        return False
 
-print(f"  Total: {len(ds)} samples")
-saved = skipped = 0
-for item in ds:
-    audio = item["audio"]
-    text  = (item.get("transcription") or item.get("raw_transcription", "")).strip()
-    if not text:
-        skipped += 1
+saved = 0
+for fpath in uz_files:
+    if not (fpath.endswith(".opus") or fpath.endswith(".wav") or fpath.endswith(".tar.gz")):
         continue
-    stem     = Path(audio.get("path", f"fleurs_{saved:05d}")).stem
-    out_path = wavs_dir / f"{stem}.wav"
-    if not out_path.exists():
-        arr = np.array(audio["array"], dtype=np.float32)
-        sf.write(str(out_path), arr, audio["sampling_rate"])
-    saved += 1
-    if saved % 200 == 0:
-        print(f"  {saved}/{len(ds) - skipped} saved...")
+    print(f"  Downloading {fpath}...")
+    local = hf_hub_download("google/fleurs", fpath, repo_type="dataset", token=hf_token)
 
-print(f"  Done — {saved} WAVs, {skipped} skipped")
+    if fpath.endswith(".tar.gz"):
+        with tarfile.open(local) as tar:
+            members = [m for m in tar.getmembers() if m.name.endswith((".opus", ".wav"))]
+            print(f"    Extracting {len(members)} audio files...")
+            for member in members:
+                stem = Path(member.name).stem
+                wav_path = wavs_dir / f"{stem}.wav"
+                if wav_path.exists():
+                    saved += 1
+                    continue
+                f = tar.extractfile(member)
+                if f is None:
+                    continue
+                tmp = Path(f"/tmp/{stem}.opus")
+                tmp.write_bytes(f.read())
+                if convert_opus_to_wav(tmp, wav_path):
+                    saved += 1
+                tmp.unlink(missing_ok=True)
+    elif fpath.endswith(".opus"):
+        stem = Path(fpath).stem
+        wav_path = wavs_dir / f"{stem}.wav"
+        if not wav_path.exists():
+            if convert_opus_to_wav(Path(local), wav_path):
+                saved += 1
+        else:
+            saved += 1
+    elif fpath.endswith(".wav"):
+        stem = Path(fpath).stem
+        wav_path = wavs_dir / f"{stem}.wav"
+        if not wav_path.exists():
+            import shutil
+            shutil.copy2(local, wav_path)
+        saved += 1
+
+print(f"  Done — {saved} WAVs ready at {wavs_dir}")
 PYEOF
 
-    echo "  Restoring latest datasets..."
-    $VENV/bin/pip install -q "datasets>=2.20"
 else
     echo "[1/3] Skipping download"
 fi
