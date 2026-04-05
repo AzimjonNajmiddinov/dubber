@@ -22,8 +22,8 @@ if trainer_path is None:
 
 text = trainer_path.read_text()
 
-# Already patched with the shape-filter approach?
-if "_shape_filtered_load" in text:
+# Already fully patched (both ema and unwrap_model calls)?
+if "_shape_filtered_load(self.accelerator.unwrap_model" in text:
     print(f"Already patched: {trainer_path}")
     exit(0)
 
@@ -42,10 +42,14 @@ text = text.replace(
     'self.ema_model.load_state_dict(checkpoint["ema_model_state_dict"])',
     '_shape_filtered_load(self.ema_model, checkpoint["ema_model_state_dict"])',
 )
-# Replace model load with shape-filtered version
+# Replace model load with shape-filtered version (direct and unwrapped)
 text = text.replace(
     'self.model.load_state_dict(checkpoint["model_state_dict"])',
     '_shape_filtered_load(self.model, checkpoint["model_state_dict"])',
+)
+text = text.replace(
+    'self.accelerator.unwrap_model(self.model).load_state_dict(checkpoint["model_state_dict"])',
+    '_shape_filtered_load(self.accelerator.unwrap_model(self.model), checkpoint["model_state_dict"])',
 )
 
 # Inject the helper function near the top of the file (after imports)
