@@ -25,7 +25,6 @@ echo "=== Starting RunPod GPU Services ==="
 # Kill any existing services
 pkill -f "uvicorn.*8000" 2>/dev/null || true
 pkill -f "uvicorn.*8002" 2>/dev/null || true
-pkill -f "uvicorn.*8003" 2>/dev/null || true
 pkill -f "uvicorn.*8004" 2>/dev/null || true
 sleep 2
 
@@ -113,75 +112,42 @@ else
 fi
 
 # ===========================================
-# F5-TTS VENV SETUP (isolated: torch 2.2.0+cu121 + f5-tts)
+# SHARED TTS VENV (torch 2.2.0+cu121 + f5-tts)
+# Shared by F5-TTS service — one venv, one torch install
+# Location: /workspace/tts-venv
+# To rebuild: rm -rf /workspace/tts-venv && ./start_runpod_services.sh
 # ===========================================
-echo "Checking F5-TTS venv..."
-cd /workspace/dubber/f5tts-service
+TTS_VENV=/workspace/tts-venv
+echo "Checking shared TTS venv ($TTS_VENV)..."
 
-F5TTS_VENV_OK=false
-if [ -d "venv" ] && venv/bin/python -c "import f5_tts; import uvicorn" 2>/dev/null; then
-    echo "  F5-TTS venv OK"
-    F5TTS_VENV_OK=true
+TTS_VENV_OK=false
+if [ -d "$TTS_VENV" ] && $TTS_VENV/bin/python -c "import f5_tts; import uvicorn" 2>/dev/null; then
+    echo "  TTS venv OK"
+    TTS_VENV_OK=true
 fi
 
-if [ "$F5TTS_VENV_OK" = false ]; then
-    echo "  Creating F5-TTS venv (downloads torch + f5-tts model ~3GB, takes 5-10 min)..."
-    rm -rf venv
-    python -m venv venv
+if [ "$TTS_VENV_OK" = false ]; then
+    echo "  Creating TTS venv (torch 2.2.0+cu121 + f5-tts, ~3GB, takes 5-10 min)..."
+    rm -rf "$TTS_VENV"
+    # Also clean up old per-service venvs to reclaim disk
+    rm -rf /workspace/dubber/xtts-service/venv
+    rm -rf /workspace/dubber/f5tts-service/venv
+    python -m venv "$TTS_VENV"
 
-    venv/bin/pip install -q --upgrade pip
+    $TTS_VENV/bin/pip install -q --upgrade pip
 
     echo "    Installing torch 2.2.0+cu121..."
-    venv/bin/pip install -q \
+    $TTS_VENV/bin/pip install -q \
         torch==2.2.0+cu121 torchaudio==2.2.0+cu121 \
         --index-url https://download.pytorch.org/whl/cu121
 
     echo "    Installing F5-TTS + deps..."
-    venv/bin/pip install -q f5-tts uvicorn fastapi python-multipart soundfile
+    $TTS_VENV/bin/pip install -q f5-tts uvicorn fastapi python-multipart soundfile
 
-    if venv/bin/python -c "import f5_tts; import torch; print(f'F5-TTS venv OK - torch {torch.__version__}')" 2>/dev/null; then
-        echo "  F5-TTS venv created successfully"
+    if $TTS_VENV/bin/python -c "import f5_tts; import torch; print(f'TTS venv OK - torch {torch.__version__}')" 2>/dev/null; then
+        echo "  TTS venv created successfully"
     else
-        echo "  ERROR: F5-TTS venv creation failed! Check manually."
-    fi
-fi
-
-# ===========================================
-# XTTS VENV SETUP (isolated: torch 2.2.0+cu121 + TTS 0.22.0)
-# ===========================================
-echo "Checking XTTS venv..."
-cd /workspace/dubber/xtts-service
-
-XTTS_VENV_OK=false
-if [ -d "venv" ] && venv/bin/python -c "import TTS; import uvicorn" 2>/dev/null; then
-    echo "  XTTS venv OK"
-    XTTS_VENV_OK=true
-fi
-
-if [ "$XTTS_VENV_OK" = false ]; then
-    echo "  Creating XTTS venv (downloads torch 2.2.0+cu121 ~2GB, takes 5-10 min)..."
-    rm -rf venv
-    python -m venv venv
-
-    venv/bin/pip install -q --upgrade pip
-
-    echo "    Installing torch 2.2.0+cu121..."
-    venv/bin/pip install -q \
-        torch==2.2.0+cu121 torchaudio==2.2.0+cu121 \
-        --index-url https://download.pytorch.org/whl/cu121
-
-    echo "    Installing TTS + deps..."
-    venv/bin/pip install -q TTS==0.22.0 uvicorn fastapi python-multipart soundfile
-    venv/bin/pip install -q --force-reinstall \
-        "numpy<2.0.0" \
-        "huggingface_hub>=0.16.4,<0.22.0" \
-        "tokenizers>=0.13.0,<0.16.0" \
-        "transformers>=4.33.0,<4.46.0"
-
-    if venv/bin/python -c "import TTS; import torch; print(f'XTTS venv OK - torch {torch.__version__}')" 2>/dev/null; then
-        echo "  XTTS venv created successfully"
-    else
-        echo "  ERROR: XTTS venv creation failed! Check manually."
+        echo "  ERROR: TTS venv creation failed! Check manually."
     fi
 fi
 
@@ -230,23 +196,10 @@ echo "  Starting Demucs on port 8000..."
 cd /workspace/dubber/demucs-service
 nohup python -m uvicorn app_runpod:app --host 0.0.0.0 --port 8000 > /tmp/demucs.log 2>&1 &
 
-# Start XTTS on port 8003 (fine-tuned Uzbek model, isolated venv)
-echo "  Starting XTTS on port 8003..."
-# Auto-find checkpoint: look for any subdir with a .pth file under /workspace/xtts-uz-finetuned
-FINETUNED_DIR=$(find /workspace/xtts-uz-finetuned -name "*.pth" 2>/dev/null | head -1 | xargs -r dirname)
-if [ -n "$FINETUNED_DIR" ] && [ -d "$FINETUNED_DIR" ]; then
-    export XTTS_FINETUNED_DIR="$FINETUNED_DIR"
-    echo "    Fine-tuned model: $FINETUNED_DIR"
-else
-    echo "    WARNING: Fine-tuned model not found at /workspace/xtts-uz-finetuned, using base model"
-fi
-cd /workspace/dubber/xtts-service
-nohup venv/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8003 > /tmp/xtts.log 2>&1 &
-
-# Start F5-TTS on port 8004 (isolated venv)
+# Start F5-TTS on port 8004 (shared TTS venv)
 echo "  Starting F5-TTS on port 8004..."
 cd /workspace/dubber/f5tts-service
-nohup venv/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8004 > /tmp/f5tts.log 2>&1 &
+nohup $TTS_VENV/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8004 > /tmp/f5tts.log 2>&1 &
 
 # Start WhisperX on port 8002
 echo "  Starting WhisperX on port 8002..."
@@ -274,13 +227,6 @@ if check_health "Demucs" 8000 "import sys,json; d=json.load(sys.stdin); assert d
     curl -s http://localhost:8000/health | python -c "import sys,json; d=json.load(sys.stdin); print(f'OK - GPU: {d.get(\"gpu_name\", \"N/A\")}')" 2>/dev/null
 else
     echo "FAILED (check: tail /tmp/demucs.log)"
-fi
-
-echo -n "  XTTS    (8003):   "
-if check_health "XTTS" 8003 "import sys,json; d=json.load(sys.stdin); assert d.get('status')=='healthy'"; then
-    curl -s http://localhost:8003/health | python -c "import sys,json; d=json.load(sys.stdin); print(f'OK - CUDA: {d.get(\"cuda_available\")}')" 2>/dev/null
-else
-    echo "FAILED (check: tail /tmp/xtts.log)"
 fi
 
 echo -n "  F5-TTS  (8004):   "
@@ -311,7 +257,6 @@ echo ""
 echo "=== READY ==="
 echo "Logs:"
 echo "  tail -f /tmp/demucs.log"
-echo "  tail -f /tmp/xtts.log"
 echo "  tail -f /tmp/f5tts.log"
 echo "  tail -f /tmp/whisperx.log"
 echo ""
