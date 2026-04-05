@@ -150,8 +150,11 @@ if [ "$TTS_VENV_OK" = false ]; then
         torch torchaudio \
         --index-url https://download.pytorch.org/whl/cu126
 
+    echo "    Installing system ffmpeg (required by f5-tts audio loading)..."
+    apt-get install -y --no-install-recommends ffmpeg 2>/dev/null || true
+
     echo "    Installing F5-TTS + deps..."
-    $TTS_VENV/bin/pip install -q f5-tts uvicorn fastapi python-multipart soundfile
+    $TTS_VENV/bin/pip install -q f5-tts uvicorn fastapi python-multipart soundfile scipy
 
     if $TTS_VENV/bin/python -c "import f5_tts; import torch; print(f'TTS venv OK - torch {torch.__version__}')" 2>/dev/null; then
         echo "  TTS venv created successfully"

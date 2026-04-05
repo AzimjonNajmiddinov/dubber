@@ -113,12 +113,22 @@ async def clone_voice(
         sample_path = voice_dir / "sample.wav"
         sf.write(str(sample_path), audio_np, 24000)
 
+        # Pre-transcribe reference audio so synthesize doesn't do it every call
+        ref_text = ""
+        try:
+            model = load_model()
+            ref_text = model.transcribe(str(sample_path))
+            logger.info(f"Reference transcribed: {ref_text!r}")
+        except Exception as e:
+            logger.warning(f"Reference transcription failed (will auto-transcribe at synthesis): {e}")
+
         import json
         from datetime import datetime
         meta = {
             "name": name,
             "description": description,
             "language": language,
+            "ref_text": ref_text,
             "created_at": datetime.now().isoformat(),
         }
         (voice_dir / "meta.json").write_text(json.dumps(meta, indent=2))
@@ -144,13 +154,21 @@ async def synthesize(request: SynthesizeRequest):
 
         output_path = CACHE_PATH / f"{uuid.uuid4()}.wav"
 
+        # Load cached ref_text to skip re-transcription on every call
+        import json as _json
+        meta_path = voice_dir / "meta.json"
+        ref_text = ""
+        if meta_path.exists():
+            ref_text = _json.loads(meta_path.read_text()).get("ref_text", "")
+
         logger.info(f"Synthesizing {len(request.text)} chars with voice={request.voice_id}, speed={request.speed}")
 
         wav, sr, _ = model.infer(
             ref_file=str(sample_path),
-            ref_text="",           # auto-transcribe reference
+            ref_text=ref_text,
             gen_text=request.text,
             speed=request.speed,
+            nfe_step=16,
             remove_silence=True,
         )
 
