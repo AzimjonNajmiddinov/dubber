@@ -21,7 +21,7 @@ DATASET_DIR=/workspace/f5tts-uz-data_char  # actual files on disk (prepare outpu
 # f5_tts/../../ = python3.10/ so data dir is {venv}/lib/python3.10/data/
 # symlink: {venv}/lib/python3.10/data/f5tts-uz-data_char → $DATASET_DIR
 F5_DATA_DIR=$VENV/lib/python3.10/data
-CKPT_DIR=/workspace/f5tts-uz-finetuned
+CKPT_DIR=/root/f5tts-uz-finetuned   # local disk — /workspace network mount fails on large writes
 PREPARE_SCRIPT=$VENV/lib/python3.10/site-packages/f5_tts/train/datasets/prepare_csv_wavs.py
 FINETUNE_SCRIPT=$VENV/lib/python3.10/site-packages/f5_tts/train/finetune_cli.py
 
