@@ -173,7 +173,12 @@
                         <td>{{ $voice['duration'] }}</td>
                         <td>{{ $voice['size'] }}</td>
                         <td style="color:#374151;font-size:13px" id="speed-label-{{ $voice['gender'] }}-{{ $voice['name'] }}">{{ $voice['speed'] }}×</td>
-                        <td style="font-size:11px;color:#6b7280;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="{{ $voice['ref_text'] ?? '' }}">{{ $voice['ref_text'] ?? '—' }}</td>
+                        <td style="max-width:220px">
+                            <div style="display:flex;gap:4px;align-items:flex-start">
+                                <textarea id="ref-{{ $voice['gender'] }}-{{ $voice['name'] }}" rows="2" style="flex:1;font-size:11px;padding:4px 6px;border:1px solid #ddd;border-radius:4px;resize:vertical;color:#374151" placeholder="Type transcript…">{{ $voice['ref_text'] ?? '' }}</textarea>
+                                <button type="button" onclick="saveRefText('{{ $voice['gender'] }}','{{ $voice['name'] }}')" style="background:#2563eb;color:white;border:none;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:11px;white-space:nowrap">💾</button>
+                            </div>
+                        </td>
                         <td style="display:flex;gap:6px;align-items:center">
                             <button type="button" class="play-btn" onclick="togglePlay(this, '{{ route('admin.voice-pool.play', [$voice['gender'], $voice['name']]) }}')">▶ Play</button>
                             <form method="POST" action="{{ route('admin.voice-pool.delete', [$voice['gender'], $voice['name']]) }}" style="display:inline" onsubmit="return confirm('Delete {{ $voice['name'] }}?')">
@@ -243,6 +248,21 @@
     <script>
         let currentAudio = null;
         let currentBtn = null;
+
+        async function saveRefText(gender, name) {
+            const ta = document.getElementById('ref-' + gender + '-' + name);
+            const btn = ta.nextElementSibling;
+            btn.textContent = '⏳';
+            btn.disabled = true;
+            const res = await fetch(`/admin/voice-pool/${gender}/${name}/ref-text`, {
+                method: 'POST',
+                headers: {'Content-Type':'application/json','X-CSRF-TOKEN': document.querySelector('meta[name=csrf-token]').content},
+                body: JSON.stringify({ref_text: ta.value}),
+            });
+            btn.disabled = false;
+            btn.textContent = res.ok ? '✅' : '❌';
+            setTimeout(() => btn.textContent = '💾', 1500);
+        }
 
         function togglePlay(btn, url) {
             if (currentAudio && currentBtn) {

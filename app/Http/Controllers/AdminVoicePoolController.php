@@ -145,6 +145,28 @@ class AdminVoicePoolController extends Controller
         return back()->with('success', "Voice '{$name}' added to {$gender} pool ({$duration}s).");
     }
 
+    public function saveRefText(Request $request, string $gender, string $name)
+    {
+        if (!in_array($gender, self::GENDERS)) abort(400);
+        $request->validate(['ref_text' => 'nullable|string|max:500']);
+
+        $file = storage_path("app/voice-pool/{$gender}/{$name}.wav");
+        if (!file_exists($file)) {
+            return response()->json(['error' => 'Voice not found'], 404);
+        }
+
+        $refText = $request->input('ref_text', '');
+        if ($refText) {
+            Redis::setex('voice-pool-ref:' . md5($file), 30 * 86400, $refText);
+        } else {
+            Redis::del('voice-pool-ref:' . md5($file));
+        }
+        // Force re-clone on next synthesis so F5-TTS picks up new ref_text
+        Redis::del('voice-pool-id:' . md5($file));
+
+        return response()->json(['ok' => true]);
+    }
+
     public function saveSpeed(Request $request, string $gender, string $name)
     {
         if (!in_array($gender, self::GENDERS)) abort(400);
