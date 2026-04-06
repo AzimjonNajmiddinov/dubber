@@ -64,7 +64,17 @@ def load_model():
     logger.info("Loading F5-TTS model...")
     from f5_tts.api import F5TTS
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    _f5tts_model = F5TTS(device=device)
+
+    ckpt_file = "/workspace/f5tts-uz-finetuned/model_last.pt"
+    vocab_file = "/workspace/f5tts-uz-data_char/vocab.txt"
+
+    if Path(ckpt_file).exists() and Path(vocab_file).exists():
+        logger.info(f"Loading fine-tuned Uzbek checkpoint: {ckpt_file}")
+        _f5tts_model = F5TTS(device=device, ckpt_file=ckpt_file, vocab_file=vocab_file)
+    else:
+        logger.warning(f"Fine-tuned checkpoint not found, loading base model")
+        _f5tts_model = F5TTS(device=device)
+
     logger.info(f"F5-TTS loaded on {device}")
     return _f5tts_model
 
