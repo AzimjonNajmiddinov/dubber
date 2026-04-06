@@ -156,10 +156,29 @@ async def clone_voice(
         sample_path = voice_dir / "sample.wav"
         sf.write(str(sample_path), audio_np, 24000)
 
-        # Use empty ref_text — F5-TTS will transcribe reference internally.
-        # WhisperX gives unreliable Uzbek transcription (outputs Turkish/English),
-        # which causes duration miscalculation and tensor size mismatches in synthesis.
-        ref_text = " "
+        # Get ref_text from WhisperX, normalize to safe chars only.
+        # WhisperX may output Turkish/English; numbers, uppercase, punctuation
+        # outside our char vocab cause tensor size mismatches in F5-TTS synthesis.
+        ref_text = "salom"  # fallback: short valid Uzbek placeholder
+        try:
+            import httpx
+            with open(sample_path, "rb") as f:
+                resp = httpx.post(
+                    "http://localhost:8002/analyze-upload",
+                    files={"audio": ("sample.wav", f, "audio/wav")},
+                    data={"lite": "1", "language": "uz"},
+                    timeout=60,
+                )
+            if resp.status_code == 200:
+                segments = resp.json().get("segments", [])
+                raw_text = " ".join(s.get("text", "") for s in segments).strip()
+                # Normalize: lowercase, keep only a-z, Uzbek special chars, spaces
+                import re
+                normalized = re.sub(r"[^a-zоʻгʻ\s]", "", raw_text.lower()).strip()
+                ref_text = normalized if len(normalized) >= 3 else "salom"
+                logger.info(f"WhisperX raw: {raw_text!r} → normalized ref_text: {ref_text!r}")
+        except Exception as e:
+            logger.warning(f"WhisperX transcription failed, using fallback: {e}")
 
         import json
         from datetime import datetime
