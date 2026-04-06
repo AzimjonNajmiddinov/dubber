@@ -147,6 +147,12 @@ async def clone_voice(
             gcd = math.gcd(sr, 24000)
             audio_np = resample_poly(audio_np, 24000 // gcd, sr // gcd).astype(np.float32)
 
+        # Clip to 12s max — F5-TTS clips internally anyway, and ref_text must match the clipped audio
+        max_samples = 12 * 24000
+        if len(audio_np) > max_samples:
+            audio_np = audio_np[:max_samples]
+            logger.info(f"Reference audio clipped to 12s")
+
         sample_path = voice_dir / "sample.wav"
         sf.write(str(sample_path), audio_np, 24000)
 
