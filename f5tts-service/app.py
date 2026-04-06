@@ -165,17 +165,8 @@ async def clone_voice(
             if resp.status_code == 200:
                 segments = resp.json().get("segments", [])
                 raw_text = " ".join(s.get("text", "") for s in segments).strip()
-                # Filter to only chars in our Uzbek vocab — WhisperX may transcribe
-                # in a wrong language (Turkish/Azerbaijani) with chars outside our vocab.
-                # Unknown chars all map to index 0 (space), breaking F5-TTS alignment.
-                vocab_path = Path("/workspace/f5tts-uz-data_char/vocab.txt")
-                if vocab_path.exists():
-                    known = set(vocab_path.read_text().splitlines())
-                    filtered = "".join(c for c in raw_text if c in known)
-                    ref_text = filtered.strip() or " "
-                else:
-                    ref_text = raw_text or " "
-                logger.info(f"Reference transcribed via WhisperX: {raw_text!r} → filtered: {ref_text!r}")
+                ref_text = raw_text or " "
+                logger.info(f"Reference transcribed via WhisperX: {ref_text!r}")
         except Exception as e:
             logger.warning(f"WhisperX transcription failed, using fallback: {e}")
 
