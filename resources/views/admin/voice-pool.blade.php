@@ -93,6 +93,10 @@
                     </div>
                 </div>
 
+                <label>Reference text <span style="font-weight:400;color:#9ca3af">(optional — transcript of the audio clip)</span></label>
+                <textarea name="ref_text" rows="2" style="width:100%;padding:9px 12px;border:1px solid #ddd;border-radius:6px;box-sizing:border-box;font-size:14px;resize:vertical" placeholder="Type exactly what is said in the audio clip...">{{ old('ref_text') }}</textarea>
+                <div class="hint">Helps F5-TTS clone the voice accurately. Leave blank to auto-detect.</div>
+
                 <button type="submit" class="primary">⬆️ Upload &amp; Add</button>
                 <div id="loading">⏳ Processing... this takes a few seconds</div>
             </form>
@@ -132,6 +136,10 @@
                         <div class="hint">5–60 sec, aim for 20–30</div>
                     </div>
                 </div>
+
+                <label>Reference text <span style="font-weight:400;color:#9ca3af">(optional — transcript of the audio clip)</span></label>
+                <textarea name="ref_text" rows="2" style="width:100%;padding:9px 12px;border:1px solid #ddd;border-radius:6px;box-sizing:border-box;font-size:14px;resize:vertical" placeholder="Type exactly what is said in the audio clip...">{{ old('ref_text') }}</textarea>
+                <div class="hint">Helps F5-TTS clone the voice accurately. Leave blank to auto-detect.</div>
 
                 <button type="submit" class="primary">⬇️ Download &amp; Add</button>
                 <div id="loading">⏳ Downloading... this takes 10–30 seconds</div>

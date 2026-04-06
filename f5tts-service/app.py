@@ -128,6 +128,7 @@ async def clone_voice(
     name: str = Form(...),
     description: str = Form(""),
     language: str = Form("uz"),
+    ref_text: Optional[str] = Form(None),
 ):
     """Store reference audio for voice cloning."""
     try:
@@ -156,29 +157,30 @@ async def clone_voice(
         sample_path = voice_dir / "sample.wav"
         sf.write(str(sample_path), audio_np, 24000)
 
-        # Get ref_text from WhisperX, normalize to safe chars only.
-        # WhisperX may output Turkish/English; numbers, uppercase, punctuation
-        # outside our char vocab cause tensor size mismatches in F5-TTS synthesis.
-        ref_text = "salom"  # fallback: short valid Uzbek placeholder
-        try:
-            import httpx
-            with open(sample_path, "rb") as f:
-                resp = httpx.post(
-                    "http://localhost:8002/analyze-upload",
-                    files={"audio": ("sample.wav", f, "audio/wav")},
-                    data={"lite": "1", "language": "uz"},
-                    timeout=60,
-                )
-            if resp.status_code == 200:
-                segments = resp.json().get("segments", [])
-                raw_text = " ".join(s.get("text", "") for s in segments).strip()
-                # Normalize: lowercase, keep only a-z, Uzbek special chars, spaces
-                import re
-                normalized = re.sub(r"[^a-zоʻгʻ\s]", "", raw_text.lower()).strip()
-                ref_text = normalized if len(normalized) >= 3 else "salom"
-                logger.info(f"WhisperX raw: {raw_text!r} → normalized ref_text: {ref_text!r}")
-        except Exception as e:
-            logger.warning(f"WhisperX transcription failed, using fallback: {e}")
+        # Use manually provided ref_text if given, otherwise fall back to WhisperX
+        if ref_text and ref_text.strip():
+            ref_text = ref_text.strip()
+            logger.info(f"Using manual ref_text: {ref_text!r}")
+        else:
+            ref_text = "salom"  # fallback placeholder
+            try:
+                import httpx
+                with open(sample_path, "rb") as f:
+                    resp = httpx.post(
+                        "http://localhost:8002/analyze-upload",
+                        files={"audio": ("sample.wav", f, "audio/wav")},
+                        data={"lite": "1", "language": "uz"},
+                        timeout=60,
+                    )
+                if resp.status_code == 200:
+                    segments = resp.json().get("segments", [])
+                    raw_text = " ".join(s.get("text", "") for s in segments).strip()
+                    import re
+                    normalized = re.sub(r"[^a-zоʻгʻ\s]", "", raw_text.lower()).strip()
+                    ref_text = normalized if len(normalized) >= 3 else "salom"
+                    logger.info(f"WhisperX raw: {raw_text!r} → ref_text: {ref_text!r}")
+            except Exception as e:
+                logger.warning(f"WhisperX transcription failed, using fallback: {e}")
 
         import json
         from datetime import datetime

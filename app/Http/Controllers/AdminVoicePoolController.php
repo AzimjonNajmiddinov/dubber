@@ -43,6 +43,7 @@ class AdminVoicePoolController extends Controller
             'name'        => 'required|string|max:50|regex:/^[a-zA-Z0-9_-]+$/',
             'start'       => 'nullable|integer|min:0',
             'duration'    => 'nullable|integer|min:5|max:60',
+            'ref_text'    => 'nullable|string|max:500',
         ]);
 
         $gender   = $request->input('gender');
@@ -50,6 +51,7 @@ class AdminVoicePoolController extends Controller
         $url      = $request->input('youtube_url');
         $start    = (int) ($request->input('start', 0));
         $duration = (int) ($request->input('duration', 25));
+        $refText  = $request->input('ref_text');
 
         $dir = storage_path("app/voice-pool/{$gender}");
         @mkdir($dir, 0775, true);
@@ -88,6 +90,9 @@ class AdminVoicePoolController extends Controller
         }
 
         Redis::del('voice-pool-id:' . md5($outWav));
+        if ($refText) {
+            Redis::setex('voice-pool-ref:' . md5($outWav), 30 * 86400, $refText);
+        }
         Log::info("[VOICE POOL] Added {$gender}/{$name} from {$url} (start={$start}s, dur={$duration}s)");
 
         return back()->with('success', "Voice '{$name}' added to {$gender} pool ({$duration}s).");
@@ -101,12 +106,14 @@ class AdminVoicePoolController extends Controller
             'name'     => 'required|string|max:50|regex:/^[a-zA-Z0-9_-]+$/',
             'start'    => 'nullable|integer|min:0',
             'duration' => 'nullable|integer|min:5|max:60',
+            'ref_text' => 'nullable|string|max:500',
         ]);
 
         $gender   = $request->input('gender');
         $name     = $request->input('name');
         $start    = (int) ($request->input('start', 0));
         $duration = (int) ($request->input('duration', 25));
+        $refText  = $request->input('ref_text');
 
         $dir = storage_path("app/voice-pool/{$gender}");
         @mkdir($dir, 0775, true);
@@ -130,6 +137,9 @@ class AdminVoicePoolController extends Controller
         }
 
         Redis::del('voice-pool-id:' . md5($outWav));
+        if ($refText) {
+            Redis::setex('voice-pool-ref:' . md5($outWav), 30 * 86400, $refText);
+        }
         Log::info("[VOICE POOL] Uploaded {$gender}/{$name} (start={$start}s, dur={$duration}s)");
 
         return back()->with('success', "Voice '{$name}' added to {$gender} pool ({$duration}s).");
@@ -174,13 +184,16 @@ class AdminVoicePoolController extends Controller
         $cacheKey = 'voice-pool-id:' . md5($file);
         $voiceId  = Redis::get($cacheKey);
 
-        $cloneIfNeeded = function () use ($xttsUrl, $file, $name, $request, $cacheKey, &$voiceId) {
+        $manualRefText = Redis::get('voice-pool-ref:' . md5($file));
+
+        $cloneIfNeeded = function () use ($xttsUrl, $file, $name, $request, $cacheKey, &$voiceId, $manualRefText) {
+            $postData = ['name' => $name, 'language' => $request->input('language')];
+            if ($manualRefText) {
+                $postData['ref_text'] = $manualRefText;
+            }
             $cloneResp = Http::timeout(60)
                 ->attach('audio', file_get_contents($file), $name . '.wav')
-                ->post("{$xttsUrl}/clone", [
-                    'name'     => $name,
-                    'language' => $request->input('language'),
-                ]);
+                ->post("{$xttsUrl}/clone", $postData);
 
             if (!$cloneResp->successful()) {
                 return response()->json(['error' => 'Clone failed: ' . $cloneResp->body()], 500);
