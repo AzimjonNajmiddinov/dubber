@@ -20,15 +20,7 @@ class AdminVoicePoolController extends Controller
             if (!is_dir($dir)) continue;
             foreach (glob("{$dir}/*.wav") as $file) {
                 $name = pathinfo($file, PATHINFO_FILENAME);
-                $voiceId  = \Illuminate\Support\Facades\Redis::get('voice-pool-id:' . md5($file));
-                $ref_text = null;
-                if ($voiceId) {
-                    $metaPath = '/workspace/f5tts-voices/' . $voiceId . '/meta.json';
-                    if (file_exists($metaPath)) {
-                        $meta = json_decode(file_get_contents($metaPath), true);
-                        $ref_text = $meta['ref_text'] ?? null;
-                    }
-                }
+                $ref_text = Redis::get('voice-pool-ref:' . md5($file)) ?: null;
                 $pool[] = [
                     'gender'   => $gender,
                     'name'     => $name,
@@ -196,6 +188,9 @@ class AdminVoicePoolController extends Controller
 
             $voiceId = $cloneResp->json('voice_id');
             Redis::setex($cacheKey, 7 * 86400, $voiceId);
+            if ($refText = $cloneResp->json('ref_text')) {
+                Redis::setex('voice-pool-ref:' . md5($file), 30 * 86400, $refText);
+            }
             return null;
         };
 

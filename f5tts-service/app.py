@@ -191,7 +191,7 @@ async def clone_voice(
         (voice_dir / "meta.json").write_text(json.dumps(meta, indent=2))
 
         logger.info(f"Voice stored: {voice_id} ({name})")
-        return {"ok": True, "voice_id": voice_id, "name": name}
+        return {"ok": True, "voice_id": voice_id, "name": name, "ref_text": ref_text}
 
     except Exception as e:
         logger.error(f"Clone failed: {e}")
