@@ -228,6 +228,17 @@ async def synthesize(request: SynthesizeRequest):
         if not sentences:
             sentences = [request.text]
 
+        # Clear stale text_embed cache — F5-TTS caches text_cond/text_uncond on the
+        # transformer per-call but never clears between calls. Different texts have
+        # different seq_len → stale cache causes tensor size mismatch on 2nd+ synthesis.
+        try:
+            model.ema_model.transformer.clear_cache()
+        except AttributeError:
+            try:
+                model.model.transformer.clear_cache()
+            except AttributeError:
+                pass
+
         wav_parts = []
         sr = 24000
         for sent in sentences:
