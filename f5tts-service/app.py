@@ -156,25 +156,10 @@ async def clone_voice(
         sample_path = voice_dir / "sample.wav"
         sf.write(str(sample_path), audio_np, 24000)
 
-        # Transcribe reference audio via WhisperX (already running on port 8002)
-        # Cached so synthesis never needs to run Whisper itself
-        ref_text = " "  # fallback: skip f5-tts internal transcription
-        try:
-            import httpx
-            with open(sample_path, "rb") as f:
-                resp = httpx.post(
-                    "http://localhost:8002/analyze-upload",
-                    files={"audio": ("sample.wav", f, "audio/wav")},
-                    data={"lite": "1", "language": "uz"},
-                    timeout=60,
-                )
-            if resp.status_code == 200:
-                segments = resp.json().get("segments", [])
-                raw_text = " ".join(s.get("text", "") for s in segments).strip()
-                ref_text = raw_text or " "
-                logger.info(f"Reference transcribed via WhisperX: {ref_text!r}")
-        except Exception as e:
-            logger.warning(f"WhisperX transcription failed, using fallback: {e}")
+        # Use empty ref_text — F5-TTS will transcribe reference internally.
+        # WhisperX gives unreliable Uzbek transcription (outputs Turkish/English),
+        # which causes duration miscalculation and tensor size mismatches in synthesis.
+        ref_text = " "
 
         import json
         from datetime import datetime
