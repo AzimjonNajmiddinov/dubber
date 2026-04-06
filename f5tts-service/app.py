@@ -267,7 +267,8 @@ async def synthesize(request: SynthesizeRequest):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Synthesis failed: {e}")
+        import traceback
+        logger.error(f"Synthesis failed: {e}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
