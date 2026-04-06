@@ -159,7 +159,7 @@ async def clone_voice(
                 resp = httpx.post(
                     "http://localhost:8002/analyze-upload",
                     files={"audio": ("sample.wav", f, "audio/wav")},
-                    data={"lite": "1"},
+                    data={"lite": "1", "language": "uz"},
                     timeout=60,
                 )
             if resp.status_code == 200:
