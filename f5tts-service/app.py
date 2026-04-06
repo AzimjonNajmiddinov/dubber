@@ -221,20 +221,29 @@ async def synthesize(request: SynthesizeRequest):
 
         logger.info(f"Synthesizing {len(request.text)} chars with voice={request.voice_id}, speed={request.speed}")
 
-        wav, sr, _ = model.infer(
-            ref_file=str(sample_path),
-            ref_text=ref_text,
-            gen_text=request.text,
-            speed=request.speed,
-            nfe_step=32,
-            remove_silence=False,
-        )
+        # Split text into sentences ourselves to avoid F5-TTS internal batch
+        # concatenation bug (tensor size mismatch across chunks).
+        import re as _re
+        sentences = [s.strip() for s in _re.split(r'(?<=[.!?])\s+', request.text) if s.strip()]
+        if not sentences:
+            sentences = [request.text]
 
-        # Save output
-        if isinstance(wav, torch.Tensor):
-            wav_np = wav.squeeze().cpu().numpy()
-        else:
-            wav_np = wav
+        wav_parts = []
+        sr = 24000
+        for sent in sentences:
+            w, sr, _ = model.infer(
+                ref_file=str(sample_path),
+                ref_text=ref_text,
+                gen_text=sent,
+                speed=request.speed,
+                nfe_step=32,
+                remove_silence=False,
+            )
+            if isinstance(w, torch.Tensor):
+                w = w.squeeze().cpu().numpy()
+            wav_parts.append(w)
+
+        wav_np = np.concatenate(wav_parts) if len(wav_parts) > 1 else wav_parts[0]
 
         sf.write(str(output_path), wav_np, sr)
 
