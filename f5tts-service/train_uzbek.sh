@@ -200,6 +200,10 @@ PYEOF
 
     echo "  Dataset prepared at: $DATASET_DIR"
     ls -lh "$DATASET_DIR"
+
+    # Fix vocab.txt: ensure space is at index 0, remove duplicates/empty lines
+    echo "  Fixing vocab.txt (space must be at index 0)..."
+    $VENV/bin/python "$SCRIPT_DIR/fix_vocab.py" "$DATASET_DIR/vocab.txt"
 else
     echo "[2/3] Skipping data preparation"
 fi
@@ -240,7 +244,7 @@ $VENV/bin/accelerate launch \
     --dataset_name "$DATASET_NAME" \
     --tokenizer char \
     --finetune \
-    --epochs 15 \
+    --epochs 100 \
     --learning_rate 1e-5 \
     --batch_size_per_gpu 1600 \
     --batch_size_type frame \
