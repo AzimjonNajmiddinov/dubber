@@ -446,18 +446,21 @@ def _merge_segments(segments: list, max_gap: float = 0.5) -> list:
     return merged
 
 
-def _analyze_audio(audio_path: str, min_speakers: Optional[int] = None, max_speakers: Optional[int] = None, lite: bool = False) -> dict:
+def _analyze_audio(audio_path: str, min_speakers: Optional[int] = None, max_speakers: Optional[int] = None, lite: bool = False, language: Optional[str] = None) -> dict:
     """Core analysis logic shared by path-based and upload endpoints."""
     # 1) TRANSCRIBE
     whisper_model = get_whisper_model()
-    whisper_segments, info = whisper_model.transcribe(audio_path, vad_filter=True)
+    transcribe_kwargs = {"vad_filter": True}
+    if language:
+        transcribe_kwargs["language"] = language
+    whisper_segments, info = whisper_model.transcribe(audio_path, **transcribe_kwargs)
     segments = [
         {"start": float(s.start), "end": float(s.end), "text": s.text.strip()}
         for s in whisper_segments
     ]
 
     # 2) ALIGN — fix segment timestamps using whisperx forced alignment
-    language = getattr(info, "language", "en") or "en"
+    language = language or getattr(info, "language", "en") or "en"
     if segments:
         try:
             align_model, align_metadata = get_align_model(language)
@@ -671,6 +674,7 @@ def analyze_upload(
     min_speakers: Optional[int] = Form(None),
     max_speakers: Optional[int] = Form(None),
     lite: Optional[int] = Form(None),
+    language: Optional[str] = Form(None),
 ):
     """Analyze audio via file upload (for remote clients without shared filesystem)."""
     with _analyze_semaphore:
@@ -683,8 +687,8 @@ def analyze_upload(
                 tmp_path = tmp.name
 
             is_lite = bool(lite)
-            print(f"[UPLOAD] Received {audio.filename}, saved to {tmp_path} ({os.path.getsize(tmp_path)} bytes), lite={is_lite}", flush=True)
-            return _analyze_audio(tmp_path, min_speakers=min_speakers, max_speakers=max_speakers, lite=is_lite)
+            print(f"[UPLOAD] Received {audio.filename}, saved to {tmp_path} ({os.path.getsize(tmp_path)} bytes), lite={is_lite}, language={language}", flush=True)
+            return _analyze_audio(tmp_path, min_speakers=min_speakers, max_speakers=max_speakers, lite=is_lite, language=language)
         except HTTPException:
             raise
         except Exception as e:
