@@ -153,6 +153,7 @@
                         <th>Duration</th>
                         <th>Size</th>
                         <th>Speed</th>
+                        <th>Ref text</th>
                         <th></th>
                     </tr>
                 </thead>
@@ -164,6 +165,7 @@
                         <td>{{ $voice['duration'] }}</td>
                         <td>{{ $voice['size'] }}</td>
                         <td style="color:#374151;font-size:13px" id="speed-label-{{ $voice['gender'] }}-{{ $voice['name'] }}">{{ $voice['speed'] }}×</td>
+                        <td style="font-size:11px;color:#6b7280;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="{{ $voice['ref_text'] ?? '' }}">{{ $voice['ref_text'] ?? '—' }}</td>
                         <td style="display:flex;gap:6px;align-items:center">
                             <button type="button" class="play-btn" onclick="togglePlay(this, '{{ route('admin.voice-pool.play', [$voice['gender'], $voice['name']]) }}')">▶ Play</button>
                             <form method="POST" action="{{ route('admin.voice-pool.delete', [$voice['gender'], $voice['name']]) }}" style="display:inline" onsubmit="return confirm('Delete {{ $voice['name'] }}?')">
