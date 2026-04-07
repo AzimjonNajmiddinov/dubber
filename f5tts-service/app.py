@@ -62,15 +62,41 @@ def load_model():
         return _f5tts_model
 
     logger.info("Loading F5-TTS model...")
+
+    # Patch load_checkpoint before F5TTS import to handle finetune_cli EMA checkpoint format.
+    # finetune_cli saves: ema_model_state_dict with keys like 'ema_model.transformer.*'
+    # CFM model expects keys like 'transformer.*'
+    # So we strip 'ema_model.' prefix and load with strict=False.
+    import f5_tts.infer.utils_infer as _utils_infer
+    _orig_load_checkpoint = _utils_infer.load_checkpoint
+
+    def _patched_load_checkpoint(model, ckpt_path, device, dtype=None, use_ema=True):
+        ckpt_ext = str(ckpt_path).rsplit(".", 1)[-1]
+        if ckpt_ext == "safetensors":
+            return _orig_load_checkpoint(model, ckpt_path, device, dtype=dtype, use_ema=use_ema)
+        ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+        if "ema_model_state_dict" in ckpt and use_ema:
+            PREFIX = "ema_model."
+            state_dict = {k[len(PREFIX):]: v for k, v in ckpt["ema_model_state_dict"].items()
+                         if k.startswith(PREFIX)}
+            logger.info(f"Loaded EMA state dict: {len(state_dict)} keys")
+        elif "model_state_dict" in ckpt:
+            state_dict = ckpt["model_state_dict"]
+        else:
+            state_dict = ckpt
+        result = model.load_state_dict(state_dict, strict=False)
+        logger.info(f"load_state_dict: missing={len(result.missing_keys)}, unexpected={len(result.unexpected_keys)}")
+        return model
+
+    _utils_infer.load_checkpoint = _patched_load_checkpoint
+
     from f5_tts.api import F5TTS
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     ckpt_file = next((p for p in [
-        "/root/f5tts-uz-finetuned/model_last.safetensors",
-        "/workspace/f5tts-uz-finetuned/model_last.safetensors",
+        "/workspace/tts-venv/lib/python3.10/ckpts/f5tts-uz-data/model_last.pt",
         "/root/f5tts-uz-finetuned/model_last.pt",
-        "/workspace/f5tts-uz-finetuned/model_last.pt",
-    ] if Path(p).exists()), None) or "/root/f5tts-uz-finetuned/model_last.safetensors"
+    ] if Path(p).exists()), None) or "/workspace/tts-venv/lib/python3.10/ckpts/f5tts-uz-data/model_last.pt"
     vocab_file = "/workspace/f5tts-uz-data_char/vocab.txt"
 
     if Path(ckpt_file).exists() and Path(vocab_file).exists():
