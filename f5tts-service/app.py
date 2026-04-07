@@ -257,7 +257,8 @@ async def synthesize(request: SynthesizeRequest):
                 ref_text=ref_text,
                 gen_text=sent,
                 speed=request.speed,
-                nfe_step=32,
+                nfe_step=64,
+                cfg_strength=1.0,
                 remove_silence=False,
             )
             if isinstance(w, torch.Tensor):
