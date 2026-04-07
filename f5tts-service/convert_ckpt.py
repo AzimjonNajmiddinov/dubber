@@ -27,11 +27,12 @@ ckpt = torch.load(src, map_location='cpu', weights_only=False)
 ema_sd = ckpt.get('ema_model_state_dict', {})
 print(f'EMA state dict: {len(ema_sd)} keys')
 
-# Strip 'ema_model.' prefix; skip EMA bookkeeping scalars
+# Strip 'ema_model.transformer.' prefix; skip EMA bookkeeping scalars
+PREFIX = 'ema_model.transformer.'
 converted = {}
 for k, v in ema_sd.items():
-    if k.startswith('ema_model.'):
-        converted[k[len('ema_model.'):]] = v.float()
+    if k.startswith(PREFIX):
+        converted[k[len(PREFIX):]] = v.float()
     # skip 'initted', 'step', etc.
 
 print(f'Converted: {len(converted)} keys')
