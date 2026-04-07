@@ -225,15 +225,18 @@ async def synthesize(request: SynthesizeRequest):
         ref_text = " "  # fallback: space skips f5-tts internal whisper
         if meta_path.exists():
             ref_text = _json.loads(meta_path.read_text()).get("ref_text", " ") or " "
+        ref_text = ref_text.lower()  # vocab is lowercase-only
 
         logger.info(f"Synthesizing {len(request.text)} chars with voice={request.voice_id}, speed={request.speed}")
 
         # Split text into sentences ourselves to avoid F5-TTS internal batch
         # concatenation bug (tensor size mismatch across chunks).
         import re as _re
-        sentences = [s.strip() for s in _re.split(r'(?<=[.!?])\s+', request.text) if s.strip()]
+        # Vocab was built from FLEURS lowercase-only data — uppercase chars are OOV
+        text_input = request.text.lower()
+        sentences = [s.strip() for s in _re.split(r'(?<=[.!?])\s+', text_input) if s.strip()]
         if not sentences:
-            sentences = [request.text]
+            sentences = [text_input]
 
         # Clear stale text_embed cache — F5-TTS caches text_cond/text_uncond on the
         # transformer per-call but never clears between calls. Different texts have
