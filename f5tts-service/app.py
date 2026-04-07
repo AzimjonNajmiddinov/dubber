@@ -66,9 +66,11 @@ def load_model():
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     ckpt_file = next((p for p in [
+        "/root/f5tts-uz-finetuned/model_last.safetensors",
+        "/workspace/f5tts-uz-finetuned/model_last.safetensors",
         "/root/f5tts-uz-finetuned/model_last.pt",
         "/workspace/f5tts-uz-finetuned/model_last.pt",
-    ] if Path(p).exists()), None) or "/workspace/f5tts-uz-finetuned/model_last.pt"
+    ] if Path(p).exists()), None) or "/root/f5tts-uz-finetuned/model_last.safetensors"
     vocab_file = "/workspace/f5tts-uz-data_char/vocab.txt"
 
     if Path(ckpt_file).exists() and Path(vocab_file).exists():
