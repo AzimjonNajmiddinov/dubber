@@ -80,7 +80,7 @@
                 <div class="step" id="s-separating">🎵 Separating stems (Demucs)</div>
                 <div class="step" id="s-transcribing">📝 Transcribing (WhisperX)</div>
                 <div class="step" id="s-translating">🌐 Translating</div>
-                <div class="step" id="s-synthesizing">🗣️ Synthesizing voices (XTTS)</div>
+                <div class="step" id="s-synthesizing">🗣️ Synthesizing voices (MMS TTS)</div>
                 <div class="step" id="s-mixing">🎬 Mixing audio</div>
                 <div class="step" id="s-complete">✅ Complete</div>
             </div>

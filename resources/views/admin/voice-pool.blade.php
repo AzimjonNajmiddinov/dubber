@@ -224,16 +224,17 @@
             </div>
         </div>
         <label>Speed <span id="speed-display" style="font-weight:400;color:#6b7280">1.0×</span></label>
-        <div style="display:flex;align-items:center;gap:10px">
-            <input type="range" id="test-speed" min="0.5" max="2.0" step="0.05" value="1.0" style="flex:1;padding:0" oninput="document.getElementById('speed-display').textContent=parseFloat(this.value).toFixed(2)+'×'">
-            <button type="button" style="background:#059669;color:white;border:none;padding:5px 12px;border-radius:4px;cursor:pointer;font-size:12px;white-space:nowrap" onclick="saveSpeed()">💾 Save</button>
-            <span id="save-status" style="font-size:12px;color:#6b7280"></span>
-        </div>
-        <div class="hint">Adjust until the speaking pace sounds natural, then save — it will be used in all future dubs with this voice.</div>
+        <input type="range" id="test-speed" min="0.5" max="2.0" step="0.05" value="1.0" style="width:100%;padding:0" oninput="document.getElementById('speed-display').textContent=parseFloat(this.value).toFixed(2)+'×'">
+        <div class="hint">Adjust until the speaking pace sounds natural.</div>
 
         <label style="margin-top:16px">Voice similarity (tau) <span id="tau-display" style="font-weight:400;color:#6b7280">0.9</span></label>
         <input type="range" id="test-tau" min="0.0" max="1.0" step="0.05" value="0.9" style="width:100%;padding:0" oninput="document.getElementById('tau-display').textContent=parseFloat(this.value).toFixed(2)">
-        <div class="hint">Higher = more similar to reference voice, but may introduce artifacts. Try 0.7–1.0.</div>
+        <div class="hint">Higher = more similar to reference voice. 0.0 = raw MMS TTS (no cloning).</div>
+
+        <div style="margin-top:14px;display:flex;align-items:center;gap:10px">
+            <button type="button" style="background:#059669;color:white;border:none;padding:6px 16px;border-radius:4px;cursor:pointer;font-size:13px" onclick="saveSpeed()">💾 Save speed &amp; tau</button>
+            <span id="save-status" style="font-size:12px;color:#6b7280"></span>
+        </div>
 
         <label style="margin-top:12px">Text</label>
         <textarea id="test-text" rows="3" style="width:100%;padding:9px 12px;border:1px solid #ddd;border-radius:6px;box-sizing:border-box;font-size:14px;font-family:sans-serif" placeholder="Enter text to synthesize...">Salom, men o'zbek tilida gapiraman. Bu sinov matni.</textarea>
