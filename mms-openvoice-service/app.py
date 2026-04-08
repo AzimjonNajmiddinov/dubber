@@ -245,7 +245,7 @@ async def synthesize(request: SynthesizeRequest):
             src_se=src_se,
             tgt_se=target_se,
             output_path=str(out_path),
-            tau=0.3,
+            tau=0.7,
         )
 
         src_path.unlink(missing_ok=True)
