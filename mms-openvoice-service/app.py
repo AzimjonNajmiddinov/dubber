@@ -63,6 +63,22 @@ _LAT2CYR = [
 
 def latin_to_cyrillic(text: str) -> str:
     """Convert Uzbek Latin script to Cyrillic for MMS TTS model."""
+    # Normalize all apostrophe/quote variants to standard straight apostrophe (U+0027)
+    # AI models often return curly quotes (U+2018/U+2019) or modifier letters (U+02BB/U+02BC)
+    # which break o' → ў and g' → ғ conversions.
+    text = (text
+        .replace('\u2018', "'")   # ' LEFT SINGLE QUOTATION MARK
+        .replace('\u2019', "'")   # ' RIGHT SINGLE QUOTATION MARK
+        .replace('\u02bb', "'")   # ʻ MODIFIER LETTER TURNED COMMA
+        .replace('\u02bc', "'")   # ʼ MODIFIER LETTER APOSTROPHE
+        .replace('\u0060', "'")   # ` GRAVE ACCENT
+        .replace('\u00b4', "'")   # ´ ACUTE ACCENT
+    )
+    # Remove decorative/smart double quotes that MMS can't pronounce
+    text = (text
+        .replace('\u201c', '"')   # " LEFT DOUBLE QUOTATION MARK
+        .replace('\u201d', '"')   # " RIGHT DOUBLE QUOTATION MARK
+    )
     for lat, cyr in _LAT2CYR:
         text = text.replace(lat, cyr)
     return text
@@ -232,16 +248,24 @@ async def synthesize(request: SynthesizeRequest):
 
         waveform_22k = waveform_22k.numpy().astype(np.float32)
 
-        # Save MMS output temporarily
+        # Guard: MMS may produce near-silent output for unconvertable text
+        if len(waveform_22k) < 1600:  # < ~0.07s at 22050 Hz — unusable
+            raise ValueError(
+                f"MMS produced empty audio for text: {cyrillic_text!r} "
+                f"(original: {request.text!r}). Waveform length: {len(waveform_22k)}"
+            )
+
+        # Save MMS output temporarily (inside try block so cleanup always runs)
         src_path = CACHE_PATH / f"src_{uuid.uuid4()}.wav"
-        sf.write(str(src_path), waveform_22k, 22050)
 
         # 3. OpenVoice tone color conversion (fallback to raw MMS if SE extraction fails)
         from openvoice import se_extractor
+        import shutil as _shutil
         target_se = torch.load(str(se_path))
 
         out_path = CACHE_PATH / f"{uuid.uuid4()}.wav"
         try:
+            sf.write(str(src_path), waveform_22k, 22050)
             src_se, _ = se_extractor.get_se(str(src_path), _ov_converter, vad=False)
             _ov_converter.convert(
                 audio_src_path=str(src_path),
@@ -254,8 +278,10 @@ async def synthesize(request: SynthesizeRequest):
                 raise RuntimeError("OpenVoice output invalid")
         except Exception as e:
             logger.warning(f"OpenVoice conversion failed ({e}), using raw MMS output")
-            import shutil
-            shutil.copy(str(src_path), str(out_path))
+            if src_path.exists():
+                _shutil.copy(str(src_path), str(out_path))
+            else:
+                sf.write(str(out_path), waveform_22k, 22050)
 
         src_path.unlink(missing_ok=True)
 
