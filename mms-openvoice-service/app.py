@@ -264,24 +264,29 @@ async def synthesize(request: SynthesizeRequest):
         target_se = torch.load(str(se_path))
 
         out_path = CACHE_PATH / f"{uuid.uuid4()}.wav"
-        try:
-            sf.write(str(src_path), waveform_22k, 22050)
-            src_se, _ = se_extractor.get_se(str(src_path), _ov_converter, vad=False)
-            _ov_converter.convert(
-                audio_src_path=str(src_path),
-                src_se=src_se,
-                tgt_se=target_se,
-                output_path=str(out_path),
-                tau=request.tau,
-            )
-            if not out_path.exists() or out_path.stat().st_size < 1000:
-                raise RuntimeError("OpenVoice output invalid")
-        except Exception as e:
-            logger.warning(f"OpenVoice conversion failed ({e}), using raw MMS output")
-            if src_path.exists():
-                _shutil.copy(str(src_path), str(out_path))
-            else:
-                sf.write(str(out_path), waveform_22k, 22050)
+
+        # tau=0 means no voice cloning — return raw MMS directly
+        if request.tau <= 0.0:
+            sf.write(str(out_path), waveform_22k, 22050)
+        else:
+            try:
+                sf.write(str(src_path), waveform_22k, 22050)
+                src_se, _ = se_extractor.get_se(str(src_path), _ov_converter, vad=False)
+                _ov_converter.convert(
+                    audio_src_path=str(src_path),
+                    src_se=src_se,
+                    tgt_se=target_se,
+                    output_path=str(out_path),
+                    tau=request.tau,
+                )
+                if not out_path.exists() or out_path.stat().st_size < 1000:
+                    raise RuntimeError("OpenVoice output invalid")
+            except Exception as e:
+                logger.warning(f"OpenVoice conversion failed ({e}), using raw MMS output")
+                if src_path.exists():
+                    _shutil.copy(str(src_path), str(out_path))
+                else:
+                    sf.write(str(out_path), waveform_22k, 22050)
 
         src_path.unlink(missing_ok=True)
 
