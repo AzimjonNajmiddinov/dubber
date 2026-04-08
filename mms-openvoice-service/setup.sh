@@ -23,7 +23,7 @@ if [ ! -d /workspace/openvoice-v2 ]; then
 fi
 cd /workspace/openvoice-v2
 $VENV/bin/pip install --quiet -e . --no-deps
-$VENV/bin/pip install --quiet faster-whisper wavmark inflect pydub librosa
+$VENV/bin/pip install --quiet wavmark inflect pydub librosa
 
 # Download OpenVoice v2 checkpoints
 mkdir -p /workspace/openvoice-v2/checkpoints_v2
