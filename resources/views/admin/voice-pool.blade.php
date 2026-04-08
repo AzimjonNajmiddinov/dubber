@@ -231,6 +231,10 @@
         </div>
         <div class="hint">Adjust until the speaking pace sounds natural, then save — it will be used in all future dubs with this voice.</div>
 
+        <label style="margin-top:16px">Voice similarity (tau) <span id="tau-display" style="font-weight:400;color:#6b7280">0.9</span></label>
+        <input type="range" id="test-tau" min="0.1" max="1.0" step="0.05" value="0.9" style="width:100%;padding:0" oninput="document.getElementById('tau-display').textContent=parseFloat(this.value).toFixed(2)">
+        <div class="hint">Higher = more similar to reference voice, but may introduce artifacts. Try 0.7–1.0.</div>
+
         <label style="margin-top:12px">Text</label>
         <textarea id="test-text" rows="3" style="width:100%;padding:9px 12px;border:1px solid #ddd;border-radius:6px;box-sizing:border-box;font-size:14px;font-family:sans-serif" placeholder="Enter text to synthesize...">Salom, men o'zbek tilida gapiraman. Bu sinov matni.</textarea>
         <div style="margin-top:12px;display:flex;gap:10px;align-items:center">
@@ -355,7 +359,7 @@
                         'Content-Type': 'application/json',
                         'X-CSRF-TOKEN': document.querySelector('meta[name=csrf-token]').content,
                     },
-                    body: JSON.stringify({ gender, name, text, language: lang, speed: parseFloat(document.getElementById('test-speed').value) }),
+                    body: JSON.stringify({ gender, name, text, language: lang, speed: parseFloat(document.getElementById('test-speed').value), tau: parseFloat(document.getElementById('test-tau').value) }),
                 });
 
                 if (!resp.ok) {

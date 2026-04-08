@@ -195,6 +195,7 @@ class SynthesizeRequest(BaseModel):
     voice_id: str
     language: str = "uz"
     speed: float = 1.0
+    tau: float = 0.9
 
 
 @app.post("/synthesize")
@@ -245,7 +246,7 @@ async def synthesize(request: SynthesizeRequest):
             src_se=src_se,
             tgt_se=target_se,
             output_path=str(out_path),
-            tau=0.7,
+            tau=request.tau,
         )
 
         src_path.unlink(missing_ok=True)

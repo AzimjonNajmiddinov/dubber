@@ -191,6 +191,7 @@ class AdminVoicePoolController extends Controller
             'text'       => 'required|string|max:500',
             'language'   => 'required|string|max:10',
             'speed'      => 'nullable|numeric|min:0.5|max:2.0',
+            'tau'        => 'nullable|numeric|min:0.1|max:1.0',
             'tts_engine' => 'nullable|in:f5tts,mms',
         ]);
 
@@ -235,11 +236,13 @@ class AdminVoicePoolController extends Controller
             if ($err = $cloneIfNeeded()) return $err;
         }
 
+        $tau = (float) ($request->input('tau', 0.9));
         $synthResp = Http::timeout(120)->post("{$xttsUrl}/synthesize", [
             'text'     => $request->input('text'),
             'voice_id' => $voiceId,
             'language' => $request->input('language'),
             'speed'    => $speed,
+            'tau'      => $tau,
         ]);
 
         // Voice lost after pod restart — re-clone and retry once
@@ -252,6 +255,7 @@ class AdminVoicePoolController extends Controller
                 'voice_id' => $voiceId,
                 'language' => $request->input('language'),
                 'speed'    => $speed,
+                'tau'      => $tau,
             ]);
         }
 
