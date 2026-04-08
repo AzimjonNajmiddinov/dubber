@@ -102,27 +102,22 @@ def load_seed_vc():
 
     logger.info("Loading Seed-VC model...")
     try:
-        # Seed-VC v2 inference setup
         import yaml
         from modules.commons import recursive_munch, build_model
         from hf_utils import load_custom_model_from_hf
 
-        # Find config — prefer DiT mel seed model (best quality)
-        config_candidates = [
-            SEED_VC_WEIGHTS / "config_dit_mel_seed_uvit_whisper_small_wavenet.yml",
-            SEED_VC_DIR / "configs" / "presets" / "config_dit_mel_seed_uvit_whisper_small_wavenet.yml",
-            SEED_VC_DIR / "configs" / "presets" / "config_dit_mel_seed_uvit_whisper_base_f0_44k.yml",
-        ]
-        config_path = next((p for p in config_candidates if p.exists()), None)
-        if config_path is None:
-            # List available configs
-            configs = list((SEED_VC_DIR / "configs" / "presets").glob("*.yml"))
+        # Use Seed-VC's own hf_utils to download + load the default model
+        # This handles all caching automatically
+        config_path = SEED_VC_DIR / "configs" / "presets" / "config_dit_mel_seed_uvit_whisper_small_wavenet.yml"
+        if not config_path.exists():
+            # Fallback: first available preset config
+            configs = sorted((SEED_VC_DIR / "configs" / "presets").glob("*.yml"))
             config_path = configs[0] if configs else None
 
         if config_path is None:
-            raise RuntimeError("No Seed-VC config found")
+            raise RuntimeError("No Seed-VC config found in configs/presets/")
 
-        logger.info(f"Using config: {config_path}")
+        logger.info(f"Using config: {config_path.name}")
 
         with open(config_path) as f:
             config = yaml.safe_load(f)
@@ -130,19 +125,18 @@ def load_seed_vc():
 
         model = build_model(config.model_params, stage="DiT")
 
-        # Find checkpoint
-        ckpt_candidates = list(SEED_VC_WEIGHTS.glob("*.pth")) + list(SEED_VC_WEIGHTS.glob("*.pt"))
-        if not ckpt_candidates:
-            ckpt_candidates = list(SEED_VC_DIR.glob("*.pth")) + list(SEED_VC_DIR.glob("*.pt"))
-
-        if ckpt_candidates:
-            ckpt_path = ckpt_candidates[0]
-            logger.info(f"Loading checkpoint: {ckpt_path}")
-            ckpt = torch.load(ckpt_path, map_location=DEVICE)
-            model.load_state_dict(ckpt["model"] if "model" in ckpt else ckpt, strict=False)
-
+        # Download checkpoint via hf_utils (Seed-VC's built-in HF downloader)
+        ckpt_path = load_custom_model_from_hf(
+            "Plachtaa/Seed-VC",
+            "DiT_uvit_wav2vec2_small.pth",
+            None,
+        )
+        logger.info(f"Checkpoint: {ckpt_path}")
+        ckpt = torch.load(ckpt_path, map_location=DEVICE)
+        model.load_state_dict(ckpt["model"] if "model" in ckpt else ckpt, strict=False)
         model = model.to(DEVICE).eval()
-        _vc_model = {"model": model, "config": config, "config_path": str(config_path)}
+
+        _vc_model = {"model": model, "config": config}
         logger.info("Seed-VC loaded")
 
     except Exception as e:
