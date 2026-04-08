@@ -72,6 +72,10 @@ return [
         'url' => env('F5TTS_SERVICE_URL', 'http://localhost:8004'),
     ],
 
+    'mms_tts' => [
+        'url' => env('MMS_TTS_SERVICE_URL', 'http://localhost:8005'),
+    ],
+
     'elevenlabs' => [
         'api_key' => env('ELEVENLABS_API_KEY', ''),
     ],

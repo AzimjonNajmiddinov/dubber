@@ -161,8 +161,9 @@ class AdminVoicePoolController extends Controller
         } else {
             Redis::del('voice-pool-ref:' . md5($file));
         }
-        // Force re-clone on next synthesis so F5-TTS picks up new ref_text
+        // Force re-clone on next synthesis so TTS services pick up new ref_text
         Redis::del('voice-pool-id:' . md5($file));
+        Redis::del('voice-pool-id:mms:' . md5($file));
 
         return response()->json(['ok' => true]);
     }
@@ -185,13 +186,15 @@ class AdminVoicePoolController extends Controller
     public function test(Request $request)
     {
         $request->validate([
-            'gender'   => 'required|in:male,female,child',
-            'name'     => 'required|string|max:50|regex:/^[a-zA-Z0-9_-]+$/',
-            'text'     => 'required|string|max:500',
-            'language' => 'required|string|max:10',
-            'speed'    => 'nullable|numeric|min:0.5|max:2.0',
+            'gender'     => 'required|in:male,female,child',
+            'name'       => 'required|string|max:50|regex:/^[a-zA-Z0-9_-]+$/',
+            'text'       => 'required|string|max:500',
+            'language'   => 'required|string|max:10',
+            'speed'      => 'nullable|numeric|min:0.5|max:2.0',
+            'tts_engine' => 'nullable|in:f5tts,mms',
         ]);
 
+        $engine = $request->input('tts_engine', 'f5tts');
         $gender = $request->input('gender');
         $name   = $request->input('name');
         $speed  = (float) ($request->input('speed') ?? $this->getSpeed($gender, $name));
@@ -201,9 +204,14 @@ class AdminVoicePoolController extends Controller
             return response()->json(['error' => 'Voice file not found'], 404);
         }
 
-        $xttsUrl = rtrim(config('services.f5tts.url', env('F5TTS_SERVICE_URL')), '/');
+        if ($engine === 'mms') {
+            $xttsUrl  = rtrim(config('services.mms_tts.url', env('MMS_TTS_SERVICE_URL')), '/');
+            $cacheKey = 'voice-pool-id:mms:' . md5($file);
+        } else {
+            $xttsUrl  = rtrim(config('services.f5tts.url', env('F5TTS_SERVICE_URL')), '/');
+            $cacheKey = 'voice-pool-id:' . md5($file);
+        }
 
-        $cacheKey = 'voice-pool-id:' . md5($file);
         $voiceId  = Redis::get($cacheKey);
 
         $manualRefText = Redis::get('voice-pool-ref:' . md5($file));
@@ -278,6 +286,7 @@ class AdminVoicePoolController extends Controller
         $file = storage_path("app/voice-pool/{$gender}/{$name}.wav");
         if (file_exists($file)) {
             Redis::del('voice-pool-id:' . md5($file));
+            Redis::del('voice-pool-id:mms:' . md5($file));
             unlink($file);
         }
 
