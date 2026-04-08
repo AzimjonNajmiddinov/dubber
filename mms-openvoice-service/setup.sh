@@ -13,13 +13,17 @@ apt-get install -y -q pkg-config libavformat-dev libavcodec-dev libavdevice-dev 
 # Install Python packages into existing tts-venv
 $VENV/bin/pip install --quiet transformers accelerate
 
+# Pre-install av with binary wheel to avoid PyAV build from source
+$VENV/bin/pip install --quiet "av" --prefer-binary
+
 # Install OpenVoice v2 from source
 if [ ! -d /workspace/openvoice-v2 ]; then
     echo "Cloning OpenVoice v2..."
     git clone https://github.com/myshell-ai/OpenVoice /workspace/openvoice-v2
 fi
 cd /workspace/openvoice-v2
-$VENV/bin/pip install --quiet -e .
+$VENV/bin/pip install --quiet -e . --no-deps
+$VENV/bin/pip install --quiet faster-whisper wavmark inflect pydub librosa
 
 # Download OpenVoice v2 checkpoints
 mkdir -p /workspace/openvoice-v2/checkpoints_v2
