@@ -248,25 +248,32 @@ async def synthesize(request: SynthesizeRequest):
             # 3. Seed-VC voice conversion
             try:
                 os.chdir(str(SEED_VC_DIR))
-                result = _vc_wrapper.convert_voice(
+                # convert_voice is a generator — collect streaming chunks
+                # stream_output=True: yields (mp3_bytes, full_audio) where
+                #   full_audio = (sr, np.ndarray) on the last chunk
+                result_audio = None
+                result_sr    = 44100  # f0_condition=True → 44100 Hz
+                gen = _vc_wrapper.convert_voice(
                     source=str(src_path),
                     target=str(ref_path),
                     diffusion_steps=10,
                     length_adjust=1.0,
                     inference_cfg_rate=float(request.tau),
                     f0_condition=True,   # pitch matching — ayol/erkak farqi to'g'ri chiqadi
-                    auto_f0_adjust=True, # reference pitch ga avtomatik moslashtiradi
-                    stream_output=False,
+                    auto_f0_adjust=True,
+                    stream_output=True,
                 )
+                for _mp3, full_audio in gen:
+                    if full_audio is not None:
+                        result_sr, result_audio = full_audio
+
                 os.chdir("/workspace/dubber")
                 src_path.unlink(missing_ok=True)
 
-                if result is None or (isinstance(result, np.ndarray) and len(result) < 100):
+                if result_audio is None or len(result_audio) < 100:
                     raise RuntimeError("Seed-VC returned empty audio")
 
-                # f0_condition=True → 44100 Hz, False → 22050 Hz
-                out_sr = 44100
-                sf.write(str(out_path), result.astype(np.float32), out_sr)
+                sf.write(str(out_path), result_audio.astype(np.float32), result_sr)
 
             except Exception as e:
                 logger.warning(f"Seed-VC failed ({e}), using raw MMS")
