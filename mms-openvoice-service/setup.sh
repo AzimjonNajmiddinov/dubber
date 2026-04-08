@@ -44,8 +44,8 @@ fi
 echo "Pre-downloading MMS TTS (facebook/mms-tts-uzb)..."
 $VENV/bin/python -c "
 from transformers import VitsModel, AutoTokenizer
-AutoTokenizer.from_pretrained('facebook/mms-tts-uzb')
-VitsModel.from_pretrained('facebook/mms-tts-uzb')
+AutoTokenizer.from_pretrained('facebook/mms-tts-uzb-script_cyrillic')
+VitsModel.from_pretrained('facebook/mms-tts-uzb-script_cyrillic')
 print('MMS TTS downloaded')
 "
 

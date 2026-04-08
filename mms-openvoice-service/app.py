@@ -26,6 +26,46 @@ from typing import Optional
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Uzbek Latin → Cyrillic transliteration (official standard)
+_LAT2CYR = [
+    ("shʼ", "шъ"), ("Shʼ", "Шъ"),
+    ("sh", "ш"), ("Sh", "Ш"), ("SH", "Ш"),
+    ("ch", "ч"), ("Ch", "Ч"), ("CH", "Ч"),
+    ("ng", "нг"), ("Ng", "Нг"), ("NG", "НГ"),
+    ("oʻ", "ў"), ("Oʻ", "Ў"), ("oʼ", "ў"), ("Oʼ", "Ў"), ("o'", "ў"), ("O'", "Ў"),
+    ("gʻ", "ғ"), ("Gʻ", "Ғ"), ("gʼ", "ғ"), ("Gʼ", "Ғ"), ("g'", "ғ"), ("G'", "Ғ"),
+    ("a", "а"), ("A", "А"),
+    ("b", "б"), ("B", "Б"),
+    ("d", "д"), ("D", "Д"),
+    ("e", "е"), ("E", "Е"),
+    ("f", "ф"), ("F", "Ф"),
+    ("g", "г"), ("G", "Г"),
+    ("h", "ҳ"), ("H", "Ҳ"),
+    ("i", "и"), ("I", "И"),
+    ("j", "ж"), ("J", "Ж"),
+    ("k", "к"), ("K", "К"),
+    ("l", "л"), ("L", "Л"),
+    ("m", "м"), ("M", "М"),
+    ("n", "н"), ("N", "Н"),
+    ("o", "о"), ("O", "О"),
+    ("p", "п"), ("P", "П"),
+    ("q", "қ"), ("Q", "Қ"),
+    ("r", "р"), ("R", "Р"),
+    ("s", "с"), ("S", "С"),
+    ("t", "т"), ("T", "Т"),
+    ("u", "у"), ("U", "У"),
+    ("v", "в"), ("V", "В"),
+    ("x", "х"), ("X", "Х"),
+    ("y", "й"), ("Y", "Й"),
+    ("z", "з"), ("Z", "З"),
+]
+
+def latin_to_cyrillic(text: str) -> str:
+    """Convert Uzbek Latin script to Cyrillic for MMS TTS model."""
+    for lat, cyr in _LAT2CYR:
+        text = text.replace(lat, cyr)
+    return text
+
 app = FastAPI()
 
 VOICES_PATH = Path("/workspace/mms-voices")
@@ -45,8 +85,8 @@ def load_models():
 
     logger.info("Loading MMS TTS (facebook/mms-tts-uzb)...")
     from transformers import VitsModel, AutoTokenizer
-    _mms_tokenizer = AutoTokenizer.from_pretrained("facebook/mms-tts-uzb")
-    _mms_model = VitsModel.from_pretrained("facebook/mms-tts-uzb")
+    _mms_tokenizer = AutoTokenizer.from_pretrained("facebook/mms-tts-uzb-script_cyrillic")
+    _mms_model = VitsModel.from_pretrained("facebook/mms-tts-uzb-script_cyrillic")
     _mms_model.eval()
     logger.info("MMS TTS loaded")
 
@@ -170,9 +210,10 @@ async def synthesize(request: SynthesizeRequest):
         if not se_path.exists():
             raise HTTPException(status_code=404, detail=f"Voice {request.voice_id} not found")
 
-        # 1. MMS TTS — generate Uzbek speech at 16kHz
-        logger.info(f"MMS TTS: {len(request.text)} chars")
-        inputs = _mms_tokenizer(request.text, return_tensors="pt")
+        # 1. MMS TTS — convert Latin→Cyrillic, then generate Uzbek speech at 16kHz
+        cyrillic_text = latin_to_cyrillic(request.text)
+        logger.info(f"MMS TTS: {request.text!r} → {cyrillic_text!r}")
+        inputs = _mms_tokenizer(cyrillic_text, return_tensors="pt")
         with torch.no_grad():
             waveform = _mms_model(**inputs).waveform.squeeze().cpu().numpy()
 
