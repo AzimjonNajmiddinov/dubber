@@ -44,7 +44,7 @@ NEW_HEAD=$(git rev-parse HEAD)
 if [ "$OLD_HEAD" != "$NEW_HEAD" ] && [ "${_RESTARTED:-false}" = "false" ]; then
     echo "  Script updated — re-executing new version..."
     export _RESTARTED=true
-    exec "$0" "$@"
+    exec bash /workspace/dubber/start_runpod_services.sh "$@"
 fi
 
 # ===========================================
