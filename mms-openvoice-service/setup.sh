@@ -24,6 +24,10 @@ fi
 cd /workspace/openvoice-v2
 $VENV/bin/pip install --quiet -e . --no-deps
 $VENV/bin/pip install --quiet wavmark inflect pydub librosa
+# OpenVoice text module dependencies (top-level imports, required even for tone-only usage)
+$VENV/bin/pip install --quiet \
+    "eng_to_ipa==0.0.2" "cn2an==0.5.22" "jieba==0.42.1" "langid==1.1.6" \
+    unidecode pypinyin faster-whisper
 
 # Download OpenVoice v2 checkpoints
 mkdir -p /workspace/openvoice-v2/checkpoints_v2
