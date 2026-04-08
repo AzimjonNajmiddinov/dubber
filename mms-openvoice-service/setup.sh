@@ -7,6 +7,9 @@ VENV=/workspace/tts-venv
 
 echo "=== Installing MMS TTS + OpenVoice v2 ==="
 
+# System dependencies required for PyAV (OpenVoice dependency)
+apt-get install -y -q pkg-config libavformat-dev libavcodec-dev libavdevice-dev libavutil-dev libswscale-dev libswresample-dev libavfilter-dev 2>/dev/null || true
+
 # Install Python packages into existing tts-venv
 $VENV/bin/pip install --quiet transformers accelerate
 
