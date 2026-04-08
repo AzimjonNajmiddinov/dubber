@@ -33,7 +33,6 @@ class StartPremiumDubJob implements ShouldQueue
         if (!empty($session['video_path']) && file_exists($session['video_path'])) {
             Log::info("[PREMIUM] [{$this->dubId}] Video already available, skipping download");
             PremiumDubSeparateStemsJob::dispatch($this->dubId)->onQueue('default');
-            PremiumDubTranscribeJob::dispatch($this->dubId)->onQueue('default');
             return;
         }
 
@@ -105,7 +104,6 @@ class StartPremiumDubJob implements ShouldQueue
         Log::info("[PREMIUM] [{$this->dubId}] Downloaded & extracted ({$videoDuration}s)");
 
         PremiumDubSeparateStemsJob::dispatch($this->dubId)->onQueue('default');
-        PremiumDubTranscribeJob::dispatch($this->dubId)->onQueue('default');
     }
 
     private function isYouTubeUrl(string $url): bool

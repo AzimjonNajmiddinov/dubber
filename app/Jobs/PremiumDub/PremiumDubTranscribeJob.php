@@ -26,7 +26,8 @@ class PremiumDubTranscribeJob implements ShouldQueue
     public function handle(): void
     {
         $session = $this->getSession();
-        $audioPath = $session['audio_path'] ?? null;
+        // Use Demucs vocals (clean speech, no background music) for better diarization
+        $audioPath = $session['vocals_path'] ?? $session['audio_path'] ?? null;
 
         if (!$audioPath || !file_exists($audioPath)) {
             $this->updateStatus('error', 'Audio file not found for transcription');
@@ -110,10 +111,7 @@ class PremiumDubTranscribeJob implements ShouldQueue
 
     private function checkAndDispatchNext(): void
     {
-        $session = $this->getSession();
-        if (!empty($session['stems_ready']) && !empty($session['transcription_ready'])) {
-            PremiumDubTranslateJob::dispatch($this->dubId)->onQueue('default');
-        }
+        PremiumDubTranslateJob::dispatch($this->dubId)->onQueue('default');
     }
 
     private function getSession(): array

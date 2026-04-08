@@ -76,20 +76,12 @@ class PremiumDubSeparateStemsJob implements ShouldQueue
 
             Log::info("[PREMIUM] [{$this->dubId}] Stems separated (" . ($result['elapsed_seconds'] ?? '?') . "s)");
 
-            // Check if transcription is also done → dispatch next step
-            $this->checkAndDispatchNext();
+            // Dispatch transcription now using clean vocals
+            PremiumDubTranscribeJob::dispatch($this->dubId)->onQueue('default');
 
         } catch (\Throwable $e) {
             $this->updateStatus('error', 'Stem separation failed: ' . Str::limit($e->getMessage(), 100));
             Log::error("[PREMIUM] [{$this->dubId}] Demucs failed: " . $e->getMessage());
-        }
-    }
-
-    private function checkAndDispatchNext(): void
-    {
-        $session = $this->getSession();
-        if (!empty($session['stems_ready']) && !empty($session['transcription_ready'])) {
-            PremiumDubTranslateJob::dispatch($this->dubId)->onQueue('default');
         }
     }
 
