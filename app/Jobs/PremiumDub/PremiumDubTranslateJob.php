@@ -19,16 +19,20 @@ class PremiumDubTranslateJob implements ShouldQueue
     public int $timeout = 600;
     public int $tries = 2;
 
+    private const BATCH_SIZE    = 20;  // segments to translate per call
+    private const CONTEXT_PREV  = 5;   // already-translated segments shown as context
+    private const CONTEXT_NEXT  = 5;   // upcoming original segments shown as context
+
     public function __construct(
         public string $dubId,
     ) {}
 
     public function handle(): void
     {
-        $session = $this->getSession();
-        $segments = $session['segments'] ?? [];
-        $speakers = $session['speakers_info'] ?? [];
-        $language = $session['language'] ?? 'uz';
+        $session      = $this->getSession();
+        $segments     = $session['segments'] ?? [];
+        $speakers     = $session['speakers_info'] ?? [];
+        $language     = $session['language'] ?? 'uz';
         $translateFrom = $session['translate_from'] ?? $session['detected_language'] ?? 'auto';
 
         if (empty($segments)) {
@@ -45,51 +49,59 @@ class PremiumDubTranslateJob implements ShouldQueue
         ];
         $toLang = $langNames[$language] ?? $language;
 
-        // Build full dialogue for context
-        $fullDialogue = [];
-        foreach ($segments as $i => $seg) {
-            $fullDialogue[] = ($i + 1) . '. [' . ($seg['speaker'] ?? 'SPEAKER_0') . '] ' . $seg['text'];
-        }
-        $fullDialogueText = implode("\n", $fullDialogue);
-
-        // Build speaker context
-        $speakerContext = "SPEAKERS:\n";
+        // Speaker context (gender/age for natural voice matching)
+        $speakerContext = '';
         foreach ($speakers as $spk => $info) {
             $gender = $info['gender'] ?? 'unknown';
-            $age = $info['age_group'] ?? 'unknown';
+            $age    = $info['age_group'] ?? 'unknown';
             $speakerContext .= "{$spk}: {$gender}, {$age}\n";
         }
 
-        // Translate in batches of 20
-        $batches = array_chunk($segments, 20, true);
+        $total              = count($segments);
         $translatedSegments = [];
-        $batchNum = 0;
+        $batchNum           = 0;
+        $totalBatches       = (int) ceil($total / self::BATCH_SIZE);
 
-        foreach ($batches as $batch) {
+        for ($offset = 0; $offset < $total; $offset += self::BATCH_SIZE) {
             $batchNum++;
-            $this->updateSession(['progress' => "Translating batch {$batchNum}/" . count($batches) . "..."]);
+            $this->updateSession(['progress' => "Translating {$batchNum}/{$totalBatches}..."]);
 
+            $batch = array_slice($segments, $offset, self::BATCH_SIZE, true);
+
+            // --- Previous context: last N already-translated segments ---
+            $prevContext = '';
+            if (!empty($translatedSegments)) {
+                $prevDone  = array_values($translatedSegments);
+                $prevSlice = array_slice($prevDone, -self::CONTEXT_PREV);
+                $lines     = [];
+                foreach ($prevSlice as $s) {
+                    $lines[] = '[' . ($s['speaker'] ?? '') . '] ' . $s['text'];
+                }
+                $prevContext = implode("\n", $lines);
+            }
+
+            // --- Next context: upcoming original segments (after this batch) ---
+            $nextContext = '';
+            $nextSlice   = array_slice($segments, $offset + self::BATCH_SIZE, self::CONTEXT_NEXT, true);
+            if (!empty($nextSlice)) {
+                $lines = [];
+                foreach ($nextSlice as $s) {
+                    $lines[] = '[' . ($s['speaker'] ?? '') . '] ' . $s['text'];
+                }
+                $nextContext = implode("\n", $lines);
+            }
+
+            // --- Lines to translate (duration hint, no char limit) ---
             $lines = [];
             foreach ($batch as $i => $seg) {
                 $duration = round(($seg['end'] ?? 0) - ($seg['start'] ?? 0), 1);
-                $maxChars = (int) round($duration * 12);
-                $lines[] = ($i + 1) . '. [' . $duration . 's, max ' . $maxChars . ' chars] [' . ($seg['speaker'] ?? 'SPEAKER_0') . '] ' . $seg['text'];
+                $lines[]  = ($i + 1) . '. [' . $duration . 's] [' . ($seg['speaker'] ?? 'SPEAKER_0') . '] ' . $seg['text'];
             }
 
-            $systemPrompt = "You are an expert film dubbing translator. Translate to natural spoken {$toLang}.\n"
-                . "\n{$speakerContext}\n"
-                . "\nFULL DIALOGUE (context):\n{$fullDialogueText}\n"
-                . "\nRULES:\n"
-                . "1. Char limits are soft — NEVER cut meaning or leave sentences incomplete.\n"
-                . "2. Detect the EMOTION of each line from context and dialogue.\n"
-                . "3. Keep emotional register: anger, love, fear, humor must come through.\n"
-                . "4. Use punctuation expressively: ! for emphasis, ... for hesitation, — for pauses.\n"
-                . "5. Adapt cultural references naturally.\n"
-                . "\nEMOTION TAGS: neutral, happy, angry, sad, fearful, surprised, whispering, serious, sarcastic, excited\n"
-                . "\n" . 'Format: "1. [SPEAKER_0:emotion] translated text"' . "\n"
-                . 'Example: "1. [SPEAKER_0:angry] Get out of here!"';
+            $systemPrompt = $this->buildSystemPrompt($toLang, $speakerContext, $prevContext, $nextContext);
+            $userPrompt   = "Translate:\n\n" . implode("\n", $lines);
 
-            $translated = $this->callTranslation($systemPrompt, "Translate:\n\n" . implode("\n", $lines));
+            $translated = $this->callTranslation($systemPrompt, $userPrompt);
 
             // Parse response
             foreach (preg_split('/\n+/', $translated) as $line) {
@@ -97,28 +109,28 @@ class PremiumDubTranslateJob implements ShouldQueue
                     $idx = (int) $m[1] - 1;
                     if (isset($segments[$idx])) {
                         $translatedSegments[$idx] = [
-                            'start' => $segments[$idx]['start'],
-                            'end' => $segments[$idx]['end'],
+                            'start'         => $segments[$idx]['start'],
+                            'end'           => $segments[$idx]['end'],
                             'original_text' => $segments[$idx]['text'],
-                            'text' => trim($m[4]),
-                            'speaker' => $m[2],
-                            'emotion' => $m[3] ?? 'neutral',
+                            'text'          => trim($m[4]),
+                            'speaker'       => $m[2],
+                            'emotion'       => $m[3] ?? 'neutral',
                         ];
                     }
                 }
             }
         }
 
-        // Fill gaps with untranslated segments
+        // Fill any parse-missed segments with original text
         foreach ($segments as $i => $seg) {
             if (!isset($translatedSegments[$i])) {
                 $translatedSegments[$i] = [
-                    'start' => $seg['start'],
-                    'end' => $seg['end'],
+                    'start'         => $seg['start'],
+                    'end'           => $seg['end'],
                     'original_text' => $seg['text'],
-                    'text' => $seg['text'],
-                    'speaker' => $seg['speaker'] ?? 'SPEAKER_0',
-                    'emotion' => 'neutral',
+                    'text'          => $seg['text'],
+                    'speaker'       => $seg['speaker'] ?? 'SPEAKER_0',
+                    'emotion'       => 'neutral',
                 ];
             }
         }
@@ -127,29 +139,62 @@ class PremiumDubTranslateJob implements ShouldQueue
 
         $this->updateSession([
             'translated_segments' => array_values($translatedSegments),
-            'translation_ready' => true,
+            'translation_ready'   => true,
         ]);
 
         Log::info("[PREMIUM] [{$this->dubId}] Translation complete: " . count($translatedSegments) . " segments");
 
-        // Next step: clone voices + synthesize
         PremiumDubCloneAndSynthesizeJob::dispatch($this->dubId)->onQueue('default');
+    }
+
+    private function buildSystemPrompt(
+        string $toLang,
+        string $speakerContext,
+        string $prevContext,
+        string $nextContext,
+    ): string {
+        $prompt = "You are an expert film dubbing translator. Translate each line to natural spoken {$toLang}.\n";
+
+        if ($speakerContext) {
+            $prompt .= "\nSPEAKERS:\n{$speakerContext}";
+        }
+
+        if ($prevContext) {
+            $prompt .= "\nPREVIOUS DIALOGUE (already translated — for continuity):\n{$prevContext}\n";
+        }
+
+        if ($nextContext) {
+            $prompt .= "\nUPCOMING LINES (original — for context only, do NOT translate):\n{$nextContext}\n";
+        }
+
+        $prompt .= "\nRULES:\n"
+            . "1. Each line shows its time slot in seconds [Xs] — translate so it can be spoken naturally in that time.\n"
+            . "2. NEVER cut a sentence short or leave meaning incomplete to fit the slot.\n"
+            . "3. Keep the emotional register: anger, fear, humor, love must come through.\n"
+            . "4. Use punctuation expressively: ! for emphasis, ... for hesitation, — for pauses.\n"
+            . "5. Adapt cultural references naturally to the target language.\n"
+            . "6. Detect the EMOTION of each line.\n"
+            . "\nEMOTION TAGS: neutral, happy, angry, sad, fearful, surprised, whispering, serious, sarcastic, excited\n"
+            . "\n" . 'Output format (one line per segment, nothing else):'
+            . "\n" . '"1. [SPEAKER_00:angry] Translated text here."'
+            . "\n" . '"2. [SPEAKER_01:neutral] Another line."';
+
+        return $prompt;
     }
 
     private function callTranslation(string $system, string $user): string
     {
-        // Try Claude first
         $anthropicKey = config('services.anthropic.key');
         if ($anthropicKey) {
             try {
                 $response = Http::withHeaders([
-                    'x-api-key' => $anthropicKey,
+                    'x-api-key'         => $anthropicKey,
                     'anthropic-version' => '2023-06-01',
                 ])->timeout(90)->post('https://api.anthropic.com/v1/messages', [
-                    'model' => 'claude-sonnet-4-6',
+                    'model'      => 'claude-sonnet-4-6',
                     'max_tokens' => 4096,
-                    'system' => $system,
-                    'messages' => [['role' => 'user', 'content' => $user]],
+                    'system'     => $system,
+                    'messages'   => [['role' => 'user', 'content' => $user]],
                 ]);
 
                 if ($response->successful()) {
@@ -160,16 +205,15 @@ class PremiumDubTranslateJob implements ShouldQueue
             }
         }
 
-        // Fallback: GPT-4o
         $openaiKey = config('services.openai.key');
         if ($openaiKey) {
             $response = Http::withToken($openaiKey)->timeout(90)
                 ->post('https://api.openai.com/v1/chat/completions', [
-                    'model' => 'gpt-4o',
+                    'model'       => 'gpt-4o',
                     'temperature' => 0.3,
-                    'messages' => [
+                    'messages'    => [
                         ['role' => 'system', 'content' => $system],
-                        ['role' => 'user', 'content' => $user],
+                        ['role' => 'user',   'content' => $user],
                     ],
                 ]);
 
@@ -189,8 +233,8 @@ class PremiumDubTranslateJob implements ShouldQueue
 
     private function updateStatus(string $status, string $progress = ''): void
     {
-        $key = "premium-dub:{$this->dubId}";
-        $json = Redis::get($key);
+        $key     = "premium-dub:{$this->dubId}";
+        $json    = Redis::get($key);
         $session = $json ? json_decode($json, true) : [];
         $session['status'] = $status;
         if ($progress) $session['progress'] = $progress;
@@ -199,8 +243,8 @@ class PremiumDubTranslateJob implements ShouldQueue
 
     private function updateSession(array $data): void
     {
-        $key = "premium-dub:{$this->dubId}";
-        $json = Redis::get($key);
+        $key     = "premium-dub:{$this->dubId}";
+        $json    = Redis::get($key);
         $session = $json ? json_decode($json, true) : [];
         Redis::setex($key, 86400, json_encode(array_merge($session, $data)));
     }
