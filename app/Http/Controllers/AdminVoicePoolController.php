@@ -75,25 +75,37 @@ class AdminVoicePoolController extends Controller
             return back()->withErrors(['youtube_url' => 'Download failed: ' . substr($dlResult->errorOutput(), -300)]);
         }
 
-        $ffResult = Process::timeout(30)->run([
+        // Trim first, then send to Demucs for vocal isolation
+        $trimmed = $tmpFile . '_trimmed.wav';
+        Process::timeout(30)->run([
             'ffmpeg', '-y',
             '-ss', (string) $start, '-t', (string) $duration,
             '-i', $downloaded,
+            '-ac', '1', '-ar', '44100', '-c:a', 'pcm_s16le', $trimmed,
+        ]);
+        @unlink($downloaded);
+
+        $sourceForFfmpeg = $this->extractVocals($trimmed) ?? $trimmed;
+
+        $ffResult = Process::timeout(30)->run([
+            'ffmpeg', '-y', '-i', $sourceForFfmpeg,
             '-af', 'loudnorm',
             '-ac', '1', '-ar', '22050', '-c:a', 'pcm_s16le', $outWav,
         ]);
 
-        @unlink($downloaded);
+        @unlink($trimmed);
+        if ($sourceForFfmpeg !== $trimmed) @unlink($sourceForFfmpeg);
 
         if (!$ffResult->successful() || !file_exists($outWav) || filesize($outWav) < 2000) {
             return back()->withErrors(['youtube_url' => 'Audio extraction failed: ' . substr($ffResult->errorOutput(), -200)]);
         }
 
         Redis::del('voice-pool-id:' . md5($outWav));
+        Redis::del('voice-pool-id:mms:' . md5($outWav));
         if ($refText) {
             Redis::setex('voice-pool-ref:' . md5($outWav), 30 * 86400, $refText);
         }
-        Log::info("[VOICE POOL] Added {$gender}/{$name} from {$url} (start={$start}s, dur={$duration}s)");
+        Log::info("[VOICE POOL] Added {$gender}/{$name} from {$url} (start={$start}s, dur={$duration}s, demucs=vocal)");
 
         return back()->with('success', "Voice '{$name}' added to {$gender} pool ({$duration}s).");
     }
@@ -122,25 +134,37 @@ class AdminVoicePoolController extends Controller
         $tmpPath = storage_path("app/{$tmpFile}");
         $outWav  = "{$dir}/{$name}.wav";
 
-        $ffResult = Process::timeout(30)->run([
+        // Trim first, then send to Demucs for vocal isolation
+        $trimmed = $tmpPath . '_trimmed.wav';
+        Process::timeout(30)->run([
             'ffmpeg', '-y',
             '-ss', (string) $start, '-t', (string) $duration,
             '-i', $tmpPath,
+            '-ac', '1', '-ar', '44100', '-c:a', 'pcm_s16le', $trimmed,
+        ]);
+        @unlink($tmpPath);
+
+        $sourceForFfmpeg = $this->extractVocals($trimmed) ?? $trimmed;
+
+        $ffResult = Process::timeout(30)->run([
+            'ffmpeg', '-y', '-i', $sourceForFfmpeg,
             '-af', 'loudnorm',
             '-ac', '1', '-ar', '22050', '-c:a', 'pcm_s16le', $outWav,
         ]);
 
-        @unlink($tmpPath);
+        @unlink($trimmed);
+        if ($sourceForFfmpeg !== $trimmed) @unlink($sourceForFfmpeg);
 
         if (!$ffResult->successful() || !file_exists($outWav) || filesize($outWav) < 2000) {
             return back()->withErrors(['audio' => 'Audio extraction failed: ' . substr($ffResult->errorOutput(), -200)]);
         }
 
         Redis::del('voice-pool-id:' . md5($outWav));
+        Redis::del('voice-pool-id:mms:' . md5($outWav));
         if ($refText) {
             Redis::setex('voice-pool-ref:' . md5($outWav), 30 * 86400, $refText);
         }
-        Log::info("[VOICE POOL] Uploaded {$gender}/{$name} (start={$start}s, dur={$duration}s)");
+        Log::info("[VOICE POOL] Uploaded {$gender}/{$name} (start={$start}s, dur={$duration}s, demucs=vocal)");
 
         return back()->with('success', "Voice '{$name}' added to {$gender} pool ({$duration}s).");
     }
@@ -295,6 +319,44 @@ class AdminVoicePoolController extends Controller
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
+
+    /**
+     * Send audio to Demucs, get back vocals-only WAV path.
+     * Returns null if Demucs is unavailable (caller falls back to original).
+     */
+    private function extractVocals(string $audioPath): ?string
+    {
+        $demucsUrl = rtrim(config('services.demucs.url', env('DEMUCS_SERVICE_URL')), '/');
+
+        try {
+            $resp = Http::timeout(120)
+                ->attach('audio', file_get_contents($audioPath), basename($audioPath))
+                ->post("{$demucsUrl}/separate", [
+                    'model'      => 'htdemucs',
+                    'two_stems'  => 'vocals',
+                ]);
+
+            if (!$resp->successful()) {
+                Log::warning("[VOICE POOL] Demucs failed: " . $resp->body());
+                return null;
+            }
+
+            $vocalsUrl = $resp->json('vocals_url');
+            if (!$vocalsUrl) return null;
+
+            $vocalsResp = Http::timeout(30)->get("{$demucsUrl}{$vocalsUrl}");
+            if (!$vocalsResp->successful()) return null;
+
+            $outPath = $audioPath . '_vocals.wav';
+            file_put_contents($outPath, $vocalsResp->body());
+            Log::info("[VOICE POOL] Demucs vocal extraction done: " . basename($audioPath));
+            return $outPath;
+
+        } catch (\Throwable $e) {
+            Log::warning("[VOICE POOL] Demucs unavailable: " . $e->getMessage());
+            return null;
+        }
+    }
 
     public static function getSpeed(string $gender, string $name): float
     {
