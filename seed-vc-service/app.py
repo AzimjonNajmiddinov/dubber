@@ -254,7 +254,8 @@ async def synthesize(request: SynthesizeRequest):
                     diffusion_steps=10,
                     length_adjust=1.0,
                     inference_cfg_rate=float(request.tau),
-                    f0_condition=False,
+                    f0_condition=True,   # pitch matching — ayol/erkak farqi to'g'ri chiqadi
+                    auto_f0_adjust=True, # reference pitch ga avtomatik moslashtiradi
                     stream_output=False,
                 )
                 os.chdir("/workspace/dubber")
@@ -263,8 +264,9 @@ async def synthesize(request: SynthesizeRequest):
                 if result is None or (isinstance(result, np.ndarray) and len(result) < 100):
                     raise RuntimeError("Seed-VC returned empty audio")
 
-                # SeedVCWrapper returns numpy array at 22050 Hz (f0_condition=False)
-                sf.write(str(out_path), result.astype(np.float32), 22050)
+                # f0_condition=True → 44100 Hz, False → 22050 Hz
+                out_sr = 44100
+                sf.write(str(out_path), result.astype(np.float32), out_sr)
 
             except Exception as e:
                 logger.warning(f"Seed-VC failed ({e}), using raw MMS")
