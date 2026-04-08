@@ -198,7 +198,7 @@ class AdminVoicePoolController extends Controller
         if (!in_array($gender, self::GENDERS)) abort(400);
         $request->validate([
             'speed' => 'required|numeric|min:0.5|max:2.0',
-            'tau'   => 'nullable|numeric|min:0.1|max:1.0',
+            'tau'   => 'nullable|numeric|min:0.0|max:1.0',
         ]);
 
         $file = storage_path("app/voice-pool/{$gender}/{$name}.wav");
@@ -225,7 +225,7 @@ class AdminVoicePoolController extends Controller
             'text'       => 'required|string|max:500',
             'language'   => 'required|string|max:10',
             'speed'      => 'nullable|numeric|min:0.5|max:2.0',
-            'tau'        => 'nullable|numeric|min:0.1|max:1.0',
+            'tau'        => 'nullable|numeric|min:0.0|max:1.0',
             'tts_engine' => 'nullable|in:f5tts,mms',
         ]);
 
