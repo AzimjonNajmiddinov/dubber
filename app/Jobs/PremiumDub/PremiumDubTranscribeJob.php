@@ -48,7 +48,7 @@ class PremiumDubTranscribeJob implements ShouldQueue
             // Upload audio to WhisperX service
             $formData = [];
             if ($speakers !== null) {
-                $formData['min_speakers'] = (int) $speakers;
+                // Only set max — let pyannote detect fewer speakers if audio has less
                 $formData['max_speakers'] = (int) $speakers;
             }
 
@@ -69,16 +69,22 @@ class PremiumDubTranscribeJob implements ShouldQueue
             $segments = $result['segments'] ?? [];
             $language = $result['language'] ?? 'unknown';
 
-            // Hub worker puts speaker in each segment, extract unique speakers
+            // Use gender/age_group from WhisperX (wav2vec2 gender model + pitch estimation)
+            $speakersFromService = $result['speakers'] ?? [];
+
+            // Ensure every segment has a speaker; build speakers map with real gender info
             $speakers = [];
             foreach ($segments as &$seg) {
                 $spk = $seg['speaker'] ?? 'SPEAKER_00';
-                if (!isset($speakers[$spk])) {
-                    $speakers[$spk] = ['gender' => 'unknown', 'age_group' => 'unknown'];
-                }
-                // Normalize field names for downstream compatibility
                 if (!isset($seg['speaker'])) {
                     $seg['speaker'] = $spk;
+                }
+                if (!isset($speakers[$spk])) {
+                    $svcInfo = $speakersFromService[$spk] ?? [];
+                    $speakers[$spk] = [
+                        'gender'    => $svcInfo['gender']    ?? 'unknown',
+                        'age_group' => $svcInfo['age_group'] ?? 'unknown',
+                    ];
                 }
             }
             unset($seg);
