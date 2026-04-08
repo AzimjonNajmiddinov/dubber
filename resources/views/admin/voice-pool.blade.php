@@ -232,7 +232,7 @@
         <div class="hint">Adjust until the speaking pace sounds natural, then save — it will be used in all future dubs with this voice.</div>
 
         <label style="margin-top:16px">Voice similarity (tau) <span id="tau-display" style="font-weight:400;color:#6b7280">0.9</span></label>
-        <input type="range" id="test-tau" min="0.1" max="1.0" step="0.05" value="0.9" style="width:100%;padding:0" oninput="document.getElementById('tau-display').textContent=parseFloat(this.value).toFixed(2)">
+        <input type="range" id="test-tau" min="0.0" max="1.0" step="0.05" value="0.9" style="width:100%;padding:0" oninput="document.getElementById('tau-display').textContent=parseFloat(this.value).toFixed(2)">
         <div class="hint">Higher = more similar to reference voice, but may introduce artifacts. Try 0.7–1.0.</div>
 
         <label style="margin-top:12px">Text</label>
