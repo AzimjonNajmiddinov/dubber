@@ -199,20 +199,20 @@ fi
 echo ""
 echo "Starting services..."
 
-# Start Demucs on port 8000
+# Start Demucs on port 8000 (system Python — demucs installed there)
 echo "  Starting Demucs on port 8000..."
 cd /workspace/dubber/demucs-service
-nohup $TTS_VENV/bin/python -m uvicorn app_runpod:app --host 0.0.0.0 --port 8000 > /tmp/demucs.log 2>&1 &
+nohup python -m uvicorn app_runpod:app --host 0.0.0.0 --port 8000 > /tmp/demucs.log 2>&1 &
 
-# Start MMS+OpenVoice on port 8005 (shared TTS venv)
+# Start MMS+OpenVoice on port 8005 (tts-venv — MMS deps installed there)
 echo "  Starting MMS+OpenVoice on port 8005..."
 cd /workspace/dubber/mms-openvoice-service
 nohup $TTS_VENV/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8005 > /tmp/mms.log 2>&1 &
 
-# Start WhisperX on port 8002
+# Start WhisperX on port 8002 (system Python — whisperx installed there)
 echo "  Starting WhisperX on port 8002..."
 cd /workspace/dubber/whisperx-service
-nohup $TTS_VENV/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8002 > /tmp/whisperx.log 2>&1 &
+nohup python -m uvicorn app:app --host 0.0.0.0 --port 8002 > /tmp/whisperx.log 2>&1 &
 
 
 echo ""
