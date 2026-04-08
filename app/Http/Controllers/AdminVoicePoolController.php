@@ -27,6 +27,7 @@ class AdminVoicePoolController extends Controller
                     'size'     => round(filesize($file) / 1024) . ' KB',
                     'duration' => $this->getAudioDuration($file),
                     'speed'    => $this->getSpeed($gender, $name),
+                    'tau'      => self::getTau($gender, $name),
                     'ref_text' => $ref_text,
                 ];
             }
@@ -195,14 +196,23 @@ class AdminVoicePoolController extends Controller
     public function saveSpeed(Request $request, string $gender, string $name)
     {
         if (!in_array($gender, self::GENDERS)) abort(400);
-        $request->validate(['speed' => 'required|numeric|min:0.5|max:2.0']);
+        $request->validate([
+            'speed' => 'required|numeric|min:0.5|max:2.0',
+            'tau'   => 'nullable|numeric|min:0.1|max:1.0',
+        ]);
 
         $file = storage_path("app/voice-pool/{$gender}/{$name}.wav");
         if (!file_exists($file)) {
             return response()->json(['error' => 'Voice not found'], 404);
         }
 
-        $this->writeSpeed($gender, $name, (float) $request->input('speed'));
+        $json = storage_path("app/voice-pool/{$gender}/{$name}.json");
+        $data = file_exists($json) ? (json_decode(file_get_contents($json), true) ?? []) : [];
+        $data['speed'] = (float) $request->input('speed');
+        if ($request->has('tau')) {
+            $data['tau'] = (float) $request->input('tau');
+        }
+        file_put_contents($json, json_encode($data, JSON_PRETTY_PRINT));
 
         return response()->json(['ok' => true]);
     }
@@ -368,12 +378,14 @@ class AdminVoicePoolController extends Controller
         return 1.0;
     }
 
-    private function writeSpeed(string $gender, string $name, float $speed): void
+    public static function getTau(string $gender, string $name): float
     {
         $json = storage_path("app/voice-pool/{$gender}/{$name}.json");
-        $data = file_exists($json) ? (json_decode(file_get_contents($json), true) ?? []) : [];
-        $data['speed'] = $speed;
-        file_put_contents($json, json_encode($data, JSON_PRETTY_PRINT));
+        if (file_exists($json)) {
+            $data = json_decode(file_get_contents($json), true);
+            return (float) ($data['tau'] ?? 0.9);
+        }
+        return 0.9;
     }
 
     private function getAudioDuration(string $path): string

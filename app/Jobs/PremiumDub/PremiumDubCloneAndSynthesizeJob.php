@@ -85,10 +85,11 @@ class PremiumDubCloneAndSynthesizeJob implements ShouldQueue
 
                 if ($voiceId) {
                     try {
+                        $tau = is_array($voiceInfo) ? ($voiceInfo['tau'] ?? 0.9) : 0.9;
                         $wavData = $client->synthesize($voiceId, $text, [
-                            'emotion'   => $emotion,
                             'language'  => $language,
                             'speed'     => $speed,
+                            'tau'       => $tau,
                         ]);
                         file_put_contents($outputWav, $wavData);
                     } catch (\Throwable $e) {
@@ -225,12 +226,12 @@ class PremiumDubCloneAndSynthesizeJob implements ShouldQueue
                 Log::info("[PREMIUM] [{$this->dubId}] Using cached pool voice for {$speaker}: {$voiceId}");
             }
 
+            $voiceGender = pathinfo(dirname($file), PATHINFO_FILENAME);
+            $voiceName   = pathinfo($file, PATHINFO_FILENAME);
             $cloned[$speaker] = [
                 'voice_id' => $voiceId,
-                'speed'    => \App\Http\Controllers\AdminVoicePoolController::getSpeed(
-                    pathinfo(dirname($file), PATHINFO_FILENAME),
-                    pathinfo($file, PATHINFO_FILENAME)
-                ),
+                'speed'    => \App\Http\Controllers\AdminVoicePoolController::getSpeed($voiceGender, $voiceName),
+                'tau'      => \App\Http\Controllers\AdminVoicePoolController::getTau($voiceGender, $voiceName),
             ];
         }
 

@@ -284,29 +284,37 @@
             audio.onended = () => { btn.textContent = '▶ Play'; btn.classList.remove('playing'); currentAudio = null; currentBtn = null; };
         }
 
-        // Speed data per voice (preloaded from server)
+        // Speed and tau data per voice (preloaded from server)
         const voiceSpeeds = {
             @foreach($pool as $v)
             '{{ $v['gender'] }}|{{ $v['name'] }}': {{ $v['speed'] }},
             @endforeach
         };
+        const voiceTaus = {
+            @foreach($pool as $v)
+            '{{ $v['gender'] }}|{{ $v['name'] }}': {{ $v['tau'] }},
+            @endforeach
+        };
 
-        // When voice selection changes, pre-fill speed slider
-        document.getElementById('test-voice').addEventListener('change', function() {
-            const speed = voiceSpeeds[this.value] ?? 1.0;
+        function prefillVoiceParams(voiceVal) {
+            const speed = voiceSpeeds[voiceVal] ?? 1.0;
+            const tau   = voiceTaus[voiceVal]   ?? 0.9;
             document.getElementById('test-speed').value = speed;
             document.getElementById('speed-display').textContent = speed.toFixed(2) + '×';
+            document.getElementById('test-tau').value = tau;
+            document.getElementById('tau-display').textContent = tau.toFixed(2);
             document.getElementById('save-status').textContent = '';
+        }
+
+        // When voice selection changes, pre-fill sliders
+        document.getElementById('test-voice').addEventListener('change', function() {
+            prefillVoiceParams(this.value);
         });
 
         // Pre-fill on load
         (function() {
             const sel = document.getElementById('test-voice');
-            if (sel && sel.value) {
-                const speed = voiceSpeeds[sel.value] ?? 1.0;
-                document.getElementById('test-speed').value = speed;
-                document.getElementById('speed-display').textContent = speed.toFixed(2) + '×';
-            }
+            if (sel && sel.value) prefillVoiceParams(sel.value);
         })();
 
         async function saveSpeed() {
@@ -314,6 +322,7 @@
             if (!voiceVal) return;
             const [gender, name] = voiceVal.split('|');
             const speed = parseFloat(document.getElementById('test-speed').value);
+            const tau   = parseFloat(document.getElementById('test-tau').value);
             const saveStatus = document.getElementById('save-status');
             saveStatus.textContent = '⏳ Saving…';
 
@@ -324,10 +333,11 @@
                         'Content-Type': 'application/json',
                         'X-CSRF-TOKEN': document.querySelector('meta[name=csrf-token]').content,
                     },
-                    body: JSON.stringify({ speed }),
+                    body: JSON.stringify({ speed, tau }),
                 });
                 if (resp.ok) {
                     voiceSpeeds[voiceVal] = speed;
+                    voiceTaus[voiceVal]   = tau;
                     const label = document.getElementById(`speed-label-${gender}-${name}`);
                     if (label) label.textContent = speed.toFixed(2) + '×';
                     saveStatus.textContent = '✅ Saved';
