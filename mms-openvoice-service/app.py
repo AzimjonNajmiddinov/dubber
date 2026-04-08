@@ -15,6 +15,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torchaudio
 import soundfile as sf
 from scipy.signal import resample_poly
 import math
@@ -220,16 +221,16 @@ async def synthesize(request: SynthesizeRequest):
 
         mms_sr = _mms_model.config.sampling_rate  # 16000
 
-        # 2. Resample to 22050 Hz for OpenVoice
-        g = math.gcd(mms_sr, 22050)
-        waveform_22k = resample_poly(waveform, 22050 // g, mms_sr // g).astype(np.float32)
+        # 2. Resample to 22050 Hz for OpenVoice using torchaudio (higher quality)
+        waveform_t = torch.from_numpy(waveform).unsqueeze(0)  # [1, T]
+        waveform_22k = torchaudio.functional.resample(waveform_t, mms_sr, 22050).squeeze(0)
 
-        # Apply speed (resample to change duration)
+        # Apply speed via resampling (single high-quality pass)
         if request.speed != 1.0:
-            target_len = int(len(waveform_22k) / request.speed)
-            waveform_22k = resample_poly(
-                waveform_22k, target_len, len(waveform_22k)
-            ).astype(np.float32)
+            speed_sr = int(22050 * request.speed)
+            waveform_22k = torchaudio.functional.resample(waveform_22k.unsqueeze(0), speed_sr, 22050).squeeze(0)
+
+        waveform_22k = waveform_22k.numpy().astype(np.float32)
 
         # Save MMS output temporarily
         src_path = CACHE_PATH / f"src_{uuid.uuid4()}.wav"
