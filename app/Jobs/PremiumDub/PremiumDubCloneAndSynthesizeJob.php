@@ -211,6 +211,8 @@ class PremiumDubCloneAndSynthesizeJob implements ShouldQueue
             $cacheKey = 'voice-pool-id:mms:' . md5($file);
             $voiceId = \Illuminate\Support\Facades\Redis::get($cacheKey);
 
+            Log::info("[PREMIUM] [{$this->dubId}] Speaker {$speaker} → gender:{$gender}, voice:{$file}");
+
             if (!$voiceId) {
                 try {
                     $name = pathinfo($file, PATHINFO_FILENAME);

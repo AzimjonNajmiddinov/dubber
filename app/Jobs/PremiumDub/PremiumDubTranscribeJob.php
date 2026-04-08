@@ -96,7 +96,8 @@ class PremiumDubTranscribeJob implements ShouldQueue
                 'total_segments' => count($segments),
             ]);
 
-            Log::info("[PREMIUM] [{$this->dubId}] Transcription complete: {$language}, " . count($segments) . " segments, " . count($speakers) . " speakers");
+            $speakerSummary = collect($speakers)->map(fn($s, $k) => "{$k}:{$s['gender']}/{$s['age_group']}")->implode(', ');
+            Log::info("[PREMIUM] [{$this->dubId}] Transcription complete: {$language}, " . count($segments) . " segments, " . count($speakers) . " speakers — {$speakerSummary}");
 
             // Check if stems are also done → dispatch next step
             $this->checkAndDispatchNext();
