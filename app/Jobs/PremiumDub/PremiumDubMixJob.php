@@ -89,10 +89,11 @@ class PremiumDubMixJob implements ShouldQueue
                 return;
             }
 
-            // Mix all TTS segments together
-            $ttsLabels = [];
+            // Mix all TTS segments together — include [0:a] (base_silent) so
+            // the dubbed track always spans the full video duration even when
+            // the last TTS segment ends before the video does.
+            $ttsLabels = ['[0:a]'];
             foreach (array_keys($filterParts) as $idx) {
-                // Extract label from filter
                 preg_match('/\[(tts\d+)\]$/', $filterParts[$idx], $m);
                 $ttsLabels[] = "[{$m[1]}]";
             }
@@ -146,7 +147,7 @@ class PremiumDubMixJob implements ShouldQueue
                 '-c:v', 'copy',
                 '-c:a', 'aac', '-b:a', '192k',
                 '-map', '0:v:0', '-map', '1:a:0',
-                '-shortest',
+                '-t', (string) round($videoDuration, 3),
                 $finalVideoPath,
             ]);
 
