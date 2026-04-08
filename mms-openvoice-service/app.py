@@ -73,7 +73,7 @@ CACHE_PATH  = Path("/tmp/mms-cache")
 VOICES_PATH.mkdir(parents=True, exist_ok=True)
 CACHE_PATH.mkdir(parents=True, exist_ok=True)
 
-OPENVOICE_CKPT = Path("/workspace/openvoice-v2/checkpoints_v2/converter")
+OPENVOICE_CKPT = Path("/workspace/openvoice-v2/checkpoints_v2/checkpoints/converter")
 
 _mms_model     = None
 _mms_tokenizer = None
