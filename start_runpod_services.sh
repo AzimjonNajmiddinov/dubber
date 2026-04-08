@@ -25,7 +25,7 @@ echo "=== Starting RunPod GPU Services ==="
 # Kill any existing services
 pkill -f "uvicorn.*8000" 2>/dev/null || true
 pkill -f "uvicorn.*8002" 2>/dev/null || true
-pkill -f "uvicorn.*8004" 2>/dev/null || true
+pkill -f "uvicorn.*8005" 2>/dev/null || true
 sleep 2
 
 # Pull latest code
@@ -130,17 +130,14 @@ TTS_VENV=/workspace/tts-venv
 echo "Checking shared TTS venv ($TTS_VENV)..."
 
 TTS_VENV_OK=false
-if [ -d "$TTS_VENV" ] && $TTS_VENV/bin/python -c "import f5_tts; import uvicorn" 2>/dev/null; then
+if [ -d "$TTS_VENV" ] && $TTS_VENV/bin/python -c "import transformers; import uvicorn" 2>/dev/null; then
     echo "  TTS venv OK"
     TTS_VENV_OK=true
 fi
 
 if [ "$TTS_VENV_OK" = false ]; then
-    echo "  Creating TTS venv (torch cu126 + f5-tts, ~3GB, takes 5-10 min)..."
+    echo "  Creating TTS venv (torch cu126 + MMS deps, ~3GB, takes 5-10 min)..."
     rm -rf "$TTS_VENV"
-    # Also clean up old per-service venvs to reclaim disk
-    rm -rf /workspace/dubber/xtts-service/venv
-    rm -rf /workspace/dubber/f5tts-service/venv
     python -m venv "$TTS_VENV"
 
     $TTS_VENV/bin/pip install -q --upgrade pip
@@ -150,11 +147,13 @@ if [ "$TTS_VENV_OK" = false ]; then
         torch torchaudio \
         --index-url https://download.pytorch.org/whl/cu126
 
-    echo "    Installing F5-TTS + deps..."
-    $TTS_VENV/bin/pip install -q f5-tts uvicorn fastapi python-multipart soundfile scipy imageio-ffmpeg httpx
+    echo "    Installing MMS+OpenVoice deps..."
+    $TTS_VENV/bin/pip install -q \
+        transformers uvicorn fastapi python-multipart soundfile scipy \
+        "av" --prefer-binary
 
-    if $TTS_VENV/bin/python -c "import f5_tts; import torch; print(f'TTS venv OK - torch {torch.__version__}')" 2>/dev/null; then
-        echo "  TTS venv created successfully"
+    if $TTS_VENV/bin/python -c "import transformers; import torch; print(f'TTS venv OK - torch {torch.__version__}')" 2>/dev/null; then
+        echo "  TTS venv created successfully (run mms-openvoice-service/setup.sh for full MMS install)"
     else
         echo "  ERROR: TTS venv creation failed! Check manually."
     fi
@@ -203,17 +202,17 @@ echo "Starting services..."
 # Start Demucs on port 8000
 echo "  Starting Demucs on port 8000..."
 cd /workspace/dubber/demucs-service
-nohup python -m uvicorn app_runpod:app --host 0.0.0.0 --port 8000 > /tmp/demucs.log 2>&1 &
+nohup $TTS_VENV/bin/python -m uvicorn app_runpod:app --host 0.0.0.0 --port 8000 > /tmp/demucs.log 2>&1 &
 
-# Start F5-TTS on port 8004 (shared TTS venv)
-echo "  Starting F5-TTS on port 8004..."
-cd /workspace/dubber/f5tts-service
-nohup $TTS_VENV/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8004 > /tmp/f5tts.log 2>&1 &
+# Start MMS+OpenVoice on port 8005 (shared TTS venv)
+echo "  Starting MMS+OpenVoice on port 8005..."
+cd /workspace/dubber/mms-openvoice-service
+nohup $TTS_VENV/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8005 > /tmp/mms.log 2>&1 &
 
 # Start WhisperX on port 8002
 echo "  Starting WhisperX on port 8002..."
 cd /workspace/dubber/whisperx-service
-nohup python -m uvicorn app:app --host 0.0.0.0 --port 8002 > /tmp/whisperx.log 2>&1 &
+nohup $TTS_VENV/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8002 > /tmp/whisperx.log 2>&1 &
 
 
 echo ""
@@ -238,11 +237,11 @@ else
     echo "FAILED (check: tail /tmp/demucs.log)"
 fi
 
-echo -n "  F5-TTS  (8004):   "
-if check_health "F5-TTS" 8004 "import sys,json; d=json.load(sys.stdin); assert d.get('status')=='healthy'"; then
-    curl -s http://localhost:8004/health | python -c "import sys,json; d=json.load(sys.stdin); print(f'OK - CUDA: {d.get(\"cuda_available\")}')" 2>/dev/null
+echo -n "  MMS+OV  (8005):   "
+if check_health "MMS" 8005 "import sys,json; d=json.load(sys.stdin); assert d.get('status')=='healthy'"; then
+    echo "OK"
 else
-    echo "FAILED (check: tail /tmp/f5tts.log)"
+    echo "FAILED (check: tail /tmp/mms.log)"
 fi
 
 echo -n "  WhisperX (8002):  "
@@ -263,7 +262,7 @@ echo ""
 echo "=== READY ==="
 echo "Logs:"
 echo "  tail -f /tmp/demucs.log"
-echo "  tail -f /tmp/f5tts.log"
+echo "  tail -f /tmp/mms.log"
 echo "  tail -f /tmp/whisperx.log"
 echo ""
 echo "All logs: tail -f /tmp/*.log"

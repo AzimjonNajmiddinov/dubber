@@ -2,7 +2,7 @@
 
 namespace App\Jobs\PremiumDub;
 
-use App\Services\F5Tts\F5TtsClient;
+use App\Services\MmsTts\MmsTtsClient;
 use App\Services\TextNormalizer;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -51,7 +51,7 @@ class PremiumDubCloneAndSynthesizeJob implements ShouldQueue
             return;
         }
 
-        $client = new F5TtsClient();
+        $client = new MmsTtsClient();
         $workDir = storage_path("app/premium-dub/{$this->dubId}");
         $ttsDir = "{$workDir}/tts";
         @mkdir($ttsDir, 0755, true);
@@ -134,7 +134,7 @@ class PremiumDubCloneAndSynthesizeJob implements ShouldQueue
         }
     }
 
-    private function cloneVoices(F5TtsClient $client, array $segments, ?string $vocalsPath, string $workDir, string $language = 'uz'): array
+    private function cloneVoices(MmsTtsClient $client, array $segments, ?string $vocalsPath, string $workDir, string $language = 'uz'): array
     {
         $speakers = array_unique(array_map(fn($s) => $s['speaker'] ?? 'SPEAKER_0', $segments));
         $speakersInfo = $this->getSession()['speakers_info'] ?? [];
@@ -190,7 +190,7 @@ class PremiumDubCloneAndSynthesizeJob implements ShouldQueue
      * Uses gender info from WhisperX if available, otherwise defaults to 'male'.
      * Caches voice_ids in Redis so the same file isn't re-cloned on next dub.
      */
-    private function assignPoolVoices(F5TtsClient $client, array $speakers, array $speakersInfo, array $pool): array
+    private function assignPoolVoices(MmsTtsClient $client, array $speakers, array $speakersInfo, array $pool): array
     {
         $counters = ['male' => 0, 'female' => 0, 'child' => 0];
         $cloned = [];
@@ -207,7 +207,7 @@ class PremiumDubCloneAndSynthesizeJob implements ShouldQueue
             $counters[$gender]++;
 
             // Cache key: hash of file path so same file → same voice_id across runs
-            $cacheKey = 'voice-pool-id:' . md5($file);
+            $cacheKey = 'voice-pool-id:mms:' . md5($file);
             $voiceId = \Illuminate\Support\Facades\Redis::get($cacheKey);
 
             if (!$voiceId) {
@@ -370,7 +370,7 @@ class PremiumDubCloneAndSynthesizeJob implements ShouldQueue
         // Cleanup cloned voices
         $session = $this->getSession();
         $clonedVoices = $session['cloned_voices'] ?? [];
-        $client = new F5TtsClient();
+        $client = new MmsTtsClient();
         foreach ($clonedVoices as $voiceId) {
             try { $client->deleteVoice($voiceId); } catch (\Throwable) {}
         }
