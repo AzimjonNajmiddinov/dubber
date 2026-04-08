@@ -194,7 +194,6 @@ class AdminVoicePoolController extends Controller
             'tts_engine' => 'nullable|in:f5tts,mms',
         ]);
 
-        $engine = $request->input('tts_engine', 'f5tts');
         $gender = $request->input('gender');
         $name   = $request->input('name');
         $speed  = (float) ($request->input('speed') ?? $this->getSpeed($gender, $name));
@@ -204,13 +203,8 @@ class AdminVoicePoolController extends Controller
             return response()->json(['error' => 'Voice file not found'], 404);
         }
 
-        if ($engine === 'mms') {
-            $xttsUrl  = rtrim(config('services.mms_tts.url', env('MMS_TTS_SERVICE_URL')), '/');
-            $cacheKey = 'voice-pool-id:mms:' . md5($file);
-        } else {
-            $xttsUrl  = rtrim(config('services.f5tts.url', env('F5TTS_SERVICE_URL')), '/');
-            $cacheKey = 'voice-pool-id:' . md5($file);
-        }
+        $xttsUrl  = rtrim(config('services.mms_tts.url', env('MMS_TTS_SERVICE_URL')), '/');
+        $cacheKey = 'voice-pool-id:mms:' . md5($file);
 
         $voiceId  = Redis::get($cacheKey);
 

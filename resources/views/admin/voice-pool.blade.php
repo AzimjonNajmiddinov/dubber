@@ -203,7 +203,7 @@
     </div>
 
     <div class="card" id="test-card">
-        <h3 style="margin-top:0">🧪 Test synthesis</h3>
+        <h3 style="margin-top:0">🧪 Test synthesis <span style="font-size:12px;font-weight:400;color:#6b7280">MMS + OpenVoice v2</span></h3>
         <div class="row" style="margin-bottom:12px">
             <div>
                 <label>Voice</label>
@@ -211,13 +211,6 @@
                     @foreach($pool as $voice)
                     <option value="{{ $voice['gender'] }}|{{ $voice['name'] }}">{{ $voice['name'] }} ({{ $voice['gender'] }})</option>
                     @endforeach
-                </select>
-            </div>
-            <div>
-                <label>Engine</label>
-                <select id="test-engine">
-                    <option value="f5tts">F5-TTS (port 8004)</option>
-                    <option value="mms">MMS + OpenVoice v2 (port 8005)</option>
                 </select>
             </div>
             <div>
@@ -362,7 +355,7 @@
                         'Content-Type': 'application/json',
                         'X-CSRF-TOKEN': document.querySelector('meta[name=csrf-token]').content,
                     },
-                    body: JSON.stringify({ gender, name, text, language: lang, speed: parseFloat(document.getElementById('test-speed').value), tts_engine: document.getElementById('test-engine').value }),
+                    body: JSON.stringify({ gender, name, text, language: lang, speed: parseFloat(document.getElementById('test-speed').value) }),
                 });
 
                 if (!resp.ok) {
