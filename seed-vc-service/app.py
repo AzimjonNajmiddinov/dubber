@@ -1,7 +1,7 @@
 """
 MMS TTS + Seed-VC voice conversion service.
 - MMS TTS (facebook/mms-tts-uzb-script_cyrillic): Uzbek speech synthesis
-- Seed-VC: zero-shot voice conversion (replaces OpenVoice)
+- SeedVCWrapper: zero-shot voice conversion (replaces OpenVoice)
 Port: 8005
 """
 
@@ -12,7 +12,6 @@ import uuid
 import json
 import shutil
 import logging
-import hashlib
 from pathlib import Path
 from typing import Optional
 
@@ -26,8 +25,7 @@ from pydantic import BaseModel
 
 # Add Seed-VC repo to path
 SEED_VC_DIR = Path("/workspace/seed-vc")
-if SEED_VC_DIR.exists():
-    sys.path.insert(0, str(SEED_VC_DIR))
+sys.path.insert(0, str(SEED_VC_DIR))
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -39,13 +37,11 @@ CACHE_PATH  = Path("/tmp/mms-cache")
 VOICES_PATH.mkdir(parents=True, exist_ok=True)
 CACHE_PATH.mkdir(parents=True, exist_ok=True)
 
-SEED_VC_WEIGHTS = Path("/workspace/seed-vc-weights")
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-# Lazy singletons
 _mms_model     = None
 _mms_tokenizer = None
-_vc_model      = None  # Seed-VC model
+_vc_wrapper    = None  # SeedVCWrapper singleton
 
 
 # ─── Uzbek Latin → Cyrillic ───────────────────────────────────────────────
@@ -67,7 +63,6 @@ _LAT2CYR = [
 ]
 
 def latin_to_cyrillic(text: str) -> str:
-    # Normalize apostrophe variants
     text = (text
         .replace('\u2018', "'").replace('\u2019', "'")
         .replace('\u02bb', "'").replace('\u02bc', "'")
@@ -84,7 +79,7 @@ def load_mms():
     global _mms_model, _mms_tokenizer
     if _mms_model is not None:
         return
-    logger.info("Loading MMS TTS...")
+    logger.info("Loading MMS TTS (facebook/mms-tts-uzb-script_cyrillic)...")
     from transformers import VitsModel, AutoTokenizer
     _mms_tokenizer = AutoTokenizer.from_pretrained("facebook/mms-tts-uzb-script_cyrillic")
     _mms_model = VitsModel.from_pretrained("facebook/mms-tts-uzb-script_cyrillic").to(DEVICE)
@@ -93,56 +88,15 @@ def load_mms():
 
 
 def load_seed_vc():
-    global _vc_model
-    if _vc_model is not None:
+    global _vc_wrapper
+    if _vc_wrapper is not None:
         return
-
-    if not SEED_VC_DIR.exists():
-        raise RuntimeError("Seed-VC repo not found at /workspace/seed-vc. Run setup.sh first.")
-
-    logger.info("Loading Seed-VC model...")
-    try:
-        import yaml
-        from modules.commons import recursive_munch, build_model
-        from hf_utils import load_custom_model_from_hf
-
-        # Use Seed-VC's own hf_utils to download + load the default model
-        # This handles all caching automatically
-        config_path = SEED_VC_DIR / "configs" / "presets" / "config_dit_mel_seed_uvit_whisper_small_wavenet.yml"
-        if not config_path.exists():
-            # Fallback: first available preset config
-            configs = sorted((SEED_VC_DIR / "configs" / "presets").glob("*.yml"))
-            config_path = configs[0] if configs else None
-
-        if config_path is None:
-            raise RuntimeError("No Seed-VC config found in configs/presets/")
-
-        logger.info(f"Using config: {config_path.name}")
-
-        with open(config_path) as f:
-            config = yaml.safe_load(f)
-        config = recursive_munch(config)
-
-        model = build_model(config.model_params, stage="DiT")
-
-        # Download checkpoint via hf_utils (Seed-VC's built-in HF downloader)
-        ckpt_path = load_custom_model_from_hf(
-            "Plachtaa/Seed-VC",
-            "DiT_uvit_wav2vec2_small.pth",
-            None,
-        )
-        logger.info(f"Checkpoint: {ckpt_path}")
-        ckpt = torch.load(ckpt_path, map_location=DEVICE)
-        model.load_state_dict(ckpt["model"] if "model" in ckpt else ckpt, strict=False)
-        model = model.to(DEVICE).eval()
-
-        _vc_model = {"model": model, "config": config}
-        logger.info("Seed-VC loaded")
-
-    except Exception as e:
-        logger.error(f"Seed-VC load failed: {e}")
-        import traceback; traceback.print_exc()
-        raise
+    logger.info("Loading SeedVCWrapper (downloads models on first run)...")
+    os.chdir(str(SEED_VC_DIR))  # hf_utils saves checkpoints relative to cwd
+    from seed_vc_wrapper import SeedVCWrapper
+    _vc_wrapper = SeedVCWrapper(device=torch.device(DEVICE))
+    os.chdir("/workspace/dubber")
+    logger.info("SeedVCWrapper loaded")
 
 
 @app.on_event("startup")
@@ -156,6 +110,7 @@ def _startup_load():
         load_seed_vc()
     except Exception as e:
         logger.error(f"Startup load failed: {e}")
+        import traceback; traceback.print_exc()
 
 
 # ─── Endpoints ────────────────────────────────────────────────────────────
@@ -165,7 +120,7 @@ async def health():
         "status": "healthy",
         "model": "mms-tts-uzb+seed-vc",
         "mms_loaded": _mms_model is not None,
-        "vc_loaded": _vc_model is not None,
+        "vc_loaded": _vc_wrapper is not None,
         "device": DEVICE,
     }
 
@@ -197,26 +152,24 @@ async def clone_voice(
     language: str = Form("uz"),
     ref_text: Optional[str] = Form(None),
 ):
-    """Save reference audio for Seed-VC voice conversion."""
+    """Register a reference voice for Seed-VC conversion."""
     try:
+        import hashlib
         voice_id = hashlib.md5(f"{name}_{uuid.uuid4()}".encode()).hexdigest()[:16]
         voice_dir = VOICES_PATH / voice_id
         voice_dir.mkdir(parents=True, exist_ok=True)
 
         audio_bytes = await audio.read()
-
-        # Save as 22050Hz mono WAV
-        import io as _io
-        data, sr = sf.read(_io.BytesIO(audio_bytes), always_2d=True)
+        data, sr = sf.read(io.BytesIO(audio_bytes), always_2d=True)
         data = data.mean(axis=1).astype(np.float32)
+
+        # Save at 22050 Hz (Seed-VC default sr)
         if sr != 22050:
             wt = torch.from_numpy(data).unsqueeze(0)
             data = torchaudio.functional.resample(wt, sr, 22050).squeeze(0).numpy()
 
-        # Clip to 30s
-        max_samples = 30 * 22050
-        if len(data) > max_samples:
-            data = data[:max_samples]
+        # Clip to 25s (SeedVCWrapper clips reference to sr*25 internally)
+        data = data[:25 * 22050]
 
         ref_path = voice_dir / "reference.wav"
         sf.write(str(ref_path), data, 22050)
@@ -244,26 +197,26 @@ class SynthesizeRequest(BaseModel):
     voice_id: str
     language: str = "uz"
     speed: float = 1.0
-    tau: float = 0.7  # diffusion cfg rate (similar role to tau in OpenVoice)
+    tau: float = 0.7  # maps to inference_cfg_rate in Seed-VC
 
 
 @app.post("/synthesize")
 async def synthesize(request: SynthesizeRequest):
-    """MMS TTS → Seed-VC voice conversion."""
+    """MMS TTS → Seed-VC voice conversion → WAV response."""
     try:
         if _mms_model is None:
             load_mms()
-        if _vc_model is None:
+        if _vc_wrapper is None:
             load_seed_vc()
 
         voice_dir = VOICES_PATH / request.voice_id
-        ref_path = voice_dir / "reference.wav"
+        ref_path  = voice_dir / "reference.wav"
         if not ref_path.exists():
             raise HTTPException(status_code=404, detail=f"Voice {request.voice_id} not found")
 
-        # 1. MMS TTS → Uzbek speech (16kHz)
+        # 1. MMS TTS → Uzbek speech
         cyrillic_text = latin_to_cyrillic(request.text)
-        logger.info(f"MMS TTS: {request.text!r} → {cyrillic_text!r}")
+        logger.info(f"MMS: {request.text!r} → {cyrillic_text!r}")
 
         inputs = _mms_tokenizer(cyrillic_text, return_tensors="pt")
         inputs = {k: v.to(DEVICE) for k, v in inputs.items()}
@@ -281,37 +234,48 @@ async def synthesize(request: SynthesizeRequest):
             speed_sr = int(mms_sr * request.speed)
             waveform = torchaudio.functional.resample(wt, speed_sr, mms_sr).squeeze(0).numpy()
 
-        # Save source audio (16kHz, as Seed-VC expects)
+        # Save MMS output to temp file (Seed-VC reads from file path)
         src_path = CACHE_PATH / f"src_{uuid.uuid4()}.wav"
         sf.write(str(src_path), waveform.astype(np.float32), mms_sr)
 
         out_path = CACHE_PATH / f"{uuid.uuid4()}.wav"
 
-        # 2. tau=0 → skip voice conversion, return raw MMS
+        # 2. tau=0 → raw MMS, no conversion
         if request.tau <= 0.0:
             shutil.copy(str(src_path), str(out_path))
             src_path.unlink(missing_ok=True)
         else:
             # 3. Seed-VC voice conversion
             try:
-                _seed_vc_convert(
-                    src_path=str(src_path),
-                    ref_path=str(ref_path),
-                    out_path=str(out_path),
-                    cfg_rate=float(request.tau),  # tau maps to inference_cfg_rate
+                os.chdir(str(SEED_VC_DIR))
+                result = _vc_wrapper.convert_voice(
+                    source=str(src_path),
+                    target=str(ref_path),
+                    diffusion_steps=10,
+                    length_adjust=1.0,
+                    inference_cfg_rate=float(request.tau),
+                    f0_condition=False,
+                    stream_output=False,
                 )
+                os.chdir("/workspace/dubber")
                 src_path.unlink(missing_ok=True)
-                if not out_path.exists() or out_path.stat().st_size < 500:
-                    raise RuntimeError("Seed-VC output invalid")
+
+                if result is None or (isinstance(result, np.ndarray) and len(result) < 100):
+                    raise RuntimeError("Seed-VC returned empty audio")
+
+                # SeedVCWrapper returns numpy array at 22050 Hz (f0_condition=False)
+                sf.write(str(out_path), result.astype(np.float32), 22050)
+
             except Exception as e:
-                logger.warning(f"Seed-VC conversion failed ({e}), using raw MMS")
+                logger.warning(f"Seed-VC failed ({e}), using raw MMS")
+                os.chdir("/workspace/dubber")
                 src_path.unlink(missing_ok=True)
                 sf.write(str(out_path), waveform.astype(np.float32), mms_sr)
 
         if not out_path.exists() or out_path.stat().st_size < 500:
             raise HTTPException(status_code=500, detail="Synthesis produced invalid output")
 
-        logger.info(f"Synthesis complete: {out_path}")
+        logger.info(f"Synthesis done: {out_path}")
 
         import asyncio
         response = FileResponse(str(out_path), media_type="audio/wav", filename=out_path.name)
@@ -327,88 +291,6 @@ async def synthesize(request: SynthesizeRequest):
         import traceback
         logger.error(f"Synthesis failed: {e}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
-
-
-def _seed_vc_convert(src_path: str, ref_path: str, out_path: str, cfg_rate: float = 0.7,
-                     diffusion_steps: int = 30, length_adjust: float = 1.0):
-    """Run Seed-VC voice conversion."""
-    model   = _vc_model["model"]
-    config  = _vc_model["config"]
-
-    # Load source and reference audio
-    source, src_sr = torchaudio.load(src_path)
-    ref,    ref_sr = torchaudio.load(ref_path)
-
-    # Resample to model sample rate (typically 22050 or 44100)
-    model_sr = getattr(config.preprocess_params, "sr", 22050)
-
-    if src_sr != model_sr:
-        source = torchaudio.functional.resample(source, src_sr, model_sr)
-    if ref_sr != model_sr:
-        ref = torchaudio.functional.resample(ref, ref_sr, model_sr)
-
-    # Mono
-    if source.shape[0] > 1:
-        source = source.mean(0, keepdim=True)
-    if ref.shape[0] > 1:
-        ref = ref.mean(0, keepdim=True)
-
-    source = source.to(DEVICE)
-    ref    = ref.to(DEVICE)
-
-    # Run Seed-VC inference
-    # The exact API depends on the model type loaded.
-    # Try the standard Seed-VC v2 inference pattern.
-    with torch.no_grad():
-        # Try calling model directly (some versions expose __call__ with these args)
-        try:
-            output = model.inference(
-                source=source,
-                target=ref,
-                diffusion_steps=diffusion_steps,
-                length_adjust=length_adjust,
-                inference_cfg_rate=cfg_rate,
-            )
-        except AttributeError:
-            # Fallback: use the seed-vc inference script directly
-            output = _seed_vc_script_inference(src_path, ref_path, cfg_rate, diffusion_steps)
-            torchaudio.save(out_path, output, model_sr)
-            return
-
-    if isinstance(output, torch.Tensor):
-        if output.dim() == 1:
-            output = output.unsqueeze(0)
-        torchaudio.save(out_path, output.cpu(), model_sr)
-    else:
-        # numpy array
-        sf.write(out_path, output, model_sr)
-
-
-def _seed_vc_script_inference(src_path: str, ref_path: str, cfg_rate: float, diffusion_steps: int) -> torch.Tensor:
-    """Fallback: use Seed-VC's inference.py script via subprocess."""
-    import subprocess
-    tmp_out = str(CACHE_PATH / f"seedvc_{uuid.uuid4()}.wav")
-
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(SEED_VC_DIR / "inference.py"),
-            "--source", src_path,
-            "--target", ref_path,
-            "--output", tmp_out,
-            "--diffusion-steps", str(diffusion_steps),
-            "--inference-cfg-rate", str(cfg_rate),
-            "--length-adjust", "1.0",
-        ],
-        capture_output=True, text=True, cwd=str(SEED_VC_DIR)
-    )
-
-    if result.returncode != 0 or not Path(tmp_out).exists():
-        raise RuntimeError(f"Seed-VC script failed: {result.stderr[-500:]}")
-
-    audio, sr = torchaudio.load(tmp_out)
-    Path(tmp_out).unlink(missing_ok=True)
-    return audio
 
 
 @app.delete("/voices/{voice_id}")
