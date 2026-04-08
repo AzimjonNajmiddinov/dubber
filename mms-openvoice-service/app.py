@@ -236,19 +236,26 @@ async def synthesize(request: SynthesizeRequest):
         src_path = CACHE_PATH / f"src_{uuid.uuid4()}.wav"
         sf.write(str(src_path), waveform_22k, 22050)
 
-        # 3. OpenVoice tone color conversion
+        # 3. OpenVoice tone color conversion (fallback to raw MMS if SE extraction fails)
         from openvoice import se_extractor
         target_se = torch.load(str(se_path))
-        src_se, _ = se_extractor.get_se(str(src_path), _ov_converter, vad=False)
 
         out_path = CACHE_PATH / f"{uuid.uuid4()}.wav"
-        _ov_converter.convert(
-            audio_src_path=str(src_path),
-            src_se=src_se,
-            tgt_se=target_se,
-            output_path=str(out_path),
-            tau=request.tau,
-        )
+        try:
+            src_se, _ = se_extractor.get_se(str(src_path), _ov_converter, vad=False)
+            _ov_converter.convert(
+                audio_src_path=str(src_path),
+                src_se=src_se,
+                tgt_se=target_se,
+                output_path=str(out_path),
+                tau=request.tau,
+            )
+            if not out_path.exists() or out_path.stat().st_size < 1000:
+                raise RuntimeError("OpenVoice output invalid")
+        except Exception as e:
+            logger.warning(f"OpenVoice conversion failed ({e}), using raw MMS output")
+            import shutil
+            shutil.copy(str(src_path), str(out_path))
 
         src_path.unlink(missing_ok=True)
 
