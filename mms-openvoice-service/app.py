@@ -167,7 +167,7 @@ async def clone_voice(
         # Extract tone color embedding from reference audio
         from openvoice import se_extractor
         target_se, _ = se_extractor.get_se(
-            str(ref_path), _ov_converter, vad=True
+            str(ref_path), _ov_converter, vad=False
         )
         se_path = voice_dir / "target_se.pth"
         torch.save(target_se, str(se_path))
