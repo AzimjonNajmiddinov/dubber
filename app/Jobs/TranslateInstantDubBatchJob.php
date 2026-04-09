@@ -62,6 +62,12 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         $batchNum = $this->batchIndex + 1;
         $this->updateSession(['status' => 'Translating...', 'progress' => "Translating ({$batchNum}/{$this->totalBatches})..."]);
 
+        // Preserve original source text before translation overwrites $seg['text']
+        foreach ($batch as &$seg) {
+            $seg['source_text'] = $seg['text'];
+        }
+        unset($seg);
+
         try {
             // Translate
             if ($this->batchIndex === 0) {
@@ -130,6 +136,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
                 $this->language,
                 $seg['speaker'] ?? 'M1',
                 $slotEnd,
+                $seg['source_text'] ?? null,
             )->onQueue('segment-generation');
         }
 

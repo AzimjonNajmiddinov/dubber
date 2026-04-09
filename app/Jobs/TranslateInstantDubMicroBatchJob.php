@@ -72,6 +72,7 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
                 $seg['start'], $seg['end'], $this->language,
                 $seg['speaker'] ?? 'M1',
                 $slotEnd,
+                $this->segments[$i]['text'] ?? null,
             )->onQueue('segment-generation');
         }
 
