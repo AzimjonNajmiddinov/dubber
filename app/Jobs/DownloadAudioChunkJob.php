@@ -160,10 +160,11 @@ class DownloadAudioChunkJob implements ShouldQueue
                 if ($firstStart > 1.0) {
                     $leadFile = "{$aacDir}/lead.aac";
                     $leadDur = round($this->frameAlignedDuration(0, $firstStart), 6);
-                    Process::timeout(30)->run([
+                    $timeout = max(30, (int) ceil($leadDur) + 10);
+                    Process::timeout($timeout)->run([
                         'ffmpeg', '-y',
                         '-f', 'lavfi', '-t', (string) $leadDur, '-i', 'anullsrc=r=44100:cl=mono',
-                        '-ss', '0', '-t', (string) $leadDur, '-i', $bgAudioPath,
+                        '-stream_loop', '-1', '-ss', '0', '-t', (string) $leadDur, '-i', $bgAudioPath,
                         '-filter_complex',
                         "[1:a]volume=0.2[bg];[0:a][bg]amix=inputs=2:duration=first:normalize=0",
                         '-ac', '1', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $leadFile,
