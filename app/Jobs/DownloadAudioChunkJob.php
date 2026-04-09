@@ -122,11 +122,12 @@ class DownloadAudioChunkJob implements ShouldQueue
             local session = cjson.decode(data)
             local ready = session['segments_ready'] or 0
             local total = session['total_segments'] or 999999
-            if ready >= total and session['status'] ~= 'complete' then
+            local hasBg = session['bg_chunks'] ~= nil and next(session['bg_chunks']) ~= nil
+            if ready >= total and hasBg and session['status'] ~= 'complete' then
                 session['status'] = 'complete'
                 session['playable'] = true
                 redis.call('SETEX', KEYS[1], 50400, cjson.encode(session))
-            elseif not session['playable'] and ready >= math.min(math.ceil(total * 0.1), 30) then
+            elseif not session['playable'] and hasBg and ready >= math.min(math.ceil(total * 0.1), 30) then
                 session['playable'] = true
                 redis.call('SETEX', KEYS[1], 50400, cjson.encode(session))
             end
