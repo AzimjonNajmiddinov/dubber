@@ -131,23 +131,19 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             $freshJson = Redis::get($sessionKey);
             if ($freshJson) $session = json_decode($freshJson, true);
 
-            $slotEndForBg = $this->slotEnd ?? $this->endTime;
-            $bg = $this->buildBgForRange($session, $this->startTime, $slotEndForBg, $tmpDir);
-            $hasBg = $bg !== null;
+            $bg = $this->findBgForTime($session, $this->startTime);
 
-            if ($hasBg) {
+            if ($bg) {
                 $this->generateHlsAac($bg, $finalMp3, $ttsDuration);
             } else {
                 $this->generateTtsOnlyAac($finalMp3);
             }
-            if ($bg && $bg['temp']) @unlink($bg['temp']);
 
             // 4b. Pre-generate lead-in segment
             if ($this->index === 0 && $this->startTime > 1.0) {
-                $bgLead = $this->buildBgForRange($session, 0, $this->startTime, $tmpDir);
+                $bgLead = $this->findBgForTime($session, 0.0);
                 if ($bgLead) {
                     $this->generateLeadAac($bgLead);
-                    if ($bgLead['temp']) @unlink($bgLead['temp']);
                 }
             }
 
@@ -502,8 +498,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         $aacFile = "{$aacDir}/{$this->index}.aac";
         if (!is_dir($aacDir)) @mkdir($aacDir, 0755, true);
 
-        $tmpDir = sys_get_temp_dir();
-        $bg = $this->buildBgForRange($session, $this->startTime, $slotEnd, $tmpDir);
+        $bg = $this->findBgForTime($session, $this->startTime);
 
         $timeout = max(30, (int) ceil($slotDuration) + 30);
         try {
@@ -515,7 +510,6 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                     '-filter_complex', '[1:a]volume=0.2[bg];[0:a][bg]amix=inputs=2:duration=first:normalize=0',
                     '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
                 ]);
-                if ($bg['temp']) @unlink($bg['temp']);
             } else {
                 Process::timeout($timeout)->run([
                     'ffmpeg', '-y', '-f', 'lavfi', '-t', (string) $slotDuration,
@@ -526,92 +520,6 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         } catch (\Throwable) {
             // Best effort
         }
-    }
-
-    /**
-     * Find a background audio chunk file that covers the given time.
-     */
-    /**
-     * Build a background audio input for the given time range.
-     * Returns [path, seekInBg, tempFile] where tempFile is non-null if a
-     * temp concat file was created and must be deleted after use.
-     * Returns null if no background is available for rangeStart.
-     */
-    private function buildBgForRange(array $session, float $rangeStart, float $rangeEnd, string $tmpDir): ?array
-    {
-        $bgChunks = $session['bg_chunks'] ?? [];
-        if (empty($bgChunks)) return null;
-
-        // Collect chunks that overlap [rangeStart, rangeEnd], sorted by start
-        $relevant = [];
-        foreach ($bgChunks as $chunk) {
-            $cs   = (float) ($chunk['start'] ?? 0);
-            $ce   = (float) ($chunk['end'] ?? 0);
-            $path = $chunk['path'] ?? null;
-            if ($path && file_exists($path) && $ce > $rangeStart && $cs < $rangeEnd) {
-                $relevant[] = $chunk;
-            }
-        }
-        if (empty($relevant)) return null;
-
-        // Must at least cover rangeStart
-        $covers = array_filter($relevant, fn($c) => (float)($c['start'] ?? 0) <= $rangeStart && (float)($c['end'] ?? 0) > $rangeStart);
-        if (empty($covers)) return null;
-
-        usort($relevant, fn($a, $b) => ($a['start'] ?? 0) <=> ($b['start'] ?? 0));
-
-        if (count($relevant) === 1) {
-            $c = $relevant[0];
-            return ['path' => $c['path'], 'seek' => max(0.0, $rangeStart - (float)($c['start'] ?? 0)), 'temp' => null];
-        }
-
-        // Multiple chunks: concat into a single temp AAC
-        $concatTxt  = "{$tmpDir}/bgconcat_{$this->index}_" . substr(md5($rangeStart.$rangeEnd), 0, 6) . ".txt";
-        $concatFile = "{$tmpDir}/bgconcat_{$this->index}_" . substr(md5($rangeStart.$rangeEnd), 0, 6) . ".aac";
-        $lines = array_map(fn($c) => "file '" . str_replace("'", "'\\''", $c['path']) . "'", $relevant);
-        file_put_contents($concatTxt, implode("\n", $lines));
-
-        $res = Process::timeout(60)->run([
-            'ffmpeg', '-y', '-f', 'concat', '-safe', '0',
-            '-i', $concatTxt, '-c', 'copy', $concatFile,
-        ]);
-        @unlink($concatTxt);
-
-        $firstStart = (float) ($relevant[0]['start'] ?? 0);
-        if ($res->successful() && file_exists($concatFile) && filesize($concatFile) > 100) {
-            return ['path' => $concatFile, 'seek' => max(0.0, $rangeStart - $firstStart), 'temp' => $concatFile];
-        }
-
-        // Fallback: first chunk only
-        $c = $relevant[0];
-        return ['path' => $c['path'], 'seek' => max(0.0, $rangeStart - $firstStart), 'temp' => null];
-    }
-
-    private function findBgChunkForTime(array $session, float $time): ?string
-    {
-        $bgChunks = $session['bg_chunks'] ?? [];
-        foreach ($bgChunks as $chunk) {
-            $path = $chunk['path'] ?? null;
-            $start = (float) ($chunk['start'] ?? 0);
-            $end = (float) ($chunk['end'] ?? 0);
-            if ($path && file_exists($path) && $time >= $start && $time < $end) {
-                return $path;
-            }
-        }
-        return null;
-    }
-
-    private function findBgChunkStart(array $session, float $time): float
-    {
-        $bgChunks = $session['bg_chunks'] ?? [];
-        foreach ($bgChunks as $chunk) {
-            $start = (float) ($chunk['start'] ?? 0);
-            $end = (float) ($chunk['end'] ?? 0);
-            if ($time >= $start && $time < $end) {
-                return $start;
-            }
-        }
-        return 0;
     }
 
     private function generateTtsOnlyAac(string $ttsMp3): void
@@ -666,7 +574,6 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         }
     }
 
-    /** bg = ['path'=>..., 'seek'=>..., 'temp'=>...] from buildBgForRange */
     private function generateHlsAac(array $bg, string $ttsMp3, float $ttsDuration): void
     {
         $slotEnd = $this->slotEnd ?? $this->endTime;
@@ -698,7 +605,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
 
     private function generateTailAac(array $session): void
     {
-        // Re-read session to get video_duration (may have been set by DownloadOriginalAudioJob)
+        // Re-read session to get video_duration
         $sessionJson = Redis::get("instant-dub:{$this->sessionId}");
         if ($sessionJson) {
             $session = json_decode($sessionJson, true);
@@ -711,8 +618,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
 
         if ($tailDuration < 5) return;
 
-        $tmpDir = sys_get_temp_dir();
-        $bg = $this->buildBgForRange($session, $tailStart, $tailEnd, $tmpDir);
+        $bg = $this->findBgForTime($session, $tailStart);
 
         $aacDir = storage_path("app/instant-dub/{$this->sessionId}/aac");
         $aacFile = "{$aacDir}/tail.aac";
@@ -729,7 +635,6 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                     "[1:a]volume=0.2[bg];[0:a][bg]amix=inputs=2:duration=first:normalize=0",
                     '-ac', '1', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
                 ]);
-                if ($bg['temp']) @unlink($bg['temp']);
             } else {
                 Process::timeout($timeout)->run([
                     'ffmpeg', '-y', '-f', 'lavfi', '-t', (string) $tailDuration,
@@ -739,13 +644,10 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             }
 
             if (file_exists($aacFile) && filesize($aacFile) > 100) {
-                $sessionJson = Redis::get("instant-dub:{$this->sessionId}");
-                if ($sessionJson) {
-                    $s = json_decode($sessionJson, true);
-                    $s['tail_start'] = $tailStart;
-                    $s['tail_duration'] = $tailDuration;
-                    Redis::setex("instant-dub:{$this->sessionId}", 50400, json_encode($s));
-                }
+                $s = $session;
+                $s['tail_start'] = $tailStart;
+                $s['tail_duration'] = $tailDuration;
+                Redis::setex("instant-dub:{$this->sessionId}", 50400, json_encode($s));
             }
         } catch (\Throwable $e) {
             Log::warning("[DUB] Tail AAC generation failed: " . $e->getMessage(), [
@@ -781,6 +683,23 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         }
     }
 
+    /**
+     * Find the background chunk covering $time, return ['path', 'seek'] or null.
+     */
+    private function findBgForTime(array $session, float $time): ?array
+    {
+        $bgChunks = $session['bg_chunks'] ?? [];
+        foreach ($bgChunks as $chunk) {
+            $path  = $chunk['path'] ?? null;
+            $start = (float) ($chunk['start'] ?? 0);
+            $end   = (float) ($chunk['end'] ?? 0);
+            if ($path && file_exists($path) && $time >= $start && $time < $end) {
+                return ['path' => $path, 'seek' => max(0.0, $time - $start)];
+            }
+        }
+        return null;
+    }
+
     private function generateGapAacWithBg(array $session): void
     {
         // Gap files are used by hlsGapSegment endpoint but not in the main playlist.
@@ -810,11 +729,10 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             session['segments_ready'] = (session['segments_ready'] or 0) + 1
             session['last_progress_at'] = tonumber(ARGV[1])
             local total = session['total_segments'] or 999999
-            local hasBg = session['bg_chunks'] ~= nil and next(session['bg_chunks']) ~= nil
             if session['segments_ready'] >= total then
                 session['status'] = 'complete'
-                if hasBg then session['playable'] = true end
-            elseif not session['playable'] and session['segments_ready'] >= math.min(math.ceil(total * 0.1), 30) and hasBg then
+                session['playable'] = true
+            elseif not session['playable'] and session['segments_ready'] >= math.min(math.ceil(total * 0.1), 30) then
                 session['playable'] = true
             end
             redis.call('SETEX', KEYS[1], 50400, cjson.encode(session))

@@ -109,7 +109,6 @@ class DownloadAudioChunkJob implements ShouldQueue
         ]);
 
         $this->remixSegmentsInRange($chunkFile);
-        $this->maybeRegenerateLeadAac();
 
         // Check if all TTS segments are ready + bg is now available → set complete/playable
         $this->checkAndSetComplete();
@@ -123,8 +122,6 @@ class DownloadAudioChunkJob implements ShouldQueue
             local session = cjson.decode(data)
             local ready = session['segments_ready'] or 0
             local total = session['total_segments'] or 999999
-            local hasBg = session['bg_chunks'] ~= nil and next(session['bg_chunks']) ~= nil
-            if not hasBg then return ready end
             if ready >= total and session['status'] ~= 'complete' then
                 session['status'] = 'complete'
                 session['playable'] = true
@@ -233,97 +230,6 @@ class DownloadAudioChunkJob implements ShouldQueue
 
         if ($remixed > 0) {
             Log::info("[DUB] Remixed {$remixed} segments with background (chunk {$this->chunkIndex})", [
-                'session' => $this->sessionId,
-            ]);
-        }
-    }
-
-    /**
-     * Re-generate lead.aac whenever a new bg chunk arrives that overlaps
-     * the lead period (0 → first segment start).  The first time lead.aac is
-     * created only chunk 0 may be available, which is often shorter than the
-     * lead duration → silence at the end of the lead segment.
-     */
-    private function maybeRegenerateLeadAac(): void
-    {
-        $sessionKey = "instant-dub:{$this->sessionId}";
-        $sessionJson = Redis::get($sessionKey);
-        if (!$sessionJson) return;
-        $session = json_decode($sessionJson, true);
-
-        // Get first segment's start time
-        $chunk0Json = Redis::get("{$sessionKey}:chunk:0");
-        if (!$chunk0Json) return; // no segments yet
-        $firstStart = (float) (json_decode($chunk0Json, true)['start_time'] ?? 0);
-        if ($firstStart <= 1.0) return; // no meaningful lead
-
-        // Only re-generate if this chunk overlaps the lead period [0, firstStart]
-        if ($this->startTime >= $firstStart) return;
-
-        $aacDir = storage_path("app/instant-dub/{$this->sessionId}/aac");
-        $leadFile = "{$aacDir}/lead.aac";
-        if (!is_dir($aacDir)) @mkdir($aacDir, 0755, true);
-
-        // Collect all available bg chunks that cover [0, firstStart]
-        $bgChunks = $session['bg_chunks'] ?? [];
-        $relevant = [];
-        foreach ($bgChunks as $chunk) {
-            $cs = (float) ($chunk['start'] ?? 0);
-            $ce = (float) ($chunk['end'] ?? 0);
-            $path = $chunk['path'] ?? null;
-            if ($path && file_exists($path) && $ce > 0 && $cs < $firstStart) {
-                $relevant[] = $chunk;
-            }
-        }
-        if (empty($relevant)) return;
-
-        usort($relevant, fn($a, $b) => ($a['start'] ?? 0) <=> ($b['start'] ?? 0));
-
-        // Check if available chunks fully cover the lead (otherwise generating now
-        // would produce silence at the end — better to wait for next chunk)
-        $coveredUntil = 0.0;
-        foreach ($relevant as $c) {
-            if ((float)($c['start'] ?? 0) <= $coveredUntil) {
-                $coveredUntil = max($coveredUntil, (float)($c['end'] ?? 0));
-            }
-        }
-        if ($coveredUntil < $firstStart) return; // not enough chunks yet
-
-        // Build bg input (concat if multiple chunks)
-        if (count($relevant) === 1) {
-            $bgPath = $relevant[0]['path'];
-            $tempConcat = null;
-        } else {
-            $concatTxt  = "/tmp/lead_concat_{$this->sessionId}.txt";
-            $bgPath     = "/tmp/lead_concat_{$this->sessionId}.aac";
-            $tempConcat = $bgPath;
-            file_put_contents($concatTxt, implode("\n", array_map(
-                fn($c) => "file '" . str_replace("'", "'\\''", $c['path']) . "'",
-                $relevant
-            )));
-            $res = Process::timeout(30)->run([
-                'ffmpeg', '-y', '-f', 'concat', '-safe', '0',
-                '-i', $concatTxt, '-c', 'copy', $bgPath,
-            ]);
-            @unlink($concatTxt);
-            if (!$res->successful()) return;
-        }
-
-        $duration = round($this->frameAlignedDuration(0, $firstStart), 6);
-        $timeout  = max(30, (int) ceil($duration) + 10);
-
-        $result = Process::timeout($timeout)->run([
-            'ffmpeg', '-y',
-            '-f', 'lavfi', '-t', (string) $duration, '-i', 'anullsrc=r=44100:cl=mono',
-            '-ss', '0', '-t', (string) $duration, '-i', $bgPath,
-            '-filter_complex', '[1:a]volume=0.2[bg];[0:a][bg]amix=inputs=2:duration=first:normalize=0',
-            '-ac', '1', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $leadFile,
-        ]);
-
-        if ($tempConcat) @unlink($tempConcat);
-
-        if ($result->successful()) {
-            Log::info("[DUB] lead.aac regenerated with {$duration}s background (chunk {$this->chunkIndex})", [
                 'session' => $this->sessionId,
             ]);
         }
