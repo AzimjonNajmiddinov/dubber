@@ -185,13 +185,10 @@ class DownloadAudioChunkJob implements ShouldQueue
             if ($segStart < $this->startTime || $segStart >= $this->endTime) continue;
 
             $audioBase64 = $chunk['audio_base64'] ?? null;
-            if (!$audioBase64) continue;
 
             $aacFile = "{$aacDir}/{$i}.aac";
-            // Seek relative to this chunk's start, not absolute video time
             $seekInBg = max(0, $segStart - $this->startTime);
 
-            // Use stored slot_end (same as initial generation) for consistent duration
             $slotEnd = isset($chunk['slot_end']) ? (float) $chunk['slot_end'] : null;
             if ($slotEnd === null) {
                 $nextChunkJson = Redis::get("{$sessionKey}:chunk:" . ($i + 1));
@@ -201,21 +198,32 @@ class DownloadAudioChunkJob implements ShouldQueue
             }
             $slotDuration = round($this->frameAlignedDuration($segStart, $slotEnd), 6);
 
-            $tmpMp3 = "/tmp/remix_{$this->sessionId}_{$i}.mp3";
-            file_put_contents($tmpMp3, base64_decode($audioBase64));
+            if ($audioBase64) {
+                // Remix: TTS + background
+                $tmpMp3 = "/tmp/remix_{$this->sessionId}_{$i}.mp3";
+                file_put_contents($tmpMp3, base64_decode($audioBase64));
 
-            // anullsrc as time base guarantees exact frame count (prevents ADTS drift)
-            $result = Process::timeout(20)->run([
-                'ffmpeg', '-y',
-                '-f', 'lavfi', '-t', (string) $slotDuration, '-i', 'anullsrc=r=44100:cl=mono',
-                '-ss', (string) round($seekInBg, 3), '-t', (string) $slotDuration, '-i', $bgAudioPath,
-                '-i', $tmpMp3,
-                '-filter_complex',
-                "[1:a]volume=0.2,aresample=44100[bg];[2:a]aresample=44100[tts];[0:a][bg][tts]amix=inputs=3:duration=first:normalize=0",
-                '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
-            ]);
-
-            @unlink($tmpMp3);
+                $result = Process::timeout(20)->run([
+                    'ffmpeg', '-y',
+                    '-f', 'lavfi', '-t', (string) $slotDuration, '-i', 'anullsrc=r=44100:cl=mono',
+                    '-ss', (string) round($seekInBg, 3), '-t', (string) $slotDuration, '-i', $bgAudioPath,
+                    '-i', $tmpMp3,
+                    '-filter_complex',
+                    "[1:a]volume=0.2,aresample=44100[bg];[2:a]aresample=44100[tts];[0:a][bg][tts]amix=inputs=3:duration=first:normalize=0",
+                    '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
+                ]);
+                @unlink($tmpMp3);
+            } else {
+                // No TTS (failed/empty): background only at lowered volume
+                $result = Process::timeout(20)->run([
+                    'ffmpeg', '-y',
+                    '-f', 'lavfi', '-t', (string) $slotDuration, '-i', 'anullsrc=r=44100:cl=mono',
+                    '-ss', (string) round($seekInBg, 3), '-t', (string) $slotDuration, '-i', $bgAudioPath,
+                    '-filter_complex',
+                    "[1:a]volume=0.2[bg];[0:a][bg]amix=inputs=2:duration=first:normalize=0",
+                    '-ac', '1', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
+                ]);
+            }
 
             if ($result->successful()) {
                 $remixed++;

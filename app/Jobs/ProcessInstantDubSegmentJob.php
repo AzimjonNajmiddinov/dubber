@@ -126,21 +126,23 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             $audioBase64 = base64_encode(file_get_contents($finalMp3));
 
             // 4. Pre-generate AAC for HLS
-            $bgAudioPath = $this->findBgChunkForTime($session, $this->startTime);
-            $hasBg = $bgAudioPath !== null;
+            $slotEndForBg = $this->slotEnd ?? $this->endTime;
+            $bg = $this->buildBgForRange($session, $this->startTime, $slotEndForBg, $tmpDir);
+            $hasBg = $bg !== null;
 
             if ($hasBg) {
-                $session['original_audio_path'] = $bgAudioPath;
-                $this->generateHlsAac($session, $finalMp3, $ttsDuration);
+                $this->generateHlsAac($bg, $finalMp3, $ttsDuration);
             } else {
                 $this->generateTtsOnlyAac($finalMp3);
             }
+            if ($bg && $bg['temp']) @unlink($bg['temp']);
 
             // 4b. Pre-generate lead-in segment
             if ($this->index === 0 && $this->startTime > 1.0) {
-                if ($hasBg) {
-                    $session['original_audio_path'] = $bgAudioPath;
-                    $this->generateLeadAac($session);
+                $bgLead = $this->buildBgForRange($session, 0, $this->startTime, $tmpDir);
+                if ($bgLead) {
+                    $this->generateLeadAac($bgLead);
+                    if ($bgLead['temp']) @unlink($bgLead['temp']);
                 }
             }
 
@@ -488,33 +490,27 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
 
     private function generateBackgroundOnlyAac(array $session): void
     {
-        $bgAudioPath = $this->findBgChunkForTime($session, $this->startTime);
-        $hasBg = $bgAudioPath !== null;
-        $bgChunkStart = $hasBg ? $this->findBgChunkStart($session, $this->startTime) : 0;
-        $seekInBg = max(0, $this->startTime - $bgChunkStart);
-
-        $slotStart = $this->startTime;
-        // Frame-aligned duration from absolute positions (prevents cumulative drift)
         $slotEnd = $this->slotEnd ?? $this->endTime;
-        $slotDuration = round($this->frameAlignedDuration($slotStart, $slotEnd), 6);
+        $slotDuration = round($this->frameAlignedDuration($this->startTime, $slotEnd), 6);
 
         $aacDir = storage_path("app/instant-dub/{$this->sessionId}/aac");
         $aacFile = "{$aacDir}/{$this->index}.aac";
+        if (!is_dir($aacDir)) @mkdir($aacDir, 0755, true);
 
-        if (!is_dir($aacDir)) {
-            @mkdir($aacDir, 0755, true);
-        }
+        $tmpDir = sys_get_temp_dir();
+        $bg = $this->buildBgForRange($session, $this->startTime, $slotEnd, $tmpDir);
 
         $timeout = max(30, (int) ceil($slotDuration) + 30);
         try {
-            if ($hasBg) {
+            if ($bg) {
                 Process::timeout($timeout)->run([
                     'ffmpeg', '-y',
                     '-f', 'lavfi', '-t', (string) $slotDuration, '-i', 'anullsrc=r=44100:cl=mono',
-                    '-ss', (string) round($seekInBg, 3), '-t', (string) $slotDuration, '-i', $bgAudioPath,
+                    '-ss', (string) round($bg['seek'], 3), '-t', (string) $slotDuration, '-i', $bg['path'],
                     '-filter_complex', '[1:a]volume=0.2[bg];[0:a][bg]amix=inputs=2:duration=first:normalize=0',
                     '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
                 ]);
+                if ($bg['temp']) @unlink($bg['temp']);
             } else {
                 Process::timeout($timeout)->run([
                     'ffmpeg', '-y', '-f', 'lavfi', '-t', (string) $slotDuration,
@@ -530,6 +526,62 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
     /**
      * Find a background audio chunk file that covers the given time.
      */
+    /**
+     * Build a background audio input for the given time range.
+     * Returns [path, seekInBg, tempFile] where tempFile is non-null if a
+     * temp concat file was created and must be deleted after use.
+     * Returns null if no background is available for rangeStart.
+     */
+    private function buildBgForRange(array $session, float $rangeStart, float $rangeEnd, string $tmpDir): ?array
+    {
+        $bgChunks = $session['bg_chunks'] ?? [];
+        if (empty($bgChunks)) return null;
+
+        // Collect chunks that overlap [rangeStart, rangeEnd], sorted by start
+        $relevant = [];
+        foreach ($bgChunks as $chunk) {
+            $cs   = (float) ($chunk['start'] ?? 0);
+            $ce   = (float) ($chunk['end'] ?? 0);
+            $path = $chunk['path'] ?? null;
+            if ($path && file_exists($path) && $ce > $rangeStart && $cs < $rangeEnd) {
+                $relevant[] = $chunk;
+            }
+        }
+        if (empty($relevant)) return null;
+
+        // Must at least cover rangeStart
+        $covers = array_filter($relevant, fn($c) => (float)($c['start'] ?? 0) <= $rangeStart && (float)($c['end'] ?? 0) > $rangeStart);
+        if (empty($covers)) return null;
+
+        usort($relevant, fn($a, $b) => ($a['start'] ?? 0) <=> ($b['start'] ?? 0));
+
+        if (count($relevant) === 1) {
+            $c = $relevant[0];
+            return ['path' => $c['path'], 'seek' => max(0.0, $rangeStart - (float)($c['start'] ?? 0)), 'temp' => null];
+        }
+
+        // Multiple chunks: concat into a single temp AAC
+        $concatTxt  = "{$tmpDir}/bgconcat_{$this->index}_" . substr(md5($rangeStart.$rangeEnd), 0, 6) . ".txt";
+        $concatFile = "{$tmpDir}/bgconcat_{$this->index}_" . substr(md5($rangeStart.$rangeEnd), 0, 6) . ".aac";
+        $lines = array_map(fn($c) => "file '" . str_replace("'", "'\\''", $c['path']) . "'", $relevant);
+        file_put_contents($concatTxt, implode("\n", $lines));
+
+        $res = Process::timeout(60)->run([
+            'ffmpeg', '-y', '-f', 'concat', '-safe', '0',
+            '-i', $concatTxt, '-c', 'copy', $concatFile,
+        ]);
+        @unlink($concatTxt);
+
+        $firstStart = (float) ($relevant[0]['start'] ?? 0);
+        if ($res->successful() && file_exists($concatFile) && filesize($concatFile) > 100) {
+            return ['path' => $concatFile, 'seek' => max(0.0, $rangeStart - $firstStart), 'temp' => $concatFile];
+        }
+
+        // Fallback: first chunk only
+        $c = $relevant[0];
+        return ['path' => $c['path'], 'seek' => max(0.0, $rangeStart - $firstStart), 'temp' => null];
+    }
+
     private function findBgChunkForTime(array $session, float $time): ?string
     {
         $bgChunks = $session['bg_chunks'] ?? [];
@@ -609,89 +661,33 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         }
     }
 
-    private function generateHlsAac(array $session, string $ttsMp3, float $ttsDuration): void
+    /** bg = ['path'=>..., 'seek'=>..., 'temp'=>...] from buildBgForRange */
+    private function generateHlsAac(array $bg, string $ttsMp3, float $ttsDuration): void
     {
-        $originalAudioPath = $session['original_audio_path'] ?? null;
-        $hasBg = $originalAudioPath && file_exists($originalAudioPath);
-
-        $bgChunkStart = $this->findBgChunkStart($session, $this->startTime);
-        $seekInBg = max(0, $this->startTime - $bgChunkStart);
-
-        // Frame-aligned duration from absolute positions (prevents cumulative drift)
         $slotEnd = $this->slotEnd ?? $this->endTime;
         $slotDuration = round($this->frameAlignedDuration($this->startTime, $slotEnd), 6);
 
         $aacDir = storage_path("app/instant-dub/{$this->sessionId}/aac");
         $aacFile = "{$aacDir}/{$this->index}.aac";
-
-        if (!is_dir($aacDir)) {
-            @mkdir($aacDir, 0755, true);
-        }
+        if (!is_dir($aacDir)) @mkdir($aacDir, 0755, true);
 
         try {
-            if ($hasBg) {
-                // anullsrc with frame-aligned duration: exact frame count, no cumulative drift
-                $result = Process::timeout(20)->run([
-                    'ffmpeg', '-y',
-                    '-f', 'lavfi', '-t', (string) $slotDuration, '-i', 'anullsrc=r=44100:cl=mono',
-                    '-ss', (string) round($seekInBg, 3), '-t', (string) $slotDuration, '-i', $originalAudioPath,
-                    '-i', $ttsMp3,
-                    '-filter_complex',
-                    "[1:a]volume=0.2,aresample=44100[bg];[2:a]aresample=44100[tts];[0:a][bg][tts]amix=inputs=3:duration=first:normalize=0",
-                    '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
-                ]);
-                if (!$result->successful() || !file_exists($aacFile) || filesize($aacFile) < 100) {
-                    $this->generateTtsOnlyAac($ttsMp3);
-                }
-            } else {
+            $result = Process::timeout(20)->run([
+                'ffmpeg', '-y',
+                '-f', 'lavfi', '-t', (string) $slotDuration, '-i', 'anullsrc=r=44100:cl=mono',
+                '-ss', (string) round($bg['seek'], 3), '-t', (string) $slotDuration, '-i', $bg['path'],
+                '-i', $ttsMp3,
+                '-filter_complex',
+                "[1:a]volume=0.2,aresample=44100[bg];[2:a]aresample=44100[tts];[0:a][bg][tts]amix=inputs=3:duration=first:normalize=0",
+                '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
+            ]);
+            if (!$result->successful() || !file_exists($aacFile) || filesize($aacFile) < 100) {
                 $this->generateTtsOnlyAac($ttsMp3);
             }
         } catch (\Throwable $e) {
             Log::warning("[DUB] Segment #{$this->index} HLS AAC failed: " . $e->getMessage(), [
                 'session' => $this->sessionId,
             ]);
-        }
-    }
-
-    private function generateGapAacWithBg(array $session): void
-    {
-        $slotEnd = $this->slotEnd;
-        if ($slotEnd === null) return;
-
-        $gapStart = $this->endTime;
-        $gapDuration = round($slotEnd - $gapStart, 3);
-        if ($gapDuration < 0.5) return;
-
-        $aacDir = storage_path("app/instant-dub/{$this->sessionId}/aac");
-        $gapFile = "{$aacDir}/gap-{$this->index}.aac";
-
-        $originalAudioPath = $session['original_audio_path'] ?? null;
-        $hasBg = $originalAudioPath && file_exists($originalAudioPath);
-
-        // Seek relative to chunk start, not absolute video time
-        $bgChunkStart = $this->findBgChunkStart($session, $gapStart);
-        $seekInBg = max(0, $gapStart - $bgChunkStart);
-
-        try {
-            if ($hasBg) {
-                // Use anullsrc base to guarantee exact duration in ADTS
-                Process::timeout(20)->run([
-                    'ffmpeg', '-y',
-                    '-f', 'lavfi', '-t', (string) $gapDuration, '-i', 'anullsrc=r=44100:cl=mono',
-                    '-ss', (string) round($seekInBg, 3), '-t', (string) $gapDuration, '-i', $originalAudioPath,
-                    '-filter_complex',
-                    "[1:a]volume=0.2[bg];[0:a][bg]amix=inputs=2:duration=first:normalize=0",
-                    '-ac', '1', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $gapFile,
-                ]);
-            } else {
-                Process::timeout(15)->run([
-                    'ffmpeg', '-y', '-f', 'lavfi', '-t', (string) $gapDuration,
-                    '-i', 'anullsrc=r=44100:cl=mono',
-                    '-c:a', 'aac', '-b:a', '32k', '-f', 'adts', $gapFile,
-                ]);
-            }
-        } catch (\Throwable $e) {
-            // Non-fatal
         }
     }
 
@@ -705,36 +701,30 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
 
         $videoDuration = (float) ($session['video_duration'] ?? 0);
         $tailStart = $this->endTime;
-
-        // If we don't know video duration, add 3 minutes of padding
         $tailEnd = $videoDuration > $tailStart ? $videoDuration : $tailStart + 180;
         $tailDuration = round($this->frameAlignedDuration($tailStart, $tailEnd), 6);
 
-        if ($tailDuration < 5) return; // No significant tail needed
+        if ($tailDuration < 5) return;
 
-        $bgAudioPath = $this->findBgChunkForTime($session, $tailStart);
-        $hasBg = $bgAudioPath !== null;
-        $bgChunkStart = $hasBg ? $this->findBgChunkStart($session, $tailStart) : 0;
-        $seekInBg = max(0, $tailStart - $bgChunkStart);
+        $tmpDir = sys_get_temp_dir();
+        $bg = $this->buildBgForRange($session, $tailStart, $tailEnd, $tmpDir);
 
         $aacDir = storage_path("app/instant-dub/{$this->sessionId}/aac");
         $aacFile = "{$aacDir}/tail.aac";
-
-        if (!is_dir($aacDir)) {
-            @mkdir($aacDir, 0755, true);
-        }
+        if (!is_dir($aacDir)) @mkdir($aacDir, 0755, true);
 
         $timeout = max(60, (int) ceil($tailDuration) + 30);
         try {
-            if ($hasBg) {
+            if ($bg) {
                 Process::timeout($timeout)->run([
                     'ffmpeg', '-y',
                     '-f', 'lavfi', '-t', (string) $tailDuration, '-i', 'anullsrc=r=44100:cl=mono',
-                    '-ss', (string) round($seekInBg, 3), '-t', (string) $tailDuration, '-i', $bgAudioPath,
+                    '-ss', (string) round($bg['seek'], 3), '-t', (string) $tailDuration, '-i', $bg['path'],
                     '-filter_complex',
                     "[1:a]volume=0.2[bg];[0:a][bg]amix=inputs=2:duration=first:normalize=0",
                     '-ac', '1', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
                 ]);
+                if ($bg['temp']) @unlink($bg['temp']);
             } else {
                 Process::timeout($timeout)->run([
                     'ffmpeg', '-y', '-f', 'lavfi', '-t', (string) $tailDuration,
@@ -744,7 +734,6 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             }
 
             if (file_exists($aacFile) && filesize($aacFile) > 100) {
-                // Store tail metadata in session for playlist generation
                 $sessionJson = Redis::get("instant-dub:{$this->sessionId}");
                 if ($sessionJson) {
                     $s = json_decode($sessionJson, true);
@@ -760,44 +749,37 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         }
     }
 
-    private function generateLeadAac(array $session): void
+    private function generateLeadAac(array $bg): void
     {
-        $originalAudioPath = $session['original_audio_path'] ?? null;
-        $hasBg = $originalAudioPath && file_exists($originalAudioPath);
         $duration = round($this->frameAlignedDuration(0, $this->startTime), 6);
 
         $aacDir = storage_path("app/instant-dub/{$this->sessionId}/aac");
         $aacFile = "{$aacDir}/lead.aac";
 
         if (file_exists($aacFile)) return;
-
-        if (!is_dir($aacDir)) {
-            @mkdir($aacDir, 0755, true);
-        }
+        if (!is_dir($aacDir)) @mkdir($aacDir, 0755, true);
 
         $timeout = max(30, (int) ceil($duration) + 30);
         try {
-            if ($hasBg) {
-                Process::timeout($timeout)->run([
-                    'ffmpeg', '-y',
-                    '-f', 'lavfi', '-t', (string) $duration, '-i', 'anullsrc=r=44100:cl=mono',
-                    '-ss', '0', '-t', (string) $duration, '-i', $originalAudioPath,
-                    '-filter_complex',
-                    "[1:a]volume=0.2[bg];[0:a][bg]amix=inputs=2:duration=first:normalize=0",
-                    '-ac', '1', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
-                ]);
-            } else {
-                Process::timeout($timeout)->run([
-                    'ffmpeg', '-y', '-f', 'lavfi', '-t', (string) $duration,
-                    '-i', 'anullsrc=r=44100:cl=mono',
-                    '-c:a', 'aac', '-b:a', '32k', '-f', 'adts', $aacFile,
-                ]);
-            }
+            Process::timeout($timeout)->run([
+                'ffmpeg', '-y',
+                '-f', 'lavfi', '-t', (string) $duration, '-i', 'anullsrc=r=44100:cl=mono',
+                '-ss', (string) round($bg['seek'], 3), '-t', (string) $duration, '-i', $bg['path'],
+                '-filter_complex',
+                "[1:a]volume=0.2[bg];[0:a][bg]amix=inputs=2:duration=first:normalize=0",
+                '-ac', '1', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
+            ]);
         } catch (\Throwable $e) {
             Log::warning("[DUB] Lead-in AAC generation failed: " . $e->getMessage(), [
                 'session' => $this->sessionId,
             ]);
         }
+    }
+
+    private function generateGapAacWithBg(array $session): void
+    {
+        // Gap files are used by hlsGapSegment endpoint but not in the main playlist.
+        // Kept for compatibility; main slot .aac already covers the full slot including gap.
     }
 
     private function dispatchPersistIfComplete(string $sessionKey): void
