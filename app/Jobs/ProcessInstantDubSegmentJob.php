@@ -126,6 +126,11 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             $audioBase64 = base64_encode(file_get_contents($finalMp3));
 
             // 4. Pre-generate AAC for HLS
+            // Re-read session: bg_chunks may have been populated by DownloadAudioChunkJob
+            // while TTS synthesis was running (the job took several seconds).
+            $freshJson = Redis::get($sessionKey);
+            if ($freshJson) $session = json_decode($freshJson, true);
+
             $slotEndForBg = $this->slotEnd ?? $this->endTime;
             $bg = $this->buildBgForRange($session, $this->startTime, $slotEndForBg, $tmpDir);
             $hasBg = $bg !== null;
