@@ -36,23 +36,25 @@ class PersistDubCacheJob implements ShouldQueue
         $session = json_decode($sessionJson, true);
         if (($session['status'] ?? '') !== 'complete') return;
 
-        $videoUrl = strtok($session['video_url'] ?? '', '?');
-        $language  = $session['language'] ?? 'uz';
-        $total     = (int) ($session['total_segments'] ?? 0);
+        $videoUrl   = strtok($session['video_url'] ?? '', '?');
+        $contentKey = InstantDub::extractContentKey($session['video_url'] ?? '');
+        $language   = $session['language'] ?? 'uz';
+        $total      = (int) ($session['total_segments'] ?? 0);
 
         if (!$videoUrl || $total === 0) return;
 
         try {
-            // Create or update the dub record
+            // Create or update the dub record — match by content_key to handle tokenized URLs
             $dub = InstantDub::updateOrCreate(
-                ['video_url' => $videoUrl, 'language' => $language],
+                ['video_content_key' => $contentKey, 'language' => $language],
                 [
-                    'title'         => $session['title'] ?? 'Untitled',
-                    'translate_from'=> $session['translate_from'] ?? null,
-                    'tts_driver'    => $session['tts_driver'] ?? 'edge',
-                    'status'        => 'processing',
-                    'total_segments'=> $total,
-                    'session_id'    => $this->sessionId,
+                    'title'             => $session['title'] ?? 'Untitled',
+                    'video_url'         => $videoUrl,
+                    'translate_from'    => $session['translate_from'] ?? null,
+                    'tts_driver'        => $session['tts_driver'] ?? 'edge',
+                    'status'            => 'processing',
+                    'total_segments'    => $total,
+                    'session_id'        => $this->sessionId,
                 ]
             );
 

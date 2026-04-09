@@ -34,7 +34,7 @@ class InstantDubController extends Controller
         $srt = $request->input('srt', '');
         $title = $request->input('title', 'Untitled');
         $quality = $request->input('quality', 'standard');
-        $ttsDriver = $quality === 'premium' ? 'elevenlabs' : 'edge';
+        $ttsDriver = $quality === 'premium' ? 'elevenlabs' : 'mms';
 
         // Parse video URL components for HLS
         $urlWithoutQuery = strtok($videoUrl, '?');
@@ -43,10 +43,19 @@ class InstantDubController extends Controller
 
         // Check cache — skip re-dubbing if we already have a result
         if ($videoUrl && !$srt) {
-            $cached = InstantDub::where('video_url', $urlWithoutQuery)
+            $contentKey = InstantDub::extractContentKey($videoUrl);
+            $cached = InstantDub::where('video_content_key', $contentKey)
                 ->where('language', $language)
                 ->whereIn('status', ['complete', 'needs_retts'])
                 ->first();
+            // Fallback: match by full URL for older records without content_key
+            if (!$cached) {
+                $cached = InstantDub::where('video_url', $urlWithoutQuery)
+                    ->where('language', $language)
+                    ->whereIn('status', ['complete', 'needs_retts'])
+                    ->whereNull('video_content_key')
+                    ->first();
+            }
 
             if ($cached) {
                 $session = $this->buildSessionFromCache($cached, $sessionId, $videoUrl, $videoBaseUrl, $videoQuery, $title);

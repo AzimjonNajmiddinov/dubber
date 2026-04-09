@@ -7,6 +7,7 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Facades\Redis;
@@ -86,20 +87,22 @@ class DownloadAudioChunkJob implements ShouldQueue
             return;
         }
 
-        // Store chunk in session
-        $sessionJson = Redis::get($sessionKey);
-        if ($sessionJson) {
+        // Use a lock to prevent concurrent chunk jobs from overwriting each other's bg_chunks entry
+        $lock = \Illuminate\Support\Facades\Cache::lock("instant-dub:{$this->sessionId}:bg-lock", 10);
+        $lock->block(10, function () use ($sessionKey, $chunkFile) {
+            $sessionJson = Redis::get($sessionKey);
+            if (!$sessionJson) return;
             $s = json_decode($sessionJson, true);
             $s['original_audio_path'] = $chunkFile;
             $bgChunks = $s['bg_chunks'] ?? [];
             $bgChunks[$this->chunkIndex] = [
-                'path' => $chunkFile,
+                'path'  => $chunkFile,
                 'start' => $this->startTime,
-                'end' => $this->endTime,
+                'end'   => $this->endTime,
             ];
             $s['bg_chunks'] = $bgChunks;
             Redis::setex($sessionKey, 50400, json_encode($s));
-        }
+        });
 
         Log::info("[DUB] Audio chunk {$this->chunkIndex} ready (" . round($this->startTime) . "-" . round($this->endTime) . "s, " . round(filesize($chunkFile) / 1024) . " KB)", [
             'session' => $this->sessionId,
@@ -178,11 +181,15 @@ class DownloadAudioChunkJob implements ShouldQueue
             $segStart = (float) ($chunk['start_time'] ?? 0);
             $segEnd = (float) ($chunk['end_time'] ?? 0);
 
+            // Only remix segments that belong to this chunk's time range
+            if ($segStart < $this->startTime || $segStart >= $this->endTime) continue;
+
             $audioBase64 = $chunk['audio_base64'] ?? null;
             if (!$audioBase64) continue;
 
             $aacFile = "{$aacDir}/{$i}.aac";
-            $seekInBg = max(0, $segStart);
+            // Seek relative to this chunk's start, not absolute video time
+            $seekInBg = max(0, $segStart - $this->startTime);
 
             // Use stored slot_end (same as initial generation) for consistent duration
             $slotEnd = isset($chunk['slot_end']) ? (float) $chunk['slot_end'] : null;

@@ -8,9 +8,24 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 class InstantDub extends Model
 {
     protected $fillable = [
-        'title', 'video_url', 'language', 'translate_from',
+        'title', 'video_url', 'video_content_key', 'language', 'translate_from',
         'tts_driver', 'status', 'total_segments', 'aac_dir', 'session_id',
     ];
+
+    /**
+     * Extract a stable content identifier from a signed/tokenized video URL.
+     * Returns a 32-char hex hash embedded in the path, or falls back to the
+     * normalized URL (without query string) if no hash found.
+     */
+    public static function extractContentKey(string $url): string
+    {
+        $path = strtok($url, '?');
+        // Match the last 32-char hex segment in the URL path (content hash)
+        if (preg_match('/\/([a-f0-9]{32})(?:\/|$)/i', $path, $m)) {
+            return strtolower($m[1]);
+        }
+        return $path;
+    }
 
     public function segments(): HasMany
     {

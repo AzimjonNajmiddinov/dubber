@@ -7,8 +7,10 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use App\Http\Controllers\AdminVoicePoolController;
 use App\Jobs\PersistDubCacheJob;
 use App\Services\ElevenLabs\ElevenLabsClient;
+use App\Services\MmsTts\MmsTtsClient;
 use App\Services\TextNormalizer;
 use App\Services\Tts\Drivers\AishaTtsDriver;
 use Illuminate\Support\Facades\Log;
@@ -80,6 +82,8 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                 $this->generateWithElevenLabs($rawMp3, $speakerEntry['voice_id']);
             } elseif ($driver === 'aisha') {
                 $this->generateWithAisha($rawMp3, $speakerEntry);
+            } elseif ($driver === 'mms') {
+                $this->generateWithMms($rawMp3, $tmpDir);
             } else {
                 $this->generateWithEdgeTts($rawMp3, $tmpDir, $speakerEntry);
             }
@@ -326,6 +330,68 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         if (!file_exists($outputMp3) || filesize($outputMp3) < 200) {
             throw new \RuntimeException('AISHA TTS returned invalid audio');
         }
+    }
+
+    private function generateWithMms(string $outputMp3, string $tmpDir): void
+    {
+        $gender = str_starts_with($this->speaker, 'F') ? 'female'
+                : (str_starts_with($this->speaker, 'C') ? 'child' : 'male');
+        $speakerIdx = (int) preg_replace('/\D/', '', $this->speaker) ?: 0;
+
+        $voiceFile = $this->mmsPoolFile($gender, $speakerIdx);
+        if (!$voiceFile) {
+            throw new \RuntimeException("MMS: no voice pool file for gender '{$gender}'");
+        }
+
+        $cacheKey = 'voice-pool-id:mms:' . md5($voiceFile);
+        $voiceId  = \Illuminate\Support\Facades\Redis::get($cacheKey);
+
+        $client = new MmsTtsClient();
+        if (!$voiceId) {
+            $name    = pathinfo($voiceFile, PATHINFO_FILENAME);
+            $voiceId = $client->addVoice("pool-{$name}", [$voiceFile]);
+            \Illuminate\Support\Facades\Redis::setex($cacheKey, 604800, $voiceId);
+        }
+
+        $name  = pathinfo($voiceFile, PATHINFO_FILENAME);
+        $speed = AdminVoicePoolController::getSpeed($gender, $name);
+        $tau   = AdminVoicePoolController::getTau($gender, $name);
+
+        $text    = TextNormalizer::normalize($this->text, $this->language);
+        $wavData = $client->synthesize($voiceId, $text, [
+            'language' => $this->language,
+            'speed'    => $speed,
+            'tau'      => $tau,
+        ]);
+
+        $tmpWav = "{$tmpDir}/seg_{$this->index}_mms.wav";
+        file_put_contents($tmpWav, $wavData);
+
+        $result = Process::timeout(15)->run([
+            'ffmpeg', '-y', '-i', $tmpWav,
+            '-codec:a', 'libmp3lame', '-b:a', '128k',
+            $outputMp3,
+        ]);
+        @unlink($tmpWav);
+
+        if (!$result->successful() || !file_exists($outputMp3) || filesize($outputMp3) < 200) {
+            throw new \RuntimeException('MMS WAV→MP3 conversion failed');
+        }
+    }
+
+    private function mmsPoolFile(string $gender, int $speakerIdx): ?string
+    {
+        if (!in_array($gender, ['male', 'female', 'child'])) {
+            $gender = 'male';
+        }
+        $dir   = storage_path("app/voice-pool/{$gender}");
+        $files = is_dir($dir) ? glob("{$dir}/*.{wav,mp3,m4a}", GLOB_BRACE) : [];
+        if (empty($files)) {
+            $dir   = storage_path('app/voice-pool/male');
+            $files = is_dir($dir) ? glob("{$dir}/*.{wav,mp3,m4a}", GLOB_BRACE) : [];
+        }
+        if (empty($files)) return null;
+        return $files[$speakerIdx % count($files)];
     }
 
     private function resolveEdgeTts(): string
