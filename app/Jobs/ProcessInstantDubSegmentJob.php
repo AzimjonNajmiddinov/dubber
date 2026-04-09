@@ -488,8 +488,10 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
 
     private function generateBackgroundOnlyAac(array $session): void
     {
-        $originalAudioPath = $session['original_audio_path'] ?? null;
-        $hasBg = $originalAudioPath && file_exists($originalAudioPath);
+        $bgAudioPath = $this->findBgChunkForTime($session, $this->startTime);
+        $hasBg = $bgAudioPath !== null;
+        $bgChunkStart = $hasBg ? $this->findBgChunkStart($session, $this->startTime) : 0;
+        $seekInBg = max(0, $this->startTime - $bgChunkStart);
 
         $slotStart = $this->startTime;
         // Frame-aligned duration from absolute positions (prevents cumulative drift)
@@ -509,9 +511,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                 Process::timeout($timeout)->run([
                     'ffmpeg', '-y',
                     '-f', 'lavfi', '-t', (string) $slotDuration, '-i', 'anullsrc=r=44100:cl=mono',
-                    '-i', $originalAudioPath,
-                    '-ss', (string) round($slotStart, 3),
-                    '-t', (string) $slotDuration,
+                    '-ss', (string) round($seekInBg, 3), '-t', (string) $slotDuration, '-i', $bgAudioPath,
                     '-filter_complex', '[1:a]volume=0.2[bg];[0:a][bg]amix=inputs=2:duration=first:normalize=0',
                     '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
                 ]);
@@ -712,8 +712,10 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
 
         if ($tailDuration < 5) return; // No significant tail needed
 
-        $originalAudioPath = $session['original_audio_path'] ?? null;
-        $hasBg = $originalAudioPath && file_exists($originalAudioPath);
+        $bgAudioPath = $this->findBgChunkForTime($session, $tailStart);
+        $hasBg = $bgAudioPath !== null;
+        $bgChunkStart = $hasBg ? $this->findBgChunkStart($session, $tailStart) : 0;
+        $seekInBg = max(0, $tailStart - $bgChunkStart);
 
         $aacDir = storage_path("app/instant-dub/{$this->sessionId}/aac");
         $aacFile = "{$aacDir}/tail.aac";
@@ -728,7 +730,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                 Process::timeout($timeout)->run([
                     'ffmpeg', '-y',
                     '-f', 'lavfi', '-t', (string) $tailDuration, '-i', 'anullsrc=r=44100:cl=mono',
-                    '-ss', (string) round($tailStart, 3), '-t', (string) $tailDuration, '-i', $originalAudioPath,
+                    '-ss', (string) round($seekInBg, 3), '-t', (string) $tailDuration, '-i', $bgAudioPath,
                     '-filter_complex',
                     "[1:a]volume=0.2[bg];[0:a][bg]amix=inputs=2:duration=first:normalize=0",
                     '-ac', '1', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
