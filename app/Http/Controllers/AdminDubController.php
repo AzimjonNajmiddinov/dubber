@@ -41,7 +41,7 @@ class AdminDubController extends Controller
     {
         $dub->load('segments', 'voiceMap');
 
-        $voiceVariants = $this->buildVoiceOptions($dub->language);
+        $voiceVariants = $this->buildVoiceOptions($dub->language, $dub->tts_driver ?? 'edge');
 
         return view('admin.dubs.show', compact('dub', 'voiceVariants'));
     }
@@ -215,8 +215,12 @@ class AdminDubController extends Controller
         return redirect()->route('admin.dubs.index')->with('success', 'Deleted.');
     }
 
-    private function buildVoiceOptions(string $language): array
+    private function buildVoiceOptions(string $language, string $driver = 'edge'): array
     {
+        if ($driver === 'mms') {
+            return $this->buildMmsVoiceOptions();
+        }
+
         $variants = VoiceVariants::forLanguage($language);
         $options  = [];
 
@@ -230,6 +234,23 @@ class AdminDubController extends Controller
             }
         }
 
+        return $options;
+    }
+
+    private function buildMmsVoiceOptions(): array
+    {
+        $options = [];
+        foreach (['male', 'female', 'child'] as $gender) {
+            $dir   = storage_path("app/voice-pool/{$gender}");
+            $files = is_dir($dir) ? glob("{$dir}/*.{wav,mp3,m4a}", GLOB_BRACE) : [];
+            foreach ($files as $file) {
+                $name    = pathinfo($file, PATHINFO_FILENAME);
+                $options[] = [
+                    'label'  => ucfirst($gender) . ' — ' . $name,
+                    'config' => ['driver' => 'mms', 'gender' => $gender, 'pool_name' => $name],
+                ];
+            }
+        }
         return $options;
     }
 

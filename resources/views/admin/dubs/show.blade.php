@@ -90,7 +90,11 @@
                 @endforeach
                 <option value="{{ $current }}"
                     {{ !collect($voiceVariants)->contains(fn($o) => json_encode($o['config']) === $current) ? 'selected' : '' }}>
-                    Current ({{ is_array($vm->voice_config) ? ($vm->voice_config['voice'] ?? '?') : $vm->voice_config }})
+                    @php
+                        $cfg = is_array($vm->voice_config) ? $vm->voice_config : [];
+                        $currentLabel = $cfg['pool_name'] ?? $cfg['voice'] ?? (is_string($vm->voice_config) ? $vm->voice_config : '?');
+                    @endphp
+                    Current ({{ $currentLabel }})
                 </option>
             </select>
         </div>

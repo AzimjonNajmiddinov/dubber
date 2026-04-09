@@ -83,7 +83,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             } elseif ($driver === 'aisha') {
                 $this->generateWithAisha($rawMp3, $speakerEntry);
             } elseif ($driver === 'mms') {
-                $this->generateWithMms($rawMp3, $tmpDir);
+                $this->generateWithMms($rawMp3, $tmpDir, $speakerEntry);
             } else {
                 $this->generateWithEdgeTts($rawMp3, $tmpDir, $speakerEntry);
             }
@@ -332,15 +332,20 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         }
     }
 
-    private function generateWithMms(string $outputMp3, string $tmpDir): void
+    private function generateWithMms(string $outputMp3, string $tmpDir, array $speakerEntry = []): void
     {
-        $gender = str_starts_with($this->speaker, 'F') ? 'female'
-                : (str_starts_with($this->speaker, 'C') ? 'child' : 'male');
+        $gender = $speakerEntry['gender']
+            ?? (str_starts_with($this->speaker, 'F') ? 'female'
+                : (str_starts_with($this->speaker, 'C') ? 'child' : 'male'));
+        $poolName   = $speakerEntry['pool_name'] ?? null;
         $speakerIdx = (int) preg_replace('/\D/', '', $this->speaker) ?: 0;
 
-        $voiceFile = $this->mmsPoolFile($gender, $speakerIdx);
+        $voiceFile = $poolName
+            ? $this->mmsPoolFileByName($gender, $poolName)
+            : $this->mmsPoolFile($gender, $speakerIdx);
+
         if (!$voiceFile) {
-            throw new \RuntimeException("MMS: no voice pool file for gender '{$gender}'");
+            throw new \RuntimeException("MMS: no voice pool file for gender '{$gender}'" . ($poolName ? " name '{$poolName}'" : ''));
         }
 
         $cacheKey = 'voice-pool-id:mms:' . md5($voiceFile);
@@ -377,6 +382,23 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         if (!$result->successful() || !file_exists($outputMp3) || filesize($outputMp3) < 200) {
             throw new \RuntimeException('MMS WAV→MP3 conversion failed');
         }
+    }
+
+    private function mmsPoolFileByName(string $gender, string $name): ?string
+    {
+        foreach (['wav', 'mp3', 'm4a'] as $ext) {
+            $path = storage_path("app/voice-pool/{$gender}/{$name}.{$ext}");
+            if (file_exists($path)) return $path;
+        }
+        // Fallback: try other genders
+        foreach (['male', 'female', 'child'] as $g) {
+            if ($g === $gender) continue;
+            foreach (['wav', 'mp3', 'm4a'] as $ext) {
+                $path = storage_path("app/voice-pool/{$g}/{$name}.{$ext}");
+                if (file_exists($path)) return $path;
+            }
+        }
+        return null;
     }
 
     private function mmsPoolFile(string $gender, int $speakerIdx): ?string

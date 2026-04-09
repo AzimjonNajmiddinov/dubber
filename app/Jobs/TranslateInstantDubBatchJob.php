@@ -619,14 +619,17 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         $sessionData = $sessionJson ? json_decode($sessionJson, true) : [];
         $driver = $sessionData['tts_driver'] ?? config('dubber.tts.default', 'edge');
 
-        if ($driver === 'aisha') {
+        if ($driver === 'mms') {
+            $maleVariants   = $this->mmsPoolVariants('male');
+            $femaleVariants = $this->mmsPoolVariants('female');
+            $childVariants  = $this->mmsPoolVariants('child') ?: $this->mmsPoolVariants('male');
+        } elseif ($driver === 'aisha') {
             $variants = \App\Services\VoiceVariants::forAisha();
+            $maleVariants = $variants['male']; $femaleVariants = $variants['female']; $childVariants = $variants['child'];
         } else {
             $variants = \App\Services\VoiceVariants::forLanguage($this->language);
+            $maleVariants = $variants['male']; $femaleVariants = $variants['female']; $childVariants = $variants['child'];
         }
-        $maleVariants = $variants['male'];
-        $femaleVariants = $variants['female'];
-        $childVariants = $variants['child'];
 
         // Use Redis lock to prevent race condition with micro-batch's mergeVoiceMap
         $lock = Cache::lock($lockKey, 5);
@@ -919,6 +922,17 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         }
 
         return $batch;
+    }
+
+    private function mmsPoolVariants(string $gender): array
+    {
+        $dir   = storage_path("app/voice-pool/{$gender}");
+        $files = is_dir($dir) ? glob("{$dir}/*.{wav,mp3,m4a}", GLOB_BRACE) : [];
+        return array_map(fn($f) => [
+            'driver'    => 'mms',
+            'gender'    => $gender,
+            'pool_name' => pathinfo($f, PATHINFO_FILENAME),
+        ], $files);
     }
 
     private function updateSession(array $data): void
