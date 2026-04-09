@@ -151,25 +151,12 @@ class DownloadAudioChunkJob implements ShouldQueue
 
         $remixed = 0;
 
-        // Generate lead.aac for chunk 0
-        if ($this->chunkIndex === 0) {
-            $chunk0Json = Redis::get("{$sessionKey}:chunk:0");
-            if ($chunk0Json) {
-                $chunk0 = json_decode($chunk0Json, true);
-                $firstStart = (float) ($chunk0['start_time'] ?? 0);
-                if ($firstStart > 1.0) {
-                    $leadFile = "{$aacDir}/lead.aac";
-                    $leadDur = round($this->frameAlignedDuration(0, $firstStart), 6);
-                    $timeout = max(30, (int) ceil($leadDur) + 10);
-                    Process::timeout($timeout)->run([
-                        'ffmpeg', '-y',
-                        '-f', 'lavfi', '-t', (string) $leadDur, '-i', 'anullsrc=r=44100:cl=mono',
-                        '-stream_loop', '-1', '-ss', '0', '-t', (string) $leadDur, '-i', $bgAudioPath,
-                        '-filter_complex',
-                        "[1:a]volume=0.2[bg];[0:a][bg]amix=inputs=2:duration=first:normalize=0",
-                        '-ac', '1', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $leadFile,
-                    ]);
-                }
+        // Regenerate lead.aac if this chunk overlaps the lead period (before first subtitle)
+        $chunk0Json = Redis::get("{$sessionKey}:chunk:0");
+        if ($chunk0Json) {
+            $firstStart = (float) (json_decode($chunk0Json, true)['start_time'] ?? 0);
+            if ($firstStart > 1.0 && $this->startTime < $firstStart) {
+                $this->regenerateLeadAac($aacDir, $firstStart);
             }
         }
 
@@ -233,6 +220,75 @@ class DownloadAudioChunkJob implements ShouldQueue
         if ($remixed > 0) {
             Log::info("[DUB] Remixed {$remixed} segments with background (chunk {$this->chunkIndex})", [
                 'session' => $this->sessionId,
+            ]);
+        }
+    }
+
+    /**
+     * Regenerate lead.aac using all available bg chunks, each at its correct position via adelay.
+     * Called every time a bg chunk covering the lead period [0, firstStart] is downloaded.
+     */
+    private function regenerateLeadAac(string $aacDir, float $firstStart): void
+    {
+        $sessionKey = "instant-dub:{$this->sessionId}";
+        $sessionJson = Redis::get($sessionKey);
+        if (!$sessionJson) return;
+        $session = json_decode($sessionJson, true);
+
+        $bgChunks = $session['bg_chunks'] ?? [];
+        $relevant = [];
+        foreach ($bgChunks as $chunk) {
+            $cs   = (float) ($chunk['start'] ?? 0);
+            $ce   = (float) ($chunk['end'] ?? 0);
+            $path = $chunk['path'] ?? null;
+            if ($path && file_exists($path) && $cs < $firstStart && $ce > 0) {
+                $relevant[] = $chunk;
+            }
+        }
+        if (empty($relevant)) return;
+
+        usort($relevant, fn($a, $b) => ($a['start'] ?? 0) <=> ($b['start'] ?? 0));
+
+        $leadDur  = round($this->frameAlignedDuration(0, $firstStart), 6);
+        $leadFile = "{$aacDir}/lead.aac";
+
+        // Build ffmpeg inputs + adelay filter: each chunk placed at its exact start position
+        $cmd = ['ffmpeg', '-y', '-f', 'lavfi', '-t', (string) $leadDur, '-i', 'anullsrc=r=44100:cl=mono'];
+        $filters  = [];
+        $inputIdx = 1;
+
+        foreach ($relevant as $chunk) {
+            $cs      = (float) ($chunk['start'] ?? 0);
+            $ce      = (float) ($chunk['end'] ?? 0);
+            $dur     = round(min($ce, $firstStart) - $cs, 6);
+            $delayMs = (int) round($cs * 1000);
+            $cmd[]   = '-t';
+            $cmd[]   = (string) $dur;
+            $cmd[]   = '-i';
+            $cmd[]   = $chunk['path'];
+            $filters[] = "[{$inputIdx}:a]adelay={$delayMs}|{$delayMs},volume=0.2[b{$inputIdx}]";
+            $inputIdx++;
+        }
+
+        $mixIn  = "[0:a]" . implode('', array_map(fn($i) => "[b{$i}]", range(1, $inputIdx - 1)));
+        $filter = implode(';', $filters) . ";{$mixIn}amix=inputs={$inputIdx}:duration=first:normalize=0";
+
+        $cmd = array_merge($cmd, [
+            '-filter_complex', $filter,
+            '-ac', '1', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $leadFile,
+        ]);
+
+        $timeout = max(30, (int) ceil($leadDur) + 10);
+        $result  = Process::timeout($timeout)->run($cmd);
+
+        if ($result->successful()) {
+            Log::info("[DUB] lead.aac regenerated ({$inputIdx} bg chunks, {$leadDur}s)", [
+                'session' => $this->sessionId,
+            ]);
+        } else {
+            Log::warning("[DUB] lead.aac regeneration failed", [
+                'session' => $this->sessionId,
+                'error'   => Str::limit($result->errorOutput(), 200),
             ]);
         }
     }
