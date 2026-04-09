@@ -108,7 +108,7 @@ class DownloadAudioChunkJob implements ShouldQueue
             'session' => $this->sessionId,
         ]);
 
-        $this->remixSegmentsInRange($chunkFile);
+        $this->generateBgChunkAac($chunkFile);
 
         // Check if all TTS segments are ready + bg is now available → set complete/playable
         $this->checkAndSetComplete();
@@ -137,158 +137,83 @@ class DownloadAudioChunkJob implements ShouldQueue
         Redis::eval($lua, 1, "instant-dub:{$this->sessionId}");
     }
 
-    private function remixSegmentsInRange(string $bgAudioPath): void
+    /**
+     * Generate bg-{chunkIndex}.aac for this chunk's full time range.
+     * Contains background audio at 0.2 volume + any TTS segments in range mixed via adelay.
+     * Called when the bg chunk downloads. ProcessInstantDubSegmentJob calls it again after TTS arrives.
+     */
+    public function generateBgChunkAac(string $bgAudioPath): void
     {
         $sessionKey = "instant-dub:{$this->sessionId}";
         $sessionJson = Redis::get($sessionKey);
         if (!$sessionJson) return;
 
-        $session = json_decode($sessionJson, true);
-        $total = (int) ($session['total_segments'] ?? 0);
-        $aacDir = storage_path("app/instant-dub/{$this->sessionId}/aac");
-
+        $session  = json_decode($sessionJson, true);
+        $total    = (int) ($session['total_segments'] ?? 0);
+        $aacDir   = storage_path("app/instant-dub/{$this->sessionId}/aac");
         if (!is_dir($aacDir)) @mkdir($aacDir, 0755, true);
 
-        $remixed = 0;
+        $chunkDur = round($this->frameAlignedDuration($this->startTime, $this->endTime), 6);
+        $outFile  = "{$aacDir}/bg-{$this->chunkIndex}.aac";
 
-        // Regenerate lead.aac if this chunk overlaps the lead period (before first subtitle)
-        $chunk0Json = Redis::get("{$sessionKey}:chunk:0");
-        if ($chunk0Json) {
-            $firstStart = (float) (json_decode($chunk0Json, true)['start_time'] ?? 0);
-            if ($firstStart > 1.0 && $this->startTime < $firstStart) {
-                $this->regenerateLeadAac($aacDir, $firstStart);
-            }
-        }
+        $cmd      = [
+            'ffmpeg', '-y',
+            '-f', 'lavfi', '-t', (string) $chunkDur, '-i', 'anullsrc=r=44100:cl=mono',
+            '-t', (string) $chunkDur, '-i', $bgAudioPath,
+        ];
+        $filters   = ["[1:a]volume=0.2,aresample=44100[bg]"];
+        $mixInputs = ['[0:a]', '[bg]'];
+        $inputIdx  = 2;
+        $tmpFiles  = [];
 
         for ($i = 0; $i < $total; $i++) {
             $chunkJson = Redis::get("{$sessionKey}:chunk:{$i}");
             if (!$chunkJson) continue;
-
-            $chunk = json_decode($chunkJson, true);
+            $chunk    = json_decode($chunkJson, true);
             $segStart = (float) ($chunk['start_time'] ?? 0);
-            $segEnd = (float) ($chunk['end_time'] ?? 0);
+            $segEnd   = (float) ($chunk['end_time'] ?? 0);
+            $b64      = $chunk['audio_base64'] ?? null;
 
-            // Only remix segments that belong to this chunk's time range
-            if ($segStart < $this->startTime || $segStart >= $this->endTime) continue;
+            if ($segStart >= $this->endTime || $segEnd <= $this->startTime) continue;
+            if (!$b64) continue;
 
-            $audioBase64 = $chunk['audio_base64'] ?? null;
+            $tmpMp3 = "/tmp/bggen_{$this->sessionId}_{$this->chunkIndex}_{$i}.mp3";
+            file_put_contents($tmpMp3, base64_decode($b64));
+            $tmpFiles[] = $tmpMp3;
 
-            $aacFile = "{$aacDir}/{$i}.aac";
-            $seekInBg = max(0, $segStart - $this->startTime);
+            $ttsSeek    = max(0.0, $this->startTime - $segStart);
+            $ttsDelayMs = (int) round(max(0.0, $segStart - $this->startTime) * 1000);
 
-            $slotEnd = isset($chunk['slot_end']) ? (float) $chunk['slot_end'] : null;
-            if ($slotEnd === null) {
-                $nextChunkJson = Redis::get("{$sessionKey}:chunk:" . ($i + 1));
-                $slotEnd = $nextChunkJson
-                    ? (float) (json_decode($nextChunkJson, true)['start_time'] ?? $segEnd)
-                    : $segEnd;
-            }
-            $slotDuration = round($this->frameAlignedDuration($segStart, $slotEnd), 6);
-
-            if ($audioBase64) {
-                // Remix: TTS + background
-                $tmpMp3 = "/tmp/remix_{$this->sessionId}_{$i}.mp3";
-                file_put_contents($tmpMp3, base64_decode($audioBase64));
-
-                $result = Process::timeout(20)->run([
-                    'ffmpeg', '-y',
-                    '-f', 'lavfi', '-t', (string) $slotDuration, '-i', 'anullsrc=r=44100:cl=mono',
-                    '-ss', (string) round($seekInBg, 3), '-t', (string) $slotDuration, '-i', $bgAudioPath,
-                    '-i', $tmpMp3,
-                    '-filter_complex',
-                    "[1:a]volume=0.2,aresample=44100[bg];[2:a]aresample=44100[tts];[0:a][bg][tts]amix=inputs=3:duration=first:normalize=0",
-                    '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
-                ]);
-                @unlink($tmpMp3);
-            } else {
-                // No TTS (failed/empty): background only at lowered volume
-                $result = Process::timeout(20)->run([
-                    'ffmpeg', '-y',
-                    '-f', 'lavfi', '-t', (string) $slotDuration, '-i', 'anullsrc=r=44100:cl=mono',
-                    '-ss', (string) round($seekInBg, 3), '-t', (string) $slotDuration, '-i', $bgAudioPath,
-                    '-filter_complex',
-                    "[1:a]volume=0.2[bg];[0:a][bg]amix=inputs=2:duration=first:normalize=0",
-                    '-ac', '1', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
-                ]);
-            }
-
-            if ($result->successful()) {
-                $remixed++;
-            }
-        }
-
-        if ($remixed > 0) {
-            Log::info("[DUB] Remixed {$remixed} segments with background (chunk {$this->chunkIndex})", [
-                'session' => $this->sessionId,
-            ]);
-        }
-    }
-
-    /**
-     * Regenerate lead.aac using all available bg chunks, each at its correct position via adelay.
-     * Called every time a bg chunk covering the lead period [0, firstStart] is downloaded.
-     */
-    private function regenerateLeadAac(string $aacDir, float $firstStart): void
-    {
-        $sessionKey = "instant-dub:{$this->sessionId}";
-        $sessionJson = Redis::get($sessionKey);
-        if (!$sessionJson) return;
-        $session = json_decode($sessionJson, true);
-
-        $bgChunks = $session['bg_chunks'] ?? [];
-        $relevant = [];
-        foreach ($bgChunks as $chunk) {
-            $cs   = (float) ($chunk['start'] ?? 0);
-            $ce   = (float) ($chunk['end'] ?? 0);
-            $path = $chunk['path'] ?? null;
-            if ($path && file_exists($path) && $cs < $firstStart && $ce > 0) {
-                $relevant[] = $chunk;
-            }
-        }
-        if (empty($relevant)) return;
-
-        usort($relevant, fn($a, $b) => ($a['start'] ?? 0) <=> ($b['start'] ?? 0));
-
-        $leadDur  = round($this->frameAlignedDuration(0, $firstStart), 6);
-        $leadFile = "{$aacDir}/lead.aac";
-
-        // Build ffmpeg inputs + adelay filter: each chunk placed at its exact start position
-        $cmd = ['ffmpeg', '-y', '-f', 'lavfi', '-t', (string) $leadDur, '-i', 'anullsrc=r=44100:cl=mono'];
-        $filters  = [];
-        $inputIdx = 1;
-
-        foreach ($relevant as $chunk) {
-            $cs      = (float) ($chunk['start'] ?? 0);
-            $ce      = (float) ($chunk['end'] ?? 0);
-            $dur     = round(min($ce, $firstStart) - $cs, 6);
-            $delayMs = (int) round($cs * 1000);
-            $cmd[]   = '-t';
-            $cmd[]   = (string) $dur;
-            $cmd[]   = '-i';
-            $cmd[]   = $chunk['path'];
-            $filters[] = "[{$inputIdx}:a]adelay={$delayMs}|{$delayMs},volume=0.2[b{$inputIdx}]";
+            $cmd[] = '-ss';
+            $cmd[] = (string) round($ttsSeek, 3);
+            $cmd[] = '-i';
+            $cmd[] = $tmpMp3;
+            $filters[]   = "[{$inputIdx}:a]adelay={$ttsDelayMs}|{$ttsDelayMs},aresample=44100[tts{$inputIdx}]";
+            $mixInputs[] = "[tts{$inputIdx}]";
             $inputIdx++;
         }
 
-        $mixIn  = "[0:a]" . implode('', array_map(fn($i) => "[b{$i}]", range(1, $inputIdx - 1)));
-        $filter = implode(';', $filters) . ";{$mixIn}amix=inputs={$inputIdx}:duration=first:normalize=0";
+        $filter = implode(';', $filters) . ';' . implode('', $mixInputs)
+            . "amix=inputs={$inputIdx}:duration=first:normalize=0";
 
         $cmd = array_merge($cmd, [
             '-filter_complex', $filter,
-            '-ac', '1', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $leadFile,
+            '-ac', '1', '-c:a', 'aac', '-b:a', '96k', '-f', 'adts', $outFile,
         ]);
 
-        $timeout = max(30, (int) ceil($leadDur) + 10);
+        $timeout = max(20, (int) ceil($chunkDur) + 10);
         $result  = Process::timeout($timeout)->run($cmd);
 
+        foreach ($tmpFiles as $f) @unlink($f);
+
         if ($result->successful()) {
-            Log::info("[DUB] lead.aac regenerated ({$inputIdx} bg chunks, {$leadDur}s)", [
+            Log::info("[DUB] bg-{$this->chunkIndex}.aac ready (" . round($this->startTime) . "-" . round($this->endTime) . "s, tts=" . ($inputIdx - 2) . ")", [
                 'session' => $this->sessionId,
             ]);
         } else {
-            Log::warning("[DUB] lead.aac regeneration failed", [
+            Log::warning("[DUB] bg-{$this->chunkIndex}.aac failed", [
                 'session' => $this->sessionId,
-                'error'   => Str::limit($result->errorOutput(), 200),
+                'error'   => Str::limit($result->errorOutput(), 300),
             ]);
         }
     }

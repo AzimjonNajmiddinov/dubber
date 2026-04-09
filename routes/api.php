@@ -50,6 +50,7 @@ Route::prefix('instant-dub')->group(function () {
     Route::get('/{sessionId}/dub-audio.m3u8', [InstantDubController::class, 'hlsAudioPlaylist'])->name('api.instant-dub.dub-audio');
     Route::get('/{sessionId}/dub-segment/init.mp4', [InstantDubController::class, 'hlsInitSegment'])->name('api.instant-dub.dub-init');
     Route::get('/{sessionId}/dub-segment/lead.aac', [InstantDubController::class, 'hlsLeadSegment'])->name('api.instant-dub.dub-lead');
+    Route::get('/{sessionId}/dub-segment/bg-{index}.aac', [InstantDubController::class, 'hlsBgSegment'])->whereNumber('index')->name('api.instant-dub.dub-bg');
     Route::get('/{sessionId}/dub-segment/tail.aac', [InstantDubController::class, 'hlsTailSegment'])->name('api.instant-dub.dub-tail');
     Route::get('/{sessionId}/dub-segment/gap-{index}.aac', [InstantDubController::class, 'hlsGapSegment'])->whereNumber('index')->name('api.instant-dub.dub-gap');
     Route::get('/{sessionId}/dub-segment/{index}.aac', [InstantDubController::class, 'hlsAudioSegment'])->whereNumber('index')->name('api.instant-dub.dub-segment');

@@ -72,6 +72,14 @@ class DownloadOriginalAudioJob implements ShouldQueue
             $chunkIndex++;
         }
 
+        // Store total so the playlist knows when all bg chunks are available
+        $sJson = Redis::get($sessionKey);
+        if ($sJson) {
+            $s = json_decode($sJson, true);
+            $s['total_bg_chunks'] = $chunkIndex;
+            Redis::setex($sessionKey, 50400, json_encode($s));
+        }
+
         Log::info("[DUB] Audio download dispatched ({$chunkIndex} chunks, {$totalDuration}s total)", [
             'session' => $this->sessionId,
         ]);

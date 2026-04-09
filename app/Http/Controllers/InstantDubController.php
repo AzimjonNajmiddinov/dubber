@@ -551,79 +551,32 @@ class InstantDubController extends Controller
             $horizon = $i;
         }
 
-        // Each segment covers its full "slot" — from its start to the next segment's start.
-        $entries = [];
+        // Build playlist from bg chunks (each chunk = one segment, contains bg + TTS)
+        $bgChunks     = $session['bg_chunks'] ?? [];
+        $totalBg      = (int) ($session['total_bg_chunks'] ?? 0);
+        $availableBg  = count($bgChunks);
+        $entries      = [];
 
-        // When no segments are ready yet, serve a short silent segment so the EVENT playlist
-        // is valid. iOS AVPlayer won't reload an empty EVENT playlist (no segments = no
-        // reload interval reference). The 5s silent segment gives the player something to
-        // play while it polls for new segments every 3s (Cache-Control: max-age=3).
-        if ($horizon < 0 && !$allDone) {
-            $entries[] = [
-                'uri' => 'dub-segment/lead.aac',
-                'duration' => 5.0,
-            ];
-        }
-
-        // Add silent lead-in segment if first dialogue starts after time 0
-        if ($horizon >= 0) {
-            $firstStart = (float) ($chunks[0]['start_time'] ?? 0);
-            if ($firstStart > 1.0) {
-                $leadDur = round($this->frameAlignedDuration(0, $firstStart), 6);
-                $entries[] = [
-                    'uri' => 'dub-segment/lead.aac',
-                    'duration' => $leadDur,
-                ];
+        if (empty($bgChunks) && !$allDone) {
+            // No bg chunks yet — serve short silence so EVENT playlist stays valid
+            $entries[] = ['uri' => 'dub-segment/bg-0.aac', 'duration' => 5.0];
+        } else {
+            // Sort bg chunks by index
+            ksort($bgChunks);
+            foreach ($bgChunks as $bgIdx => $bgChunk) {
+                $cs  = (float) ($bgChunk['start'] ?? 0);
+                $ce  = (float) ($bgChunk['end'] ?? 0);
+                $dur = round($this->frameAlignedDuration($cs, $ce), 6);
+                $entries[] = ['uri' => "dub-segment/bg-{$bgIdx}.aac", 'duration' => $dur];
             }
         }
 
-        for ($i = 0; $i <= $horizon; $i++) {
-            if (!isset($chunks[$i])) {
-                $entries[] = [
-                    'uri' => "dub-segment/{$i}.aac",
-                    'duration' => 3.0,
-                ];
-                continue;
-            }
+        $allBgDone = $totalBg > 0 && $availableBg >= $totalBg;
 
-            $chunk = $chunks[$i];
-            $startTime = (float) ($chunk['start_time'] ?? 0);
-            $endTime = (float) ($chunk['end_time'] ?? 0);
-
-            // Find next chunk for full slot duration
-            $nextStart = null;
-            for ($j = $i + 1; $j <= $horizon; $j++) {
-                if (isset($chunks[$j])) {
-                    $nextStart = (float) ($chunks[$j]['start_time'] ?? 0);
-                    break;
-                }
-            }
-            $slotEnd = $nextStart ?? $endTime;
-
-            // Frame-aligned duration (matches actual AAC, max 23ms bounded drift)
-            $slotDur = round($this->frameAlignedDuration($startTime, $slotEnd), 6);
-            $entries[] = [
-                'uri' => "dub-segment/{$i}.aac",
-                'duration' => $slotDur,
-            ];
-        }
-
-        // Prepare tail segment info before TARGETDURATION calculation
-        $tailDuration = 0.0;
-        if ($allDone && count($entries) > 0) {
-            $tailDuration = (float) ($session['tail_duration'] ?? 0);
-            if ($tailDuration < 5) {
-                $tailDuration = 0.0;
-            }
-        }
-
-        // Calculate actual max duration from entries for TARGETDURATION
+        // Calculate TARGETDURATION
         $maxDur = 10;
         foreach ($entries as $entry) {
             $maxDur = max($maxDur, (int) ceil($entry['duration']));
-        }
-        if ($tailDuration > 0) {
-            $maxDur = max($maxDur, (int) ceil($tailDuration));
         }
 
         $m3u8 = "#EXTM3U\n";
@@ -632,7 +585,7 @@ class InstantDubController extends Controller
         $m3u8 .= "#EXT-X-MEDIA-SEQUENCE:0\n";
         $m3u8 .= "#EXT-X-INDEPENDENT-SEGMENTS\n";
 
-        if (!$allDone) {
+        if (!($allDone && $allBgDone)) {
             $m3u8 .= "#EXT-X-PLAYLIST-TYPE:EVENT\n";
         }
 
@@ -641,12 +594,7 @@ class InstantDubController extends Controller
             $m3u8 .= "{$entry['uri']}\n";
         }
 
-        // Add trailing silent segment after last dialogue to prevent player pause
-        if ($tailDuration > 0) {
-            $m3u8 .= "#EXTINF:{$tailDuration},\n";
-            $m3u8 .= "dub-segment/tail.aac\n";
-        }
-        if ($allDone) {
+        if ($allDone && $allBgDone) {
             $m3u8 .= "#EXT-X-ENDLIST\n";
         }
 
@@ -729,6 +677,31 @@ class InstantDubController extends Controller
         }
 
         return $this->silentAacResponse();
+    }
+
+    public function hlsBgSegment(string $sessionId, int $index)
+    {
+        $aacFile = $this->aacDir($sessionId) . "/bg-{$index}.aac";
+
+        if (file_exists($aacFile) && filesize($aacFile) > 10) {
+            $session = $this->getSession($sessionId);
+            $status  = $session['status'] ?? 'processing';
+            $cache   = in_array($status, ['complete', 'stopped']) ? 'max-age=86400' : 'max-age=5';
+            return response()->file($aacFile, [
+                'Content-Type'              => 'audio/aac',
+                'Access-Control-Allow-Origin' => '*',
+                'Cache-Control'             => $cache,
+            ]);
+        }
+
+        // Not ready yet — return silence of expected duration
+        $session  = $this->getSession($sessionId);
+        $bgChunks = $session['bg_chunks'] ?? [];
+        $cs = isset($bgChunks[$index]) ? (float)($bgChunks[$index]['start'] ?? 0) : $index * 10.0;
+        $ce = isset($bgChunks[$index]) ? (float)($bgChunks[$index]['end'] ?? 0)   : ($index + 1) * 10.0;
+        $dur = round($this->frameAlignedDuration($cs, $ce), 6);
+
+        return $this->silentAacOfDuration($dur);
     }
 
     public function hlsTailSegment(string $sessionId)

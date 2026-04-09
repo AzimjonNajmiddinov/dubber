@@ -8,6 +8,7 @@ use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use App\Http\Controllers\AdminVoicePoolController;
+use App\Jobs\DownloadAudioChunkJob;
 use App\Jobs\PersistDubCacheJob;
 use App\Services\ElevenLabs\ElevenLabsClient;
 use App\Services\MmsTts\MmsTtsClient;
@@ -125,58 +126,37 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             // 3. Encode to base64
             $audioBase64 = base64_encode(file_get_contents($finalMp3));
 
-            // 4. Pre-generate AAC for HLS
-            // Re-read session: bg_chunks may have been populated by DownloadAudioChunkJob
-            // while TTS synthesis was running (the job took several seconds).
-            $freshJson = Redis::get($sessionKey);
-            if ($freshJson) $session = json_decode($freshJson, true);
-
-            $bg = $this->findBgForTime($session, $this->startTime);
-
-            if ($bg) {
-                $this->generateHlsAac($bg, $finalMp3, $ttsDuration);
-            } else {
-                $this->generateTtsOnlyAac($finalMp3);
-            }
-
-            // 4b. Pre-generate lead-in segment
-            if ($this->index === 0 && $this->startTime > 1.0) {
-                $bgLead = $this->findBgForTime($session, 0.0);
-                if ($bgLead) {
-                    $this->generateLeadAac($bgLead);
-                }
-            }
-
-            // 4c. Pre-generate trailing silent segment for last segment
-            if ($this->slotEnd === null) {
-                $this->generateTailAac($session);
-            }
-
             @unlink($finalMp3);
 
-            // 5. Probe actual AAC duration, then save chunk to Redis
-            // IMPORTANT: chunk must be saved AFTER AAC is generated so aac_duration
-            // is available from the first playlist reload. Otherwise EXTINF changes
-            // between reloads which violates EVENT playlist rules and crashes AVPlayer.
-            $aacDur = 0.0;
-            $aacFile = storage_path("app/instant-dub/{$this->sessionId}/aac/{$this->index}.aac");
-            if (file_exists($aacFile)) {
-                $aacDur = round($this->getAudioDuration($aacFile), 3);
-            }
-
+            // 4. Save TTS chunk to Redis
             $chunkKey = "{$sessionKey}:chunk:{$this->index}";
             Redis::setex($chunkKey, 50400, json_encode([
-                'index' => $this->index,
-                'start_time' => $this->startTime,
-                'end_time' => $this->endTime,
-                'slot_end' => $this->slotEnd,
-                'text' => $this->text,
-                'source_text' => $this->sourceText,
-                'speaker' => $this->speaker,
-                'audio_base64' => $audioBase64,
+                'index'          => $this->index,
+                'start_time'     => $this->startTime,
+                'end_time'       => $this->endTime,
+                'slot_end'       => $this->slotEnd,
+                'text'           => $this->text,
+                'source_text'    => $this->sourceText,
+                'speaker'        => $this->speaker,
+                'audio_base64'   => $audioBase64,
                 'audio_duration' => $ttsDuration,
-                'aac_duration' => $aacDur > 0 ? $aacDur : null,
             ]));
+
+            // 5. Re-generate bg-{i}.aac for any bg chunks that overlap this segment
+            $freshJson = Redis::get($sessionKey);
+            if ($freshJson) {
+                $fresh    = json_decode($freshJson, true);
+                $bgChunks = $fresh['bg_chunks'] ?? [];
+                foreach ($bgChunks as $bgIdx => $bgChunk) {
+                    $cs   = (float) ($bgChunk['start'] ?? 0);
+                    $ce   = (float) ($bgChunk['end'] ?? 0);
+                    $path = $bgChunk['path'] ?? null;
+                    if ($path && file_exists($path) && $this->startTime < $ce && $this->endTime > $cs) {
+                        $job = new DownloadAudioChunkJob($this->sessionId, (int) $bgIdx, $cs, $ce);
+                        $job->generateBgChunkAac($path);
+                    }
+                }
+            }
 
             // 5. Increment ready counter and dispatch cache persist on completion
             $this->incrementReady();
@@ -204,37 +184,26 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                 'error' => $e->getMessage(),
             ]));
 
-            // Generate background-only AAC so HLS has no gaps
-            $this->generateBackgroundOnlyAac($session);
-
             $this->incrementReady();
         }
     }
 
     public function failed(\Throwable $exception): void
     {
-        // Queue worker killed the job (timeout/max attempts) — bypassed our try/catch.
-        // Still increment ready counter so the session can reach "complete".
         $sessionKey = "instant-dub:{$this->sessionId}";
 
         $chunkKey = "{$sessionKey}:chunk:{$this->index}";
         if (!Redis::exists($chunkKey)) {
             Redis::setex($chunkKey, 50400, json_encode([
-                'index' => $this->index,
-                'start_time' => $this->startTime,
-                'end_time' => $this->endTime,
-                'text' => $this->text,
-                'speaker' => $this->speaker,
-                'audio_base64' => null,
+                'index'          => $this->index,
+                'start_time'     => $this->startTime,
+                'end_time'       => $this->endTime,
+                'text'           => $this->text,
+                'speaker'        => $this->speaker,
+                'audio_base64'   => null,
                 'audio_duration' => 0,
-                'error' => 'Job killed: ' . Str::limit($exception->getMessage(), 100),
+                'error'          => 'Job killed: ' . Str::limit($exception->getMessage(), 100),
             ]));
-        }
-
-        $sessionJson = Redis::get($sessionKey);
-        if ($sessionJson) {
-            $session = json_decode($sessionJson, true);
-            $this->generateBackgroundOnlyAac($session);
         }
 
         $this->incrementReady();
@@ -487,223 +456,6 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         ]);
 
         return (float) trim($result->output());
-    }
-
-    private function generateBackgroundOnlyAac(array $session): void
-    {
-        $slotEnd = $this->slotEnd ?? $this->endTime;
-        $slotDuration = round($this->frameAlignedDuration($this->startTime, $slotEnd), 6);
-
-        $aacDir = storage_path("app/instant-dub/{$this->sessionId}/aac");
-        $aacFile = "{$aacDir}/{$this->index}.aac";
-        if (!is_dir($aacDir)) @mkdir($aacDir, 0755, true);
-
-        $bg = $this->findBgForTime($session, $this->startTime);
-
-        $timeout = max(30, (int) ceil($slotDuration) + 30);
-        try {
-            if ($bg) {
-                Process::timeout($timeout)->run([
-                    'ffmpeg', '-y',
-                    '-f', 'lavfi', '-t', (string) $slotDuration, '-i', 'anullsrc=r=44100:cl=mono',
-                    '-ss', (string) round($bg['seek'], 3), '-t', (string) $slotDuration, '-i', $bg['path'],
-                    '-filter_complex', '[1:a]volume=0.2[bg];[0:a][bg]amix=inputs=2:duration=first:normalize=0',
-                    '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
-                ]);
-            } else {
-                Process::timeout($timeout)->run([
-                    'ffmpeg', '-y', '-f', 'lavfi', '-t', (string) $slotDuration,
-                    '-i', 'anullsrc=r=44100:cl=mono',
-                    '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
-                ]);
-            }
-        } catch (\Throwable) {
-            // Best effort
-        }
-    }
-
-    private function generateTtsOnlyAac(string $ttsMp3): void
-    {
-        $aacDir = storage_path("app/instant-dub/{$this->sessionId}/aac");
-        $aacFile = "{$aacDir}/{$this->index}.aac";
-        if (!is_dir($aacDir)) @mkdir($aacDir, 0755, true);
-
-        // Frame-aligned duration from absolute positions (prevents cumulative drift)
-        $slotEnd = $this->slotEnd ?? $this->endTime;
-        $speechDuration = round($this->frameAlignedDuration($this->startTime, $slotEnd), 6);
-
-        try {
-            $timeout = max(30, (int) ceil($speechDuration) + 30);
-            Process::timeout($timeout)->run([
-                'ffmpeg', '-y',
-                '-f', 'lavfi', '-t', (string) $speechDuration, '-i', 'anullsrc=r=44100:cl=mono',
-                '-i', $ttsMp3,
-                '-filter_complex',
-                "[1:a]aresample=44100[tts];[0:a][tts]amix=inputs=2:duration=first:normalize=0",
-                '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
-            ]);
-        } catch (\Throwable $e) {
-            Log::warning("[DUB] TTS-only AAC failed for segment #{$this->index}: " . $e->getMessage(), [
-                'session' => $this->sessionId,
-            ]);
-        }
-    }
-
-    private function generateGapAac(): void
-    {
-        $slotEnd = $this->slotEnd;
-        if ($slotEnd === null) return; // last segment, no gap
-
-        $gapStart = $this->endTime;
-        $gapDuration = round($slotEnd - $gapStart, 3);
-        if ($gapDuration < 0.5) return; // too short, skip
-
-        $aacDir = storage_path("app/instant-dub/{$this->sessionId}/aac");
-        $gapFile = "{$aacDir}/gap-{$this->index}.aac";
-
-        try {
-            Process::timeout(15)->run([
-                'ffmpeg', '-y', '-f', 'lavfi', '-t', (string) $gapDuration,
-                '-i', 'anullsrc=r=44100:cl=mono',
-                '-c:a', 'aac', '-b:a', '32k', '-f', 'adts', $gapFile,
-            ]);
-        } catch (\Throwable $e) {
-            Log::warning("[DUB] Gap AAC failed for segment #{$this->index}: " . $e->getMessage(), [
-                'session' => $this->sessionId,
-            ]);
-        }
-    }
-
-    private function generateHlsAac(array $bg, string $ttsMp3, float $ttsDuration): void
-    {
-        $slotEnd = $this->slotEnd ?? $this->endTime;
-        $slotDuration = round($this->frameAlignedDuration($this->startTime, $slotEnd), 6);
-
-        $aacDir = storage_path("app/instant-dub/{$this->sessionId}/aac");
-        $aacFile = "{$aacDir}/{$this->index}.aac";
-        if (!is_dir($aacDir)) @mkdir($aacDir, 0755, true);
-
-        try {
-            $result = Process::timeout(20)->run([
-                'ffmpeg', '-y',
-                '-f', 'lavfi', '-t', (string) $slotDuration, '-i', 'anullsrc=r=44100:cl=mono',
-                '-ss', (string) round($bg['seek'], 3), '-t', (string) $slotDuration, '-i', $bg['path'],
-                '-i', $ttsMp3,
-                '-filter_complex',
-                "[1:a]volume=0.2,aresample=44100[bg];[2:a]aresample=44100[tts];[0:a][bg][tts]amix=inputs=3:duration=first:normalize=0",
-                '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
-            ]);
-            if (!$result->successful() || !file_exists($aacFile) || filesize($aacFile) < 100) {
-                $this->generateTtsOnlyAac($ttsMp3);
-            }
-        } catch (\Throwable $e) {
-            Log::warning("[DUB] Segment #{$this->index} HLS AAC failed: " . $e->getMessage(), [
-                'session' => $this->sessionId,
-            ]);
-        }
-    }
-
-    private function generateTailAac(array $session): void
-    {
-        // Re-read session to get video_duration
-        $sessionJson = Redis::get("instant-dub:{$this->sessionId}");
-        if ($sessionJson) {
-            $session = json_decode($sessionJson, true);
-        }
-
-        $videoDuration = (float) ($session['video_duration'] ?? 0);
-        $tailStart = $this->endTime;
-        $tailEnd = $videoDuration > $tailStart ? $videoDuration : $tailStart + 180;
-        $tailDuration = round($this->frameAlignedDuration($tailStart, $tailEnd), 6);
-
-        if ($tailDuration < 5) return;
-
-        $bg = $this->findBgForTime($session, $tailStart);
-
-        $aacDir = storage_path("app/instant-dub/{$this->sessionId}/aac");
-        $aacFile = "{$aacDir}/tail.aac";
-        if (!is_dir($aacDir)) @mkdir($aacDir, 0755, true);
-
-        $timeout = max(60, (int) ceil($tailDuration) + 30);
-        try {
-            if ($bg) {
-                Process::timeout($timeout)->run([
-                    'ffmpeg', '-y',
-                    '-f', 'lavfi', '-t', (string) $tailDuration, '-i', 'anullsrc=r=44100:cl=mono',
-                    '-ss', (string) round($bg['seek'], 3), '-t', (string) $tailDuration, '-i', $bg['path'],
-                    '-filter_complex',
-                    "[1:a]volume=0.2[bg];[0:a][bg]amix=inputs=2:duration=first:normalize=0",
-                    '-ac', '1', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
-                ]);
-            } else {
-                Process::timeout($timeout)->run([
-                    'ffmpeg', '-y', '-f', 'lavfi', '-t', (string) $tailDuration,
-                    '-i', 'anullsrc=r=44100:cl=mono',
-                    '-c:a', 'aac', '-b:a', '32k', '-f', 'adts', $aacFile,
-                ]);
-            }
-
-            if (file_exists($aacFile) && filesize($aacFile) > 100) {
-                $s = $session;
-                $s['tail_start'] = $tailStart;
-                $s['tail_duration'] = $tailDuration;
-                Redis::setex("instant-dub:{$this->sessionId}", 50400, json_encode($s));
-            }
-        } catch (\Throwable $e) {
-            Log::warning("[DUB] Tail AAC generation failed: " . $e->getMessage(), [
-                'session' => $this->sessionId,
-            ]);
-        }
-    }
-
-    private function generateLeadAac(array $bg): void
-    {
-        $duration = round($this->frameAlignedDuration(0, $this->startTime), 6);
-
-        $aacDir = storage_path("app/instant-dub/{$this->sessionId}/aac");
-        $aacFile = "{$aacDir}/lead.aac";
-
-        if (file_exists($aacFile)) return;
-        if (!is_dir($aacDir)) @mkdir($aacDir, 0755, true);
-
-        $timeout = max(30, (int) ceil($duration) + 30);
-        try {
-            Process::timeout($timeout)->run([
-                'ffmpeg', '-y',
-                '-f', 'lavfi', '-t', (string) $duration, '-i', 'anullsrc=r=44100:cl=mono',
-                '-ss', (string) round($bg['seek'], 3), '-t', (string) $duration, '-i', $bg['path'],
-                '-filter_complex',
-                "[1:a]volume=0.2[bg];[0:a][bg]amix=inputs=2:duration=first:normalize=0",
-                '-ac', '1', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
-            ]);
-        } catch (\Throwable $e) {
-            Log::warning("[DUB] Lead-in AAC generation failed: " . $e->getMessage(), [
-                'session' => $this->sessionId,
-            ]);
-        }
-    }
-
-    /**
-     * Find the background chunk covering $time, return ['path', 'seek'] or null.
-     */
-    private function findBgForTime(array $session, float $time): ?array
-    {
-        $bgChunks = $session['bg_chunks'] ?? [];
-        foreach ($bgChunks as $chunk) {
-            $path  = $chunk['path'] ?? null;
-            $start = (float) ($chunk['start'] ?? 0);
-            $end   = (float) ($chunk['end'] ?? 0);
-            if ($path && file_exists($path) && $time >= $start && $time < $end) {
-                return ['path' => $path, 'seek' => max(0.0, $time - $start)];
-            }
-        }
-        return null;
-    }
-
-    private function generateGapAacWithBg(array $session): void
-    {
-        // Gap files are used by hlsGapSegment endpoint but not in the main playlist.
-        // Kept for compatibility; main slot .aac already covers the full slot including gap.
     }
 
     private function dispatchPersistIfComplete(string $sessionKey): void
