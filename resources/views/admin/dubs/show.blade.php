@@ -150,8 +150,21 @@
                     <span style="color:#334155">{{ gmdate('H:i:s', (int)$seg->end_time) }}</span>
                 </td>
                 <td>
-                    <input type="text" class="speaker-input" value="{{ $seg->speaker }}"
-                        style="width:58px;font-size:0.82rem;padding:4px 7px;text-align:center;font-weight:600">
+                    <select class="speaker-input"
+                        style="width:70px;font-size:0.82rem;padding:4px 6px;text-align:center;font-weight:600;background:#0a0a0f;color:#f1f5f9;border:1px solid #1e1e2e;border-radius:4px">
+                        @foreach($dub->voiceMap->pluck('speaker_tag') as $tag)
+                            <option value="{{ $tag }}" {{ $seg->speaker === $tag ? 'selected' : '' }}>{{ $tag }}</option>
+                        @endforeach
+                        @php $standardTags = ['M1','M2','M3','M4','M5','F1','F2','F3','C1','C2']; @endphp
+                        @foreach($standardTags as $tag)
+                            @if(!$dub->voiceMap->pluck('speaker_tag')->contains($tag))
+                                <option value="{{ $tag }}" {{ $seg->speaker === $tag ? 'selected' : '' }}>{{ $tag }}</option>
+                            @endif
+                        @endforeach
+                        @if(!$dub->voiceMap->pluck('speaker_tag')->contains($seg->speaker) && !in_array($seg->speaker, $standardTags))
+                            <option value="{{ $seg->speaker }}" selected>{{ $seg->speaker }}</option>
+                        @endif
+                    </select>
                 </td>
                 <td>
                     <textarea readonly rows="2"
@@ -202,6 +215,7 @@
 const token  = document.querySelector('meta[name=csrf-token]').content;
 const dubId  = {{ $dub->id }};
 const toast  = document.getElementById('save-toast');
+const voiceVariants = @json($voiceVariants);
 let toastTimer, activePlayBtn;
 
 // ── Audio preview ──────────────────────────────────────────────────────────
@@ -247,13 +261,15 @@ document.querySelectorAll('tr[data-seg]').forEach(row => {
                 speaker: row.querySelector('.speaker-input').value.trim(),
                 translated_text: row.querySelector('.translation-input').value,
             }),
-        }).then(r => r.json()).then(d => { if (d.ok && d.changed) showToast(); });
+        }).then(r => r.json()).then(d => {
+            if (d.ok && d.changed) showToast();
+            if (d.voiceMapChanged && d.voiceMap) refreshVoiceMap(d.voiceMap);
+        });
     }
 
-    row.querySelectorAll('input.speaker-input, textarea').forEach(el => {
-        el.addEventListener('input', () => { clearTimeout(debounce); debounce = setTimeout(save, 700); });
-        el.addEventListener('blur',  () => { clearTimeout(debounce); save(); });
-    });
+    row.querySelector('.speaker-input').addEventListener('change', () => { clearTimeout(debounce); save(); });
+    row.querySelector('.translation-input').addEventListener('input', () => { clearTimeout(debounce); debounce = setTimeout(save, 700); });
+    row.querySelector('.translation-input').addEventListener('blur',  () => { clearTimeout(debounce); save(); });
 
     const cb = row.querySelector('.approved-cb');
     cb.addEventListener('change', () => {
@@ -264,6 +280,62 @@ document.querySelectorAll('tr[data-seg]').forEach(row => {
         });
     });
 });
+
+// ── Voice map refresh ─────────────────────────────────────────────────────
+function refreshVoiceMap(voiceMap) {
+    const editor = document.getElementById('voice-map-editor');
+    if (!editor) return;
+
+    // Remove speakers that are no longer in map
+    editor.querySelectorAll('[data-speaker]').forEach(el => {
+        const tag = el.dataset.speaker;
+        if (!voiceMap.find(v => v.speaker === tag)) el.remove();
+    });
+
+    // Add new speakers
+    voiceMap.forEach(vm => {
+        const tag = vm.speaker;
+        if (editor.querySelector(`[data-speaker="${tag}"]`)) return;
+
+        const currentJson = JSON.stringify(vm.config);
+        const matchedVariant = voiceVariants.find(o => JSON.stringify(o.config) === currentJson);
+        const currentLabel = vm.config?.pool_name ?? vm.config?.voice ?? tag;
+
+        let optionsHtml = voiceVariants.map(o => {
+            const val = JSON.stringify(o.config);
+            const sel = val === currentJson ? ' selected' : '';
+            return `<option value='${val.replace(/'/g,"&#39;")}'${sel}>${o.label}</option>`;
+        }).join('');
+        if (!matchedVariant) {
+            optionsHtml += `<option value='${currentJson.replace(/'/g,"&#39;")}' selected>Current (${currentLabel})</option>`;
+        }
+
+        const div = document.createElement('div');
+        div.style.cssText = 'background:#0a0a0f;border:1px solid #1e1e2e;border-radius:8px;padding:12px 16px;min-width:200px';
+        div.dataset.speaker = tag;
+        div.innerHTML = `
+            <div style="font-size:0.72rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:#475569;margin-bottom:8px">Speaker ${tag}</div>
+            <select class="voice-select" style="width:100%">${optionsHtml}</select>`;
+        editor.appendChild(div);
+    });
+
+    // Update all speaker dropdowns in segments table
+    const allTags = voiceMap.map(v => v.speaker);
+    const standardTags = ['M1','M2','M3','M4','M5','F1','F2','F3','C1','C2'];
+    const extraTags = standardTags.filter(t => !allTags.includes(t));
+    const allOptions = [...allTags, ...extraTags];
+
+    document.querySelectorAll('tr[data-seg] .speaker-input').forEach(sel => {
+        const current = sel.value;
+        sel.innerHTML = allOptions.map(t =>
+            `<option value="${t}"${t === current ? ' selected' : ''}>${t}</option>`
+        ).join('');
+        // If current value not in list, add it
+        if (!allOptions.includes(current)) {
+            sel.innerHTML += `<option value="${current}" selected>${current}</option>`;
+        }
+    });
+}
 
 // ── Voice map save ─────────────────────────────────────────────────────────
 function saveVoiceMap() {

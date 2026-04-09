@@ -57,6 +57,8 @@ class AdminDubController extends Controller
         ]);
 
         $changed = false;
+        $oldSpeaker = $segment->speaker;
+        $voiceMapChanged = false;
 
         if ($request->has('speaker') && $request->input('speaker') !== $segment->speaker) {
             $segment->speaker = $request->input('speaker');
@@ -87,9 +89,80 @@ class AdminDubController extends Controller
             if ($dub->status === 'complete') {
                 $dub->update(['status' => 'needs_retts']);
             }
+
+            // Sync voice map: add new speaker, remove unused old speaker
+            if ($request->has('speaker')) {
+                $voiceMapChanged = $this->syncVoiceMapSpeaker($dub, $oldSpeaker, $segment->speaker);
+            }
         }
 
-        return response()->json(['ok' => true, 'changed' => $changed]);
+        $voiceMap = null;
+        if ($voiceMapChanged) {
+            $voiceMap = InstantDubVoiceMap::where('instant_dub_id', $dub->id)
+                ->orderBy('speaker_tag')->get()
+                ->map(fn($vm) => [
+                    'speaker' => $vm->speaker_tag,
+                    'config'  => $vm->voice_config,
+                ])->values()->all();
+        }
+
+        return response()->json(['ok' => true, 'changed' => $changed, 'voiceMapChanged' => $voiceMapChanged, 'voiceMap' => $voiceMap]);
+    }
+
+    private function syncVoiceMapSpeaker(InstantDub $dub, string $oldSpeaker, string $newSpeaker): bool
+    {
+        $changed = false;
+
+        // Add new speaker to voice map if missing
+        $exists = InstantDubVoiceMap::where('instant_dub_id', $dub->id)
+            ->where('speaker_tag', $newSpeaker)->exists();
+
+        if (!$exists) {
+            $config = $this->defaultVoiceConfig($dub, $newSpeaker);
+            InstantDubVoiceMap::create([
+                'instant_dub_id' => $dub->id,
+                'speaker_tag'    => $newSpeaker,
+                'voice_config'   => $config,
+            ]);
+            $changed = true;
+        }
+
+        // Remove old speaker if no segments use it anymore
+        if ($oldSpeaker !== $newSpeaker) {
+            $stillUsed = InstantDubSegment::where('instant_dub_id', $dub->id)
+                ->where('speaker', $oldSpeaker)->exists();
+            if (!$stillUsed) {
+                InstantDubVoiceMap::where('instant_dub_id', $dub->id)
+                    ->where('speaker_tag', $oldSpeaker)->delete();
+                $changed = true;
+            }
+        }
+
+        return $changed;
+    }
+
+    private function defaultVoiceConfig(InstantDub $dub, string $speaker): array
+    {
+        $driver = $dub->tts_driver ?? 'edge';
+        $gender = str_starts_with($speaker, 'F') ? 'female'
+            : (str_starts_with($speaker, 'C') ? 'child' : 'male');
+
+        if ($driver === 'mms') {
+            $dir   = storage_path("app/voice-pool/{$gender}");
+            $files = is_dir($dir) ? glob("{$dir}/*.{wav,mp3,m4a}", GLOB_BRACE) : [];
+            if (empty($files) && $gender !== 'male') {
+                $dir   = storage_path('app/voice-pool/male');
+                $files = is_dir($dir) ? glob("{$dir}/*.{wav,mp3,m4a}", GLOB_BRACE) : [];
+            }
+            if (!empty($files)) {
+                $name = pathinfo($files[0], PATHINFO_FILENAME);
+                return ['driver' => 'mms', 'gender' => $gender, 'pool_name' => $name];
+            }
+        }
+
+        $variants = VoiceVariants::forLanguage($dub->language);
+        $pool = $variants[$gender] ?? $variants['male'] ?? [];
+        return $pool[0] ?? ['voice' => 'uz-UZ-SardorNeural', 'rate' => '+0%', 'pitch' => '+0Hz'];
     }
 
     public function audioSegment(InstantDub $dub, InstantDubSegment $segment)
