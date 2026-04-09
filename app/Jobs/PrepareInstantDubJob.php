@@ -252,24 +252,46 @@ class PrepareInstantDubJob implements ShouldQueue
 
     private function buildVoiceMap(array $speakers): void
     {
-        $variants = \App\Services\VoiceVariants::forLanguage($this->language);
-        $maleVariants = $variants['male'];
-        $femaleVariants = $variants['female'];
-        $childVariants = $variants['child'];
-
+        // 1. Load saved voice map from DB (admin may have customised it)
         $voiceMap = [];
-        $maleIdx = 0;
-        $femaleIdx = 0;
-        $childIdx = 0;
+        if ($this->cachedDubId) {
+            $saved = \App\Models\InstantDubVoiceMap::where('instant_dub_id', $this->cachedDubId)->get();
+            foreach ($saved as $vm) {
+                $voiceMap[$vm->speaker_tag] = is_array($vm->voice_config)
+                    ? $vm->voice_config
+                    : json_decode($vm->voice_config, true);
+            }
+        }
 
+        // 2. For any speaker not in saved map, assign a default based on driver
+        $sessionJson = Redis::get("instant-dub:{$this->sessionId}");
+        $session = $sessionJson ? json_decode($sessionJson, true) : [];
+        $driver = $session['tts_driver'] ?? config('dubber.tts.default', 'edge');
+
+        if ($driver === 'mms') {
+            $maleFiles   = glob(storage_path('app/voice-pool/male/*.{wav,mp3,m4a}'), GLOB_BRACE) ?: [];
+            $femaleFiles = glob(storage_path('app/voice-pool/female/*.{wav,mp3,m4a}'), GLOB_BRACE) ?: [];
+            $childFiles  = glob(storage_path('app/voice-pool/child/*.{wav,mp3,m4a}'), GLOB_BRACE) ?: $maleFiles;
+            $toVariant = fn($f, $g) => ['driver' => 'mms', 'gender' => $g, 'pool_name' => pathinfo($f, PATHINFO_FILENAME)];
+            $maleVariants   = array_map(fn($f) => $toVariant($f, 'male'),   $maleFiles);
+            $femaleVariants = array_map(fn($f) => $toVariant($f, 'female'), $femaleFiles);
+            $childVariants  = array_map(fn($f) => $toVariant($f, 'child'),  $childFiles);
+        } else {
+            $variants = \App\Services\VoiceVariants::forLanguage($this->language);
+            $maleVariants = $variants['male']; $femaleVariants = $variants['female']; $childVariants = $variants['child'];
+        }
+
+        $maleIdx = $femaleIdx = $childIdx = 0;
         foreach (array_keys($speakers) as $tag) {
-            if (str_starts_with($tag, 'C')) {
+            if (isset($voiceMap[$tag])) continue; // already assigned from DB
+
+            if (str_starts_with($tag, 'C') && !empty($childVariants)) {
                 $voiceMap[$tag] = $childVariants[$childIdx % count($childVariants)];
                 $childIdx++;
-            } elseif (str_starts_with($tag, 'M')) {
+            } elseif (str_starts_with($tag, 'M') && !empty($maleVariants)) {
                 $voiceMap[$tag] = $maleVariants[$maleIdx % count($maleVariants)];
                 $maleIdx++;
-            } else {
+            } elseif (!empty($femaleVariants)) {
                 $voiceMap[$tag] = $femaleVariants[$femaleIdx % count($femaleVariants)];
                 $femaleIdx++;
             }
@@ -278,9 +300,8 @@ class PrepareInstantDubJob implements ShouldQueue
         $voiceKey = "instant-dub:{$this->sessionId}:voices";
         Redis::setex($voiceKey, 50400, json_encode($voiceMap));
 
-        Log::info("[DUB] Voice map built: " . implode(', ', array_keys($speakers)), [
+        Log::info("[DUB] Voice map built (driver={$driver}): " . implode(', ', array_keys($speakers)), [
             'session' => $this->sessionId,
-            'map' => $voiceMap,
         ]);
     }
 
