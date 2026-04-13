@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 CACHE_PATH = Path("/tmp/prosody-cache")
 CACHE_PATH.mkdir(parents=True, exist_ok=True)
 
-WORLD_SR = 16000  # WORLD vocoder uchun optimal sample rate
+WORLD_SR = 22050  # WORLD vocoder + yaxshi sifat uchun
 
 app = FastAPI(title="Prosody Transfer Service", version="1.0.0")
 
@@ -109,11 +109,25 @@ def transfer_f0_contour(f0_src: np.ndarray, f0_ref: np.ndarray) -> np.ndarray:
 
 
 def transfer_energy(sp_src: np.ndarray, sp_ref: np.ndarray) -> np.ndarray:
-    """Global energy nisbatini ko'chirish (max 3x o'zgarish)."""
-    e_src = np.sqrt(np.mean(sp_src ** 2)) + 1e-8
-    e_ref = np.sqrt(np.mean(sp_ref ** 2)) + 1e-8
-    ratio = np.clip(e_ref / e_src, 1 / 3.0, 3.0)
-    return sp_src * ratio
+    """Frame-by-frame energy ko'chirish — temporal dinamikani saqlaydi."""
+    n_src = len(sp_src)
+    n_ref = len(sp_ref)
+
+    # Har bir frame uchun RMS energiya
+    e_src = np.sqrt(np.mean(sp_src ** 2, axis=1)) + 1e-8   # [T_src]
+    e_ref = np.sqrt(np.mean(sp_ref ** 2, axis=1)) + 1e-8   # [T_ref]
+
+    # Reference energiyasini source uzunligiga time-stretch
+    src_t = np.linspace(0, 1, n_src)
+    ref_t = np.linspace(0, 1, n_ref)
+    e_ref_s = interp1d(ref_t, e_ref, kind='linear',
+                       bounds_error=False, fill_value='extrapolate')(src_t)
+
+    # Per-frame koeffitsient, ±5x gacha cheklov
+    ratio = np.clip(e_ref_s / e_src, 0.2, 5.0)
+
+    # Har bir frame ga qo'llash: [T, F] * [T, 1]
+    return sp_src * ratio[:, np.newaxis]
 
 
 @app.post("/transfer")
