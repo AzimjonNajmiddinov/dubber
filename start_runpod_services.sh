@@ -131,7 +131,7 @@ TTS_VENV=/workspace/tts-venv
 echo "Checking shared TTS venv ($TTS_VENV)..."
 
 TTS_VENV_OK=false
-if [ -d "$TTS_VENV" ] && $TTS_VENV/bin/python -c "import transformers; import uvicorn" 2>/dev/null; then
+if [ -d "$TTS_VENV" ] && $TTS_VENV/bin/python -c "import transformers; import uvicorn; import demucs" 2>/dev/null; then
     echo "  TTS venv OK"
     TTS_VENV_OK=true
 fi
@@ -153,7 +153,11 @@ if [ "$TTS_VENV_OK" = false ]; then
         transformers uvicorn fastapi python-multipart soundfile scipy \
         "av" --prefer-binary
 
-    if $TTS_VENV/bin/python -c "import transformers; import torch; print(f'TTS venv OK - torch {torch.__version__}')" 2>/dev/null; then
+    echo "    Installing Demucs..."
+    $TTS_VENV/bin/pip install -q --no-deps demucs
+    $TTS_VENV/bin/pip install -q dora-search lameenc julius diffq einops openunmix treetable
+
+    if $TTS_VENV/bin/python -c "import transformers; import torch; import demucs; print(f'TTS venv OK - torch {torch.__version__}')" 2>/dev/null; then
         echo "  TTS venv created successfully"
     else
         echo "  ERROR: TTS venv creation failed! Check manually."
