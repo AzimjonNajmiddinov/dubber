@@ -220,6 +220,14 @@ class DownloadAudioChunkJob implements ShouldQueue
             $vocalsUrl   = $result['vocals_url'] ?? null;
             if (!$noVocalsUrl) return null;
 
+            // Relative URL bo'lsa service URL bilan to'ldirish
+            if ($noVocalsUrl && !str_starts_with($noVocalsUrl, 'http')) {
+                $noVocalsUrl = rtrim($serviceUrl, '/') . '/' . ltrim($noVocalsUrl, '/');
+            }
+            if ($vocalsUrl && !str_starts_with($vocalsUrl, 'http')) {
+                $vocalsUrl = rtrim($serviceUrl, '/') . '/' . ltrim($vocalsUrl, '/');
+            }
+
             $noVocalsFile = "{$workDir}/bg_chunk_{$this->chunkIndex}_novocals.wav";
             $download = Http::timeout(60)->get($noVocalsUrl);
             if ($download->failed()) return null;
