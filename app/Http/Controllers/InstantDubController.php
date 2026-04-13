@@ -557,21 +557,32 @@ class InstantDubController extends Controller
         $availableBg  = count($bgChunks);
         $entries      = [];
 
-        if (empty($bgChunks) && !$allDone) {
-            // No bg chunks yet — serve short silence so EVENT playlist stays valid
-            $entries[] = ['uri' => 'dub-segment/bg-0.aac', 'duration' => 5.0];
-        } else {
-            // Sort bg chunks by index
+        $aacDir = $this->aacDir($sessionId);
+        $readyCount = 0;
+
+        if (!empty($bgChunks)) {
+            // Only list segments whose bg-*.aac file is actually on disk.
+            // PlayerKit fetches the playlist every few seconds — new segments appear
+            // as they're generated. This prevents serving silence for unready files.
             ksort($bgChunks);
             foreach ($bgChunks as $bgIdx => $bgChunk) {
+                $aacFile = "{$aacDir}/bg-{$bgIdx}.aac";
+                if (!file_exists($aacFile) || filesize($aacFile) <= 10) continue;
                 $cs  = (float) ($bgChunk['start'] ?? 0);
                 $ce  = (float) ($bgChunk['end'] ?? 0);
                 $dur = round($this->frameAlignedDuration($cs, $ce), 6);
                 $entries[] = ['uri' => "dub-segment/bg-{$bgIdx}.aac", 'duration' => $dur];
+                $readyCount++;
             }
         }
 
-        $allBgDone = $totalBg > 0 && $availableBg >= $totalBg;
+        // If nothing is ready yet, serve a short silence placeholder so the
+        // EVENT playlist stays syntactically valid while we wait.
+        if (empty($entries) && !$allDone) {
+            $entries[] = ['uri' => 'dub-segment/bg-0.aac', 'duration' => 5.0];
+        }
+
+        $allBgDone = $totalBg > 0 && $readyCount >= $totalBg;
 
         // Calculate TARGETDURATION
         $maxDur = 10;
