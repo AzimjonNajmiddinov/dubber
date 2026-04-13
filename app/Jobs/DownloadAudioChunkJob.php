@@ -181,15 +181,30 @@ class DownloadAudioChunkJob implements ShouldQueue
         if (!$serviceUrl) return null;
 
         try {
+            // Demucs WAV talab qiladi — AAC/other formatdan convert
+            $sendPath = $audioPath;
+            $tmpWav   = null;
+            if (!str_ends_with(strtolower($audioPath), '.wav')) {
+                $tmpWav   = "{$workDir}/bg_chunk_{$this->chunkIndex}_demucs.wav";
+                $conv = Process::timeout(30)->run([
+                    'ffmpeg', '-y', '-i', $audioPath,
+                    '-ac', '2', '-ar', '44100', '-f', 'wav', $tmpWav,
+                ]);
+                if ($conv->successful() && file_exists($tmpWav) && filesize($tmpWav) > 100) {
+                    $sendPath = $tmpWav;
+                }
+            }
+
             // Demucs GPU da bir vaqtda 1 ta request — OOM oldini olish uchun
             $demucsLock = \Illuminate\Support\Facades\Cache::lock('demucs-concurrency', 120);
             $demucsLock->block(60);
             try {
                 $response = Http::timeout(120)
-                    ->attach('audio', file_get_contents($audioPath), basename($audioPath))
+                    ->attach('audio', file_get_contents($sendPath), 'audio.wav')
                     ->post("{$serviceUrl}/separate");
             } finally {
                 $demucsLock->release();
+                if ($tmpWav) @unlink($tmpWav);
             }
 
             if ($response->failed()) {
