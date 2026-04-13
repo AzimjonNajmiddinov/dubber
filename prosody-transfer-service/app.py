@@ -168,6 +168,18 @@ async def transfer(
 
         out_audio = pw.synthesize(f0_out, sp_out, ap_src, WORLD_SR).astype(np.float32)
 
+        # Blend with original to preserve consonant intelligibility
+        # WORLD vocoder can smear consonants — mixing in original restores clarity
+        BLEND = 0.75  # 75% prosody, 25% original
+        n_out = len(out_audio)
+        n_src = len(src)
+        if n_out != n_src:
+            g = math.gcd(n_src, n_out)
+            src_resampled = resample_poly(src, n_out // g, n_src // g).astype(np.float32)
+        else:
+            src_resampled = src.astype(np.float32)
+        out_audio = out_audio * BLEND + src_resampled * (1.0 - BLEND)
+
         peak = np.abs(out_audio).max()
         if peak > 0:
             out_audio = out_audio / peak * 0.95
