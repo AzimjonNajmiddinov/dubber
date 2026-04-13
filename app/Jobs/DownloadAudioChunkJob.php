@@ -113,6 +113,8 @@ class DownloadAudioChunkJob implements ShouldQueue
         if ($this->hasSubtitlesInRange()) {
             $noVocalsFile = $this->separateVocals($chunkFile, $workDir);
             $bgForMix = $noVocalsFile ?? $chunkFile;
+            // Vocals ready — apply prosody transfer to overlapping TTS segments
+            $this->applyProsodyToOverlappingSegments($workDir);
         }
         $this->generateBgChunkAac($bgForMix);
 
@@ -363,6 +365,123 @@ class DownloadAudioChunkJob implements ShouldQueue
         $startFrames = (int) round($start * 44100 / 1024);
         $endFrames = (int) round($end * 44100 / 1024);
         return max(1, $endFrames - $startFrames) * 1024 / 44100;
+    }
+
+    /**
+     * After Demucs separates vocals for this chunk, apply prosody transfer to all
+     * TTS segments in this time range and update their audio_base64 in Redis.
+     * This runs for both live and cache-hit sessions.
+     */
+    private function applyProsodyToOverlappingSegments(string $workDir): void
+    {
+        $serviceUrl = config('services.prosody_transfer.url') ?: env('PROSODY_TRANSFER_SERVICE_URL');
+        if (!$serviceUrl) return;
+
+        $vocalsFile = "{$workDir}/bg_chunk_{$this->chunkIndex}_vocals.wav";
+        if (!file_exists($vocalsFile) || filesize($vocalsFile) < 100) return;
+
+        $sessionKey = "instant-dub:{$this->sessionId}";
+        $sessionJson = Redis::get($sessionKey);
+        if (!$sessionJson) return;
+        $session = json_decode($sessionJson, true);
+        $total = (int) ($session['total_segments'] ?? 0);
+        if ($total === 0) return;
+
+        for ($i = 0; $i < $total; $i++) {
+            $chunkKey  = "{$sessionKey}:chunk:{$i}";
+            $chunkJson = Redis::get($chunkKey);
+            if (!$chunkJson) continue;
+
+            $chunk    = json_decode($chunkJson, true);
+            $segStart = (float) ($chunk['start_time'] ?? 0);
+            $segEnd   = (float) ($chunk['end_time'] ?? 0);
+            $b64      = $chunk['audio_base64'] ?? null;
+
+            // Only process segments that overlap this bg chunk and have audio
+            if ($segStart >= $this->endTime || $segEnd <= $this->startTime) continue;
+            if (!$b64) continue;
+
+            try {
+                // Write TTS audio to temp file
+                $tmpMp3 = "/tmp/prosody_{$this->sessionId}_{$this->chunkIndex}_{$i}.mp3";
+                file_put_contents($tmpMp3, base64_decode($b64));
+
+                // Convert TTS MP3 → WAV for prosody service
+                $ttsWav = "/tmp/prosody_{$this->sessionId}_{$this->chunkIndex}_{$i}_tts.wav";
+                $conv = Process::timeout(10)->run([
+                    'ffmpeg', '-y', '-i', $tmpMp3,
+                    '-ar', '44100', '-ac', '1', '-f', 'wav', $ttsWav,
+                ]);
+                @unlink($tmpMp3);
+                if (!$conv->successful() || !file_exists($ttsWav) || filesize($ttsWav) < 100) continue;
+
+                // Cut vocals reference for this segment's time range
+                $segOffset = max(0.0, $segStart - $this->startTime);
+                $segDur    = $segEnd - $segStart;
+                $refClip   = "/tmp/prosody_{$this->sessionId}_{$this->chunkIndex}_{$i}_ref.wav";
+                $cut = Process::timeout(10)->run([
+                    'ffmpeg', '-y',
+                    '-ss', (string) round($segOffset, 3),
+                    '-t',  (string) round($segDur, 3),
+                    '-i',  $vocalsFile,
+                    $refClip,
+                ]);
+                if (!$cut->successful() || !file_exists($refClip) || filesize($refClip) < 100) {
+                    @unlink($ttsWav);
+                    continue;
+                }
+
+                // Call prosody transfer service
+                $resp = \Illuminate\Support\Facades\Http::timeout(30)
+                    ->attach('tts_audio',  file_get_contents($ttsWav),  'tts.wav')
+                    ->attach('reference',  file_get_contents($refClip), 'ref.wav')
+                    ->post(rtrim($serviceUrl, '/') . '/transfer', [
+                        'f0_mode'         => 'contour',
+                        'energy_transfer' => 'true',
+                    ]);
+
+                @unlink($ttsWav);
+                @unlink($refClip);
+
+                if ($resp->failed()) continue;
+
+                // Convert result WAV → MP3 and update Redis
+                $outWav = "/tmp/prosody_{$this->sessionId}_{$this->chunkIndex}_{$i}_out.wav";
+                $outMp3 = "/tmp/prosody_{$this->sessionId}_{$this->chunkIndex}_{$i}_out.mp3";
+                file_put_contents($outWav, $resp->body());
+                if (!file_exists($outWav) || filesize($outWav) < 100) continue;
+
+                $enc = Process::timeout(10)->run([
+                    'ffmpeg', '-y', '-i', $outWav,
+                    '-codec:a', 'libmp3lame', '-b:a', '128k', $outMp3,
+                ]);
+                @unlink($outWav);
+                if (!$enc->successful() || !file_exists($outMp3) || filesize($outMp3) < 100) continue;
+
+                $newB64 = base64_encode(file_get_contents($outMp3));
+                @unlink($outMp3);
+
+                $chunk['audio_base64'] = $newB64;
+                Redis::setex($chunkKey, 50400, json_encode($chunk));
+
+                Log::info("[DUB] Prosody applied to seg #{$i} via bg-chunk {$this->chunkIndex}", [
+                    'session' => $this->sessionId,
+                ]);
+
+            } catch (\Throwable $e) {
+                Log::warning("[DUB] Prosody for seg #{$i} failed: " . $e->getMessage(), [
+                    'session' => $this->sessionId,
+                ]);
+                // Cleanup any leftover temp files
+                foreach ([
+                    "/tmp/prosody_{$this->sessionId}_{$this->chunkIndex}_{$i}.mp3",
+                    "/tmp/prosody_{$this->sessionId}_{$this->chunkIndex}_{$i}_tts.wav",
+                    "/tmp/prosody_{$this->sessionId}_{$this->chunkIndex}_{$i}_ref.wav",
+                    "/tmp/prosody_{$this->sessionId}_{$this->chunkIndex}_{$i}_out.wav",
+                    "/tmp/prosody_{$this->sessionId}_{$this->chunkIndex}_{$i}_out.mp3",
+                ] as $f) @unlink($f);
+            }
+        }
     }
 
     public function failed(\Throwable $exception): void
