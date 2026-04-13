@@ -397,8 +397,10 @@ class DownloadAudioChunkJob implements ShouldQueue
             $segEnd   = (float) ($chunk['end_time'] ?? 0);
             $b64      = $chunk['audio_base64'] ?? null;
 
-            // Only process segments that overlap this bg chunk and have audio
-            if ($segStart >= $this->endTime || $segEnd <= $this->startTime) continue;
+            // Only process segments whose START falls within this bg chunk.
+            // Segments overlapping the boundary will be handled by the chunk that owns their start.
+            // This prevents double-processing (which can overwrite with a wrong reference).
+            if ($segStart < $this->startTime || $segStart >= $this->endTime) continue;
             if (!$b64) continue;
 
             try {
