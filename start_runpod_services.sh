@@ -182,11 +182,12 @@ fi
 
 # System Python for WhisperX (whisperx lives here, not in tts-venv)
 WHISPERX_PYTHON=$(command -v python3 || command -v python)
+# Auto-install whisperx if missing (fast — torch already cached, ~200MB)
 if ! $WHISPERX_PYTHON -c "import whisperx" 2>/dev/null; then
-    echo "WARNING: whisperx not found in system Python ($WHISPERX_PYTHON)."
-    echo "  Run without --skip-deps to install it."
+    echo "  whisperx missing — installing (faster-whisper + whisperx + speechbrain)..."
+    $WHISPERX_PYTHON -m pip install -q faster-whisper whisperx speechbrain
 fi
-# Ensure uvicorn is available in system Python (fast install if missing)
+# Ensure uvicorn is available in system Python
 if ! $WHISPERX_PYTHON -c "import uvicorn" 2>/dev/null; then
     echo "  Installing uvicorn in system Python..."
     $WHISPERX_PYTHON -m pip install -q uvicorn fastapi python-multipart
