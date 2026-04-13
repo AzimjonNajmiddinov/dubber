@@ -169,11 +169,22 @@ if [ "$DEPS_ONLY" = true ]; then
 fi
 
 # ===========================================
+# PYTHON — always use tts-venv
+# Barcha servislar shu PYTHON orqali ishga tushadi.
+# System Python da uvicorn/torch yo'q — hech qachon to'g'ridan ishlatilmaydi.
+# ===========================================
+PYTHON="$TTS_VENV/bin/python"
+if [ ! -f "$PYTHON" ]; then
+    echo "ERROR: tts-venv not found at $TTS_VENV. Run without --skip-deps first."
+    exit 1
+fi
+
+# ===========================================
 # ENVIRONMENT SETUP
 # ===========================================
 
 # Ensure cuDNN libraries are on the path
-CUDNN_PATH=$(python -c "import nvidia.cudnn; print(nvidia.cudnn.__path__[0] + '/lib')" 2>/dev/null || true)
+CUDNN_PATH=$($PYTHON -c "import nvidia.cudnn; print(nvidia.cudnn.__path__[0] + '/lib')" 2>/dev/null || true)
 if [ -n "$CUDNN_PATH" ]; then
     export LD_LIBRARY_PATH="${CUDNN_PATH}:${LD_LIBRARY_PATH}"
 fi
@@ -203,22 +214,22 @@ echo "Starting services..."
 # Start Demucs on port 8000 (tts-venv)
 echo "  Starting Demucs on port 8000..."
 cd /workspace/dubber/demucs-service
-nohup $TTS_VENV/bin/python -m uvicorn app_runpod:app --host 0.0.0.0 --port 8000 > /tmp/demucs.log 2>&1 &
+nohup $PYTHON -m uvicorn app_runpod:app --host 0.0.0.0 --port 8000 > /tmp/demucs.log 2>&1 &
 
-# Start MMS+OpenVoice on port 8005 (tts-venv)
+# Start MMS+OpenVoice on port 8005
 echo "  Starting MMS+OpenVoice on port 8005..."
 cd /workspace/dubber/mms-openvoice-service
-nohup $TTS_VENV/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8005 > /tmp/mms.log 2>&1 &
+nohup $PYTHON -m uvicorn app:app --host 0.0.0.0 --port 8005 > /tmp/mms.log 2>&1 &
 
-# Start WhisperX on port 8002 (tts-venv)
+# Start WhisperX on port 8002
 echo "  Starting WhisperX on port 8002..."
 cd /workspace/dubber/whisperx-service
-nohup $TTS_VENV/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8002 > /tmp/whisperx.log 2>&1 &
+nohup $PYTHON -m uvicorn app:app --host 0.0.0.0 --port 8002 > /tmp/whisperx.log 2>&1 &
 
-# Start Prosody Transfer on port 8006 (CPU only — pyworld, tts-venv)
+# Start Prosody Transfer on port 8006
 echo "  Starting Prosody Transfer on port 8006..."
 cd /workspace/dubber/prosody-transfer-service
-nohup $TTS_VENV/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8006 > /tmp/prosody.log 2>&1 &
+nohup $PYTHON -m uvicorn app:app --host 0.0.0.0 --port 8006 > /tmp/prosody.log 2>&1 &
 
 
 echo ""
