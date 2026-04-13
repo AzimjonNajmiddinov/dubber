@@ -415,14 +415,21 @@ class DownloadAudioChunkJob implements ShouldQueue
                 @unlink($tmpMp3);
                 if (!$conv->successful() || !file_exists($ttsWav) || filesize($ttsWav) < 100) continue;
 
-                // Cut vocals reference for this segment's time range
-                $segOffset = max(0.0, $segStart - $this->startTime);
-                $segDur    = $segEnd - $segStart;
-                $refClip   = "/tmp/prosody_{$this->sessionId}_{$this->chunkIndex}_{$i}_ref.wav";
+                // Cut vocals reference — clamp to bg chunk boundary to avoid empty clips
+                $segOffset  = max(0.0, $segStart - $this->startTime);
+                $chunkDur   = $this->endTime - $this->startTime;
+                $availableRef = max(0.0, $chunkDur - $segOffset);
+                // Need at least 0.15s of reference audio, otherwise prosody won't help
+                if ($availableRef < 0.15) {
+                    @unlink($ttsWav);
+                    continue;
+                }
+                $refDur  = min($segEnd - $segStart, $availableRef);
+                $refClip = "/tmp/prosody_{$this->sessionId}_{$this->chunkIndex}_{$i}_ref.wav";
                 $cut = Process::timeout(10)->run([
                     'ffmpeg', '-y',
                     '-ss', (string) round($segOffset, 3),
-                    '-t',  (string) round($segDur, 3),
+                    '-t',  (string) round($refDur, 3),
                     '-i',  $vocalsFile,
                     $refClip,
                 ]);
@@ -449,14 +456,22 @@ class DownloadAudioChunkJob implements ShouldQueue
                 $outWav = "/tmp/prosody_{$this->sessionId}_{$this->chunkIndex}_{$i}_out.wav";
                 $outMp3 = "/tmp/prosody_{$this->sessionId}_{$this->chunkIndex}_{$i}_out.mp3";
                 file_put_contents($outWav, $resp->body());
-                if (!file_exists($outWav) || filesize($outWav) < 100) continue;
+                // Sanity check: output must be reasonably large and not silent
+                if (!file_exists($outWav) || filesize($outWav) < 1000) {
+                    @unlink($outWav);
+                    continue;
+                }
 
                 $enc = Process::timeout(10)->run([
                     'ffmpeg', '-y', '-i', $outWav,
                     '-codec:a', 'libmp3lame', '-b:a', '128k', $outMp3,
                 ]);
                 @unlink($outWav);
-                if (!$enc->successful() || !file_exists($outMp3) || filesize($outMp3) < 100) continue;
+                // Output MP3 must be meaningfully larger than an empty file
+                if (!$enc->successful() || !file_exists($outMp3) || filesize($outMp3) < 500) {
+                    @unlink($outMp3);
+                    continue;
+                }
 
                 $newB64 = base64_encode(file_get_contents($outMp3));
                 @unlink($outMp3);
