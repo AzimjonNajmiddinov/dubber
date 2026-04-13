@@ -181,9 +181,16 @@ class DownloadAudioChunkJob implements ShouldQueue
         if (!$serviceUrl) return null;
 
         try {
-            $response = Http::timeout(120)
-                ->attach('audio', file_get_contents($audioPath), basename($audioPath))
-                ->post("{$serviceUrl}/separate");
+            // Demucs GPU da bir vaqtda 1 ta request — OOM oldini olish uchun
+            $demucsLock = \Illuminate\Support\Facades\Cache::lock('demucs-concurrency', 120);
+            $demucsLock->block(60);
+            try {
+                $response = Http::timeout(120)
+                    ->attach('audio', file_get_contents($audioPath), basename($audioPath))
+                    ->post("{$serviceUrl}/separate");
+            } finally {
+                $demucsLock->release();
+            }
 
             if ($response->failed()) {
                 Log::warning("[DUB] Demucs separation failed for chunk {$this->chunkIndex}", [
