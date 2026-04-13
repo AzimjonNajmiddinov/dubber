@@ -3,6 +3,7 @@
 use App\Http\Controllers\AdminController;
 use App\Http\Controllers\AdminDubController;
 use App\Http\Controllers\AdminUserController;
+use App\Http\Controllers\AdminProsodyTestController;
 use App\Http\Controllers\AdminVoicePoolController;
 use App\Http\Controllers\PremiumDubController;
 use Illuminate\Support\Facades\Route;
@@ -78,6 +79,10 @@ Route::middleware('admin.auth')->prefix('admin')->name('admin.')->group(function
     Route::post('/voice-pool/{gender}/{name}/ref-text', [AdminVoicePoolController::class, 'saveRefText'])->name('voice-pool.ref-text');
     Route::get('/voice-pool/{gender}/{name}/play', [AdminVoicePoolController::class, 'play'])->name('voice-pool.play');
     Route::delete('/voice-pool/{gender}/{name}', [AdminVoicePoolController::class, 'delete'])->name('voice-pool.delete');
+
+    // Prosody transfer test
+    Route::get('/prosody-test', [AdminProsodyTestController::class, 'index'])->name('prosody-test.index');
+    Route::post('/prosody-test', [AdminProsodyTestController::class, 'transfer'])->name('prosody-test.transfer');
 
     // Premium dub (admin only)
     Route::get('/premium-dub', fn() => view('premium-dub'))->name('premium-dub');

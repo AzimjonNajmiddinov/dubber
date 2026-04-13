@@ -303,6 +303,10 @@
                class="nav-item {{ request()->routeIs('admin.voice-pool*') ? 'active' : '' }}">
                 <span class="icon">🎙</span> Voice Pool
             </a>
+            <a href="{{ route('admin.prosody-test.index') }}"
+               class="nav-item {{ request()->routeIs('admin.prosody-test*') ? 'active' : '' }}">
+                <span class="icon">🎚</span> Prosody Test
+            </a>
             <div class="nav-label">Settings</div>
             <a href="{{ route('admin.users.index') }}"
                class="nav-item {{ request()->routeIs('admin.users*') ? 'active' : '' }}">
