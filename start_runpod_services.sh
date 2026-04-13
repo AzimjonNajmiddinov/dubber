@@ -215,10 +215,10 @@ echo "  Starting WhisperX on port 8002..."
 cd /workspace/dubber/whisperx-service
 nohup python -m uvicorn app:app --host 0.0.0.0 --port 8002 > /tmp/whisperx.log 2>&1 &
 
-# Start Prosody Transfer on port 8006 (CPU only — pyworld)
+# Start Prosody Transfer on port 8006 (CPU only — pyworld, tts-venv)
 echo "  Starting Prosody Transfer on port 8006..."
 cd /workspace/dubber/prosody-transfer-service
-nohup python -m uvicorn app:app --host 0.0.0.0 --port 8006 > /tmp/prosody.log 2>&1 &
+nohup $TTS_VENV/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8006 > /tmp/prosody.log 2>&1 &
 
 
 echo ""
