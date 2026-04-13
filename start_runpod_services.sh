@@ -131,7 +131,7 @@ TTS_VENV=/workspace/tts-venv
 echo "Checking shared TTS venv ($TTS_VENV)..."
 
 TTS_VENV_OK=false
-if [ -d "$TTS_VENV" ] && $TTS_VENV/bin/python -c "import transformers; import uvicorn; import whisperx" 2>/dev/null; then
+if [ -d "$TTS_VENV" ] && $TTS_VENV/bin/python -c "import transformers; import uvicorn" 2>/dev/null; then
     echo "  TTS venv OK"
     TTS_VENV_OK=true
 fi
@@ -153,10 +153,7 @@ if [ "$TTS_VENV_OK" = false ]; then
         transformers uvicorn fastapi python-multipart soundfile scipy \
         "av" --prefer-binary
 
-    echo "    Installing WhisperX + speechbrain..."
-    $TTS_VENV/bin/pip install -q whisperx speechbrain
-
-    if $TTS_VENV/bin/python -c "import transformers; import torch; import whisperx; print(f'TTS venv OK - torch {torch.__version__}')" 2>/dev/null; then
+    if $TTS_VENV/bin/python -c "import transformers; import torch; print(f'TTS venv OK - torch {torch.__version__}')" 2>/dev/null; then
         echo "  TTS venv created successfully"
     else
         echo "  ERROR: TTS venv creation failed! Check manually."
@@ -172,14 +169,27 @@ if [ "$DEPS_ONLY" = true ]; then
 fi
 
 # ===========================================
-# PYTHON — always use tts-venv
-# Barcha servislar shu PYTHON orqali ishga tushadi.
-# System Python da uvicorn/torch yo'q — hech qachon to'g'ridan ishlatilmaydi.
+# PYTHON INTERPRETERS
+# tts-venv  → Demucs, MMS+OV, Prosody (torch cu126 + MMS deps)
+# System py → WhisperX (whisperx/speechbrain installed there by deps step)
+#             uvicorn is also installed there via deps step
 # ===========================================
 PYTHON="$TTS_VENV/bin/python"
 if [ ! -f "$PYTHON" ]; then
     echo "ERROR: tts-venv not found at $TTS_VENV. Run without --skip-deps first."
     exit 1
+fi
+
+# System Python for WhisperX (whisperx lives here, not in tts-venv)
+WHISPERX_PYTHON=$(command -v python3 || command -v python)
+if ! $WHISPERX_PYTHON -c "import whisperx" 2>/dev/null; then
+    echo "WARNING: whisperx not found in system Python ($WHISPERX_PYTHON)."
+    echo "  Run without --skip-deps to install it."
+fi
+# Ensure uvicorn is available in system Python (fast install if missing)
+if ! $WHISPERX_PYTHON -c "import uvicorn" 2>/dev/null; then
+    echo "  Installing uvicorn in system Python..."
+    $WHISPERX_PYTHON -m pip install -q uvicorn fastapi python-multipart
 fi
 
 # ===========================================
@@ -224,10 +234,10 @@ echo "  Starting MMS+OpenVoice on port 8005..."
 cd /workspace/dubber/mms-openvoice-service
 nohup $PYTHON -m uvicorn app:app --host 0.0.0.0 --port 8005 > /tmp/mms.log 2>&1 &
 
-# Start WhisperX on port 8002
+# Start WhisperX on port 8002 (system Python — whisperx installed there)
 echo "  Starting WhisperX on port 8002..."
 cd /workspace/dubber/whisperx-service
-nohup $PYTHON -m uvicorn app:app --host 0.0.0.0 --port 8002 > /tmp/whisperx.log 2>&1 &
+nohup $WHISPERX_PYTHON -m uvicorn app:app --host 0.0.0.0 --port 8002 > /tmp/whisperx.log 2>&1 &
 
 # Start Prosody Transfer on port 8006
 echo "  Starting Prosody Transfer on port 8006..."
