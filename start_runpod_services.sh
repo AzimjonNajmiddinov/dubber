@@ -26,6 +26,7 @@ echo "=== Starting RunPod GPU Services ==="
 pkill -f "uvicorn.*8000" 2>/dev/null || true
 pkill -f "uvicorn.*8002" 2>/dev/null || true
 pkill -f "uvicorn.*8005" 2>/dev/null || true
+pkill -f "uvicorn.*8006" 2>/dev/null || true
 sleep 2
 
 # Pull latest code
@@ -78,7 +79,7 @@ if [ "$SKIP_DEPS" = false ]; then
         "huggingface_hub>=0.25,<1.0.0" \
         "transformers>=4.48,<4.50" \
         "tokenizers>=0.21,<0.24" \
-        uvicorn fastapi python-multipart aiofiles pydantic soundfile librosa
+        uvicorn fastapi python-multipart aiofiles pydantic soundfile librosa pyworld
 
     # Verify torch wasn't changed by transitive dependencies
     TORCH_VER=$(python -c "import torch; print(torch.__version__)" 2>/dev/null || echo "MISSING")
@@ -214,6 +215,11 @@ echo "  Starting WhisperX on port 8002..."
 cd /workspace/dubber/whisperx-service
 nohup python -m uvicorn app:app --host 0.0.0.0 --port 8002 > /tmp/whisperx.log 2>&1 &
 
+# Start Prosody Transfer on port 8006 (CPU only — pyworld)
+echo "  Starting Prosody Transfer on port 8006..."
+cd /workspace/dubber/prosody-transfer-service
+nohup python -m uvicorn app:app --host 0.0.0.0 --port 8006 > /tmp/prosody.log 2>&1 &
+
 
 echo ""
 echo "Waiting for services to load models..."
@@ -244,6 +250,13 @@ else
     echo "FAILED (check: tail /tmp/mms.log)"
 fi
 
+echo -n "  Prosody  (8006):   "
+if check_health "Prosody" 8006 "import sys,json; d=json.load(sys.stdin); assert d.get('status')=='ok'"; then
+    echo "OK"
+else
+    echo "FAILED (check: tail /tmp/prosody.log)"
+fi
+
 echo -n "  WhisperX (8002):  "
 if check_health "WhisperX" 8002 "import sys,json; d=json.load(sys.stdin); assert d.get('ok')"; then
     echo "OK"
@@ -264,5 +277,6 @@ echo "Logs:"
 echo "  tail -f /tmp/demucs.log"
 echo "  tail -f /tmp/mms.log"
 echo "  tail -f /tmp/whisperx.log"
+echo "  tail -f /tmp/prosody.log"
 echo ""
 echo "All logs: tail -f /tmp/*.log"

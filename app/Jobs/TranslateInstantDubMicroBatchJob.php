@@ -120,7 +120,15 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
             ['role' => 'user', 'content' => "Translate:\n\n" . implode("\n", $lines)],
         ];
 
-        // Try Claude first
+        // Try uzbekTranslator local service first (only uz target, en/ru source)
+        if ($this->language === 'uz' && in_array($this->translateFrom, ['en', 'ru'])) {
+            $uzResult = $this->callUzbekTranslator($segments);
+            if ($uzResult !== null) {
+                return $uzResult;
+            }
+        }
+
+        // Try Claude
         $result = $this->callAnthropic($messages);
         if ($result !== null) {
             return $this->parseTranslationResponse($segments, $result);
@@ -141,6 +149,68 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
         }
 
         return $segments;
+    }
+
+    /**
+     * Translate the batch via the uzbekTranslator /translate_dub endpoint.
+     * Sends all segments at once with timing, speaker, and scene context.
+     * Returns translated batch, or null if the service is unavailable.
+     */
+    private function callUzbekTranslator(array $segments): ?array
+    {
+        $serviceUrl = config('services.uzbektranslator.url') ?: env('UZBEKTRANSLATOR_SERVICE_URL');
+        if (!$serviceUrl) return null;
+
+        // Build segment list with timing and speaker for the dub endpoint
+        $dubSegments = [];
+        foreach ($segments as $seg) {
+            $rawText = trim($seg['raw_text'] ?? $seg['text']);
+            if ($rawText === '') continue;
+            $dubSegments[] = [
+                'text'     => $rawText,
+                'speaker'  => $seg['speaker'] ?? 'M1',
+                'duration' => round((float) $seg['end'] - (float) $seg['start'], 2),
+            ];
+        }
+        if (empty($dubSegments)) return null;
+
+        // Use full dialogue as scene context (same as Claude path)
+        $sceneContext = Redis::get("instant-dub:{$this->sessionId}:full-dialogue") ?? '';
+
+        try {
+            $resp = Http::timeout(60)->post("{$serviceUrl}/translate_dub", [
+                'segments'        => $dubSegments,
+                'source_language' => $this->translateFrom,
+                'scene_context'   => mb_substr($sceneContext, 0, 1000), // cap context length
+            ]);
+
+            if (!$resp->successful()) return null;
+
+            $translations = $resp->json('translations');
+            if (!is_array($translations) || count($translations) !== count($dubSegments)) {
+                return null;
+            }
+
+            // Merge translated text back into original segment array
+            $translated = $segments;
+            $j = 0;
+            foreach ($translated as $i => $seg) {
+                $rawText = trim($seg['raw_text'] ?? $seg['text']);
+                if ($rawText === '') continue;
+                $t = $translations[$j++] ?? null;
+                if ($t && !empty(trim($t['text'] ?? ''))) {
+                    $translated[$i]['text']    = trim($t['text']);
+                    $translated[$i]['speaker'] = $t['speaker'] ?? ($seg['speaker'] ?? 'M1');
+                }
+            }
+
+            return $translated;
+        } catch (\Throwable $e) {
+            Log::warning("[DUB] uzbekTranslator /translate_dub error: " . $e->getMessage(), [
+                'session' => $this->sessionId,
+            ]);
+            return null;
+        }
     }
 
     private function callAnthropic(array $messages): ?string

@@ -8,6 +8,7 @@ use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Facades\Redis;
@@ -108,7 +109,12 @@ class DownloadAudioChunkJob implements ShouldQueue
             'session' => $this->sessionId,
         ]);
 
-        $this->generateBgChunkAac($chunkFile);
+        $bgForMix = $chunkFile;
+        if ($this->hasSubtitlesInRange()) {
+            $noVocalsFile = $this->separateVocals($chunkFile, $workDir);
+            $bgForMix = $noVocalsFile ?? $chunkFile;
+        }
+        $this->generateBgChunkAac($bgForMix);
 
         // Check if all TTS segments are ready + bg is now available → set complete/playable
         $this->checkAndSetComplete();
@@ -138,6 +144,103 @@ class DownloadAudioChunkJob implements ShouldQueue
     }
 
     /**
+     * Check if any subtitle segment overlaps this chunk's time range.
+     * Only chunks with dubbed speech need vocal separation.
+     */
+    private function hasSubtitlesInRange(): bool
+    {
+        $sessionKey = "instant-dub:{$this->sessionId}";
+        $sessionJson = Redis::get($sessionKey);
+        if (!$sessionJson) return false;
+
+        $session = json_decode($sessionJson, true);
+        $total = (int) ($session['total_segments'] ?? 0);
+        if ($total === 0) return false;
+
+        for ($i = 0; $i < $total; $i++) {
+            $chunkJson = Redis::get("{$sessionKey}:chunk:{$i}");
+            if (!$chunkJson) continue;
+            $chunk = json_decode($chunkJson, true);
+            $segStart = (float) ($chunk['start_time'] ?? 0);
+            $segEnd   = (float) ($chunk['end_time'] ?? 0);
+            if ($segStart < $this->endTime && $segEnd > $this->startTime) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Upload chunk audio to Demucs RunPod service, download no_vocals track.
+     * Returns local path to no_vocals file, or null on failure (fallback to original).
+     */
+    private function separateVocals(string $audioPath, string $workDir): ?string
+    {
+        $serviceUrl = config('services.demucs.url') ?: env('DEMUCS_SERVICE_URL');
+        if (!$serviceUrl) return null;
+
+        try {
+            $response = Http::timeout(120)
+                ->attach('audio', file_get_contents($audioPath), basename($audioPath))
+                ->post("{$serviceUrl}/separate");
+
+            if ($response->failed()) {
+                Log::warning("[DUB] Demucs separation failed for chunk {$this->chunkIndex}", [
+                    'session' => $this->sessionId,
+                    'status'  => $response->status(),
+                ]);
+                return null;
+            }
+
+            $result      = $response->json();
+            $noVocalsUrl = $result['no_vocals_url'] ?? null;
+            $vocalsUrl   = $result['vocals_url'] ?? null;
+            if (!$noVocalsUrl) return null;
+
+            $noVocalsFile = "{$workDir}/bg_chunk_{$this->chunkIndex}_novocals.wav";
+            $download = Http::timeout(60)->get($noVocalsUrl);
+            if ($download->failed()) return null;
+            file_put_contents($noVocalsFile, $download->body());
+            if (!file_exists($noVocalsFile) || filesize($noVocalsFile) < 100) return null;
+
+            // vocals — prosody transfer uchun referens sifatida saqlanadi
+            if ($vocalsUrl) {
+                $vocalsFile = "{$workDir}/bg_chunk_{$this->chunkIndex}_vocals.wav";
+                $vocDownload = Http::timeout(60)->get($vocalsUrl);
+                if ($vocDownload->successful()) {
+                    file_put_contents($vocalsFile, $vocDownload->body());
+                    if (file_exists($vocalsFile) && filesize($vocalsFile) > 100) {
+                        // bg_chunks ga vocals_path qo'shish
+                        $lock = \Illuminate\Support\Facades\Cache::lock("instant-dub:{$this->sessionId}:bg-lock", 10);
+                        $lock->block(10, function () use ($vocalsFile) {
+                            $sJson = Redis::get("instant-dub:{$this->sessionId}");
+                            if (!$sJson) return;
+                            $s = json_decode($sJson, true);
+                            if (isset($s['bg_chunks'][$this->chunkIndex])) {
+                                $s['bg_chunks'][$this->chunkIndex]['vocals_path'] = $vocalsFile;
+                                Redis::setex("instant-dub:{$this->sessionId}", 50400, json_encode($s));
+                            }
+                        });
+                    }
+                }
+            }
+
+            Log::info("[DUB] Demucs chunk {$this->chunkIndex} separated (" . round(filesize($noVocalsFile) / 1024) . " KB)", [
+                'session' => $this->sessionId,
+            ]);
+
+            return $noVocalsFile;
+        } catch (\Throwable $e) {
+            Log::warning("[DUB] Demucs exception for chunk {$this->chunkIndex}", [
+                'session' => $this->sessionId,
+                'error'   => $e->getMessage(),
+            ]);
+            return null;
+        }
+    }
+
+    /**
      * Generate bg-{chunkIndex}.aac for this chunk's full time range.
      * Contains background audio at 0.2 volume + any TTS segments in range mixed via adelay.
      * Called when the bg chunk downloads. ProcessInstantDubSegmentJob calls it again after TTS arrives.
@@ -155,6 +258,13 @@ class DownloadAudioChunkJob implements ShouldQueue
 
         $chunkDur = round($this->frameAlignedDuration($this->startTime, $this->endTime), 6);
         $outFile  = "{$aacDir}/bg-{$this->chunkIndex}.aac";
+
+        // If vocal-separated file exists for this chunk, prefer it over raw audio
+        $workDir      = storage_path("app/instant-dub/{$this->sessionId}");
+        $noVocalsFile = "{$workDir}/bg_chunk_{$this->chunkIndex}_novocals.wav";
+        if (file_exists($noVocalsFile) && filesize($noVocalsFile) > 100) {
+            $bgAudioPath = $noVocalsFile;
+        }
 
         $cmd      = [
             'ffmpeg', '-y',

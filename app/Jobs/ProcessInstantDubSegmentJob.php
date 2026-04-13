@@ -304,6 +304,80 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         }
     }
 
+    /**
+     * Segment vaqtiga mos vocals referensini topib, prosody-transfer-service ga yuboradi.
+     * Muvaffaqiyatli bo'lsa transfer qilingan WAV faylini qaytaradi, aks holda null.
+     */
+    private function applyProsodyTransfer(string $ttsWav, string $tmpDir): ?string
+    {
+        $serviceUrl = config('services.prosody_transfer.url') ?: env('PROSODY_TRANSFER_SERVICE_URL');
+        if (!$serviceUrl) return null;
+
+        // Segment vaqtini qamrab oluvchi bg_chunk ni topish
+        $sessionJson = Redis::get("instant-dub:{$this->sessionId}");
+        if (!$sessionJson) return null;
+        $session  = json_decode($sessionJson, true);
+        $bgChunks = $session['bg_chunks'] ?? [];
+
+        $vocalsPath = null;
+        $chunkStart = null;
+        foreach ($bgChunks as $bgChunk) {
+            $cs = (float) ($bgChunk['start'] ?? 0);
+            $ce = (float) ($bgChunk['end'] ?? 0);
+            $vp = $bgChunk['vocals_path'] ?? null;
+            if ($vp && file_exists($vp) && $this->startTime < $ce && $this->endTime > $cs) {
+                $vocalsPath = $vp;
+                $chunkStart = $cs;
+                break;
+            }
+        }
+        if (!$vocalsPath) return null;
+
+        // Vocals faylidan segment vaqtini kesish
+        $segOffset = max(0.0, $this->startTime - $chunkStart);
+        $segDur    = $this->endTime - $this->startTime;
+        $refClip   = "{$tmpDir}/ref_{$this->index}.wav";
+
+        $cut = Process::timeout(10)->run([
+            'ffmpeg', '-y',
+            '-ss', (string) round($segOffset, 3),
+            '-t',  (string) round($segDur, 3),
+            '-i',  $vocalsPath,
+            $refClip,
+        ]);
+        if (!$cut->successful() || !file_exists($refClip) || filesize($refClip) < 100) {
+            return null;
+        }
+
+        try {
+            $outWav = "{$tmpDir}/seg_{$this->index}_prosody.wav";
+            $resp = \Illuminate\Support\Facades\Http::timeout(30)
+                ->attach('tts_audio',  file_get_contents($ttsWav),  'tts.wav')
+                ->attach('reference',  file_get_contents($refClip), 'ref.wav')
+                ->post("{$serviceUrl}/transfer", [
+                    'f0_mode'         => 'contour',
+                    'energy_transfer' => 'true',
+                ]);
+
+            @unlink($refClip);
+
+            if ($resp->failed()) return null;
+
+            file_put_contents($outWav, $resp->body());
+            if (!file_exists($outWav) || filesize($outWav) < 100) return null;
+
+            Log::info("[DUB] Prosody transfer ok — seg #{$this->index}", ['session' => $this->sessionId]);
+            return $outWav;
+
+        } catch (\Throwable $e) {
+            @unlink($refClip);
+            Log::warning("[DUB] Prosody transfer failed — seg #{$this->index}: " . $e->getMessage(), [
+                'session' => $this->sessionId,
+            ]);
+            return null;
+        }
+    }
+
     private function generateWithMms(string $outputMp3, string $tmpDir, array $speakerEntry = []): void
     {
         $gender = $speakerEntry['gender']
@@ -344,12 +418,17 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         $tmpWav = "{$tmpDir}/seg_{$this->index}_mms.wav";
         file_put_contents($tmpWav, $wavData);
 
+        // Prosody transfer: referens vocals topilsa, F0+energy ko'chirish
+        $transferredWav = $this->applyProsodyTransfer($tmpWav, $tmpDir);
+        $sourceWav = $transferredWav ?? $tmpWav;
+
         $result = Process::timeout(15)->run([
-            'ffmpeg', '-y', '-i', $tmpWav,
+            'ffmpeg', '-y', '-i', $sourceWav,
             '-codec:a', 'libmp3lame', '-b:a', '128k',
             $outputMp3,
         ]);
         @unlink($tmpWav);
+        if ($transferredWav) @unlink($transferredWav);
 
         if (!$result->successful() || !file_exists($outputMp3) || filesize($outputMp3) < 200) {
             throw new \RuntimeException('MMS WAV→MP3 conversion failed');

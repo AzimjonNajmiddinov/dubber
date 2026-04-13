@@ -76,6 +76,14 @@ return [
         'url' => env('MMS_TTS_SERVICE_URL', 'http://localhost:8005'),
     ],
 
+    'uzbektranslator' => [
+        'url' => env('UZBEKTRANSLATOR_SERVICE_URL'),
+    ],
+
+    'prosody_transfer' => [
+        'url' => env('PROSODY_TRANSFER_SERVICE_URL'),
+    ],
+
     'elevenlabs' => [
         'api_key' => env('ELEVENLABS_API_KEY', ''),
     ],

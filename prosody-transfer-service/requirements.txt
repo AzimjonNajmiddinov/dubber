@@ -1,0 +1,6 @@
+pyworld
+numpy
+scipy
+soundfile
+fastapi
+uvicorn
