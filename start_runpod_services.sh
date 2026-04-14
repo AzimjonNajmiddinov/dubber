@@ -27,6 +27,7 @@ pkill -f "uvicorn.*8000" 2>/dev/null || true
 pkill -f "uvicorn.*8002" 2>/dev/null || true
 pkill -f "uvicorn.*8005" 2>/dev/null || true
 pkill -f "uvicorn.*8006" 2>/dev/null || true
+pkill -f "uvicorn.*8007" 2>/dev/null || true
 sleep 2
 
 # Pull latest code
@@ -249,6 +250,11 @@ echo "  Starting Prosody Transfer on port 8006..."
 cd /workspace/dubber/prosody-transfer-service
 nohup $PYTHON -m uvicorn app:app --host 0.0.0.0 --port 8006 > /tmp/prosody.log 2>&1 &
 
+# Start Voice Clone (MMS TTS + WORLD prosody) on port 8007
+echo "  Starting Voice Clone on port 8007..."
+cd /workspace/dubber/voice-clone-service
+nohup $PYTHON -m uvicorn app:app --host 0.0.0.0 --port 8007 > /tmp/voice-clone.log 2>&1 &
+
 
 echo ""
 echo "Waiting for services to load models..."
@@ -286,6 +292,13 @@ else
     echo "FAILED (check: tail /tmp/prosody.log)"
 fi
 
+echo -n "  VoiceClone (8007): "
+if check_health "VoiceClone" 8007 "import sys,json; d=json.load(sys.stdin); assert d.get('status') in ('ok','loading')"; then
+    echo "OK (model loading in background)"
+else
+    echo "FAILED (check: tail /tmp/voice-clone.log)"
+fi
+
 echo -n "  WhisperX (8002):  "
 if check_health "WhisperX" 8002 "import sys,json; d=json.load(sys.stdin); assert d.get('ok')"; then
     echo "OK"
@@ -307,5 +320,6 @@ echo "  tail -f /tmp/demucs.log"
 echo "  tail -f /tmp/mms.log"
 echo "  tail -f /tmp/whisperx.log"
 echo "  tail -f /tmp/prosody.log"
+echo "  tail -f /tmp/voice-clone.log"
 echo ""
 echo "All logs: tail -f /tmp/*.log"
