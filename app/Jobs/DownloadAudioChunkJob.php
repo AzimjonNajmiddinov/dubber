@@ -294,8 +294,10 @@ class DownloadAudioChunkJob implements ShouldQueue
         // If vocal-separated file exists for this chunk, prefer it over raw audio
         $workDir      = storage_path("app/instant-dub/{$this->sessionId}");
         $noVocalsFile = "{$workDir}/bg_chunk_{$this->chunkIndex}_novocals.wav";
+        $isNoVocals   = false;
         if (file_exists($noVocalsFile) && filesize($noVocalsFile) > 100) {
             $bgAudioPath = $noVocalsFile;
+            $isNoVocals  = true;
         }
 
         $cmd      = [
@@ -303,7 +305,11 @@ class DownloadAudioChunkJob implements ShouldQueue
             '-f', 'lavfi', '-t', (string) $chunkDur, '-i', 'anullsrc=r=44100:cl=mono',
             '-t', (string) $chunkDur, '-i', $bgAudioPath,
         ];
-        $filters   = ["[1:a]dynaudnorm=f=150:g=15:p=0.7,aresample=44100[bg]"];
+        // no_vocals has ~6-12dB less energy (speech removed) → boost to compensate.
+        // Raw audio is already at natural level → keep at 1.0.
+        // Simple fixed gain avoids dynaudnorm/loudnorm artifacts on short clips.
+        $bgVolume  = $isNoVocals ? '3.0' : '1.0';
+        $filters   = ["[1:a]volume={$bgVolume},aresample=44100[bg]"];
         $mixInputs = ['[0:a]', '[bg]'];
         $inputIdx  = 2;
         $tmpFiles  = [];
@@ -445,7 +451,7 @@ class DownloadAudioChunkJob implements ShouldQueue
                     ->attach('tts_audio',  file_get_contents($ttsWav),  'tts.wav')
                     ->attach('reference',  file_get_contents($refClip), 'ref.wav')
                     ->post(rtrim($serviceUrl, '/') . '/transfer', [
-                        'energy_transfer' => 'false',
+                        'energy_transfer' => 'true',
                     ]);
 
                 @unlink($ttsWav);

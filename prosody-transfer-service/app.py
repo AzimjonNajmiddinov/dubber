@@ -89,8 +89,13 @@ def rms_gain_transfer(
     rms_ref_interp = np.interp(t_src, t_ref, rms_ref).astype(np.float32)
 
     # Gain = ref_rms / src_rms, clipped to prevent extreme amplification
-    # Max 2.0 to avoid noise-floor amplification (hissing artifacts at 4.0)
     gain_frames = np.clip(rms_ref_interp / (rms_src + 1e-10), 0.2, 2.0)
+
+    # Noise gate: during TTS silence frames, hold gain at 1.0 to avoid
+    # amplifying noise floor (which causes hissing artifacts).
+    # Threshold ~-40dBFS: frames below this are considered silence.
+    silence_threshold = 0.01
+    gain_frames = np.where(rms_src < silence_threshold, 1.0, gain_frames)
 
     # Smooth gain to avoid clicks at frame boundaries
     if smooth_frames > 1:
