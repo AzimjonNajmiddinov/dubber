@@ -440,12 +440,11 @@ class DownloadAudioChunkJob implements ShouldQueue
                     continue;
                 }
 
-                // Call prosody transfer service
+                // Call prosody transfer service (RMS gain envelope only, no WORLD)
                 $resp = \Illuminate\Support\Facades\Http::timeout(30)
                     ->attach('tts_audio',  file_get_contents($ttsWav),  'tts.wav')
                     ->attach('reference',  file_get_contents($refClip), 'ref.wav')
                     ->post(rtrim($serviceUrl, '/') . '/transfer', [
-                        'f0_mode'         => 'contour',
                         'energy_transfer' => 'true',
                     ]);
 
