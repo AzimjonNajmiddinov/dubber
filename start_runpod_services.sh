@@ -235,9 +235,9 @@ echo "  Starting Demucs on port 8000..."
 cd /workspace/dubber/demucs-service
 nohup $PYTHON -m uvicorn app_runpod:app --host 0.0.0.0 --port 8000 > /tmp/demucs.log 2>&1 &
 
-# Start MMS+SeedVC on port 8005
-echo "  Starting MMS+SeedVC on port 8005..."
-cd /workspace/dubber/seed-vc-service
+# Start MMS+OpenVoice on port 8005
+echo "  Starting MMS+OpenVoice on port 8005..."
+cd /workspace/dubber/mms-openvoice-service
 nohup $PYTHON -m uvicorn app:app --host 0.0.0.0 --port 8005 > /tmp/mms.log 2>&1 &
 
 # Start WhisperX on port 8002 (system Python — whisperx installed there)
