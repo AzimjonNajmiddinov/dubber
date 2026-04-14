@@ -303,7 +303,7 @@ class DownloadAudioChunkJob implements ShouldQueue
             '-f', 'lavfi', '-t', (string) $chunkDur, '-i', 'anullsrc=r=44100:cl=mono',
             '-t', (string) $chunkDur, '-i', $bgAudioPath,
         ];
-        $filters   = ["[1:a]loudnorm=I=-20:TP=-1.5:LRA=11:linear=true,aresample=44100[bg]"];
+        $filters   = ["[1:a]dynaudnorm=f=150:g=15:p=0.7,aresample=44100[bg]"];
         $mixInputs = ['[0:a]', '[bg]'];
         $inputIdx  = 2;
         $tmpFiles  = [];
@@ -445,7 +445,7 @@ class DownloadAudioChunkJob implements ShouldQueue
                     ->attach('tts_audio',  file_get_contents($ttsWav),  'tts.wav')
                     ->attach('reference',  file_get_contents($refClip), 'ref.wav')
                     ->post(rtrim($serviceUrl, '/') . '/transfer', [
-                        'energy_transfer' => 'true',
+                        'energy_transfer' => 'false',
                     ]);
 
                 @unlink($ttsWav);
