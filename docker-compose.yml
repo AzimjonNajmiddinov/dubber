@@ -28,6 +28,7 @@ services:
     command: php -d memory_limit=512M artisan horizon
     volumes:
       - .:/var/www
+      - ./docker/php/php.ini:/usr/local/etc/php/conf.d/uploads.ini
     depends_on:
       redis:
         condition: service_started
