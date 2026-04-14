@@ -89,7 +89,8 @@ def rms_gain_transfer(
     rms_ref_interp = np.interp(t_src, t_ref, rms_ref).astype(np.float32)
 
     # Gain = ref_rms / src_rms, clipped to prevent extreme amplification
-    gain_frames = np.clip(rms_ref_interp / (rms_src + 1e-10), 0.15, 4.0)
+    # Max 2.0 to avoid noise-floor amplification (hissing artifacts at 4.0)
+    gain_frames = np.clip(rms_ref_interp / (rms_src + 1e-10), 0.2, 2.0)
 
     # Smooth gain to avoid clicks at frame boundaries
     if smooth_frames > 1:
@@ -109,7 +110,7 @@ async def transfer(
     reference:       UploadFile = File(...),
     energy_transfer: bool       = Form(True),
     frame_ms:        int        = Form(20),
-    smooth_frames:   int        = Form(7),
+    smooth_frames:   int        = Form(15),
 ):
     """
     TTS audio + referens → referens energiya dinamikasi bilan natija audio.

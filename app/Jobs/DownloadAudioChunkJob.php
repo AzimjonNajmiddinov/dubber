@@ -303,7 +303,7 @@ class DownloadAudioChunkJob implements ShouldQueue
             '-f', 'lavfi', '-t', (string) $chunkDur, '-i', 'anullsrc=r=44100:cl=mono',
             '-t', (string) $chunkDur, '-i', $bgAudioPath,
         ];
-        $filters   = ["[1:a]volume=1.0,aresample=44100[bg]"];
+        $filters   = ["[1:a]loudnorm=I=-20:TP=-1.5:LRA=11:linear=true,aresample=44100[bg]"];
         $mixInputs = ['[0:a]', '[bg]'];
         $inputIdx  = 2;
         $tmpFiles  = [];
