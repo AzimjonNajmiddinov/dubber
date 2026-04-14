@@ -561,13 +561,16 @@ class InstantDubController extends Controller
         $readyCount = 0;
 
         if (!empty($bgChunks)) {
-            // Only list segments whose bg-*.aac file is actually on disk.
-            // PlayerKit fetches the playlist every few seconds — new segments appear
-            // as they're generated. This prevents serving silence for unready files.
+            // Only list segments in strict sequential order (0,1,2,...).
+            // Stop at the first gap or missing file — HLS EVENT playlists are
+            // append-only, so a gap would cause the player to jump in time and
+            // desync (or fall back to the original audio track).
             ksort($bgChunks);
             foreach ($bgChunks as $bgIdx => $bgChunk) {
+                // Require strict sequence: 0, 1, 2, ...
+                if ($bgIdx !== $readyCount) break;
                 $aacFile = "{$aacDir}/bg-{$bgIdx}.aac";
-                if (!file_exists($aacFile) || filesize($aacFile) <= 10) continue;
+                if (!file_exists($aacFile) || filesize($aacFile) <= 10) break;
                 $cs  = (float) ($bgChunk['start'] ?? 0);
                 $ce  = (float) ($bgChunk['end'] ?? 0);
                 $dur = round($this->frameAlignedDuration($cs, $ce), 6);
