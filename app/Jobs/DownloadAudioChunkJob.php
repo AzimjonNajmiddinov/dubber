@@ -203,7 +203,7 @@ class DownloadAudioChunkJob implements ShouldQueue
             try {
                 $response = Http::timeout(120)
                     ->attach('audio', file_get_contents($sendPath), 'audio.wav')
-                    ->post("{$serviceUrl}/separate");
+                    ->post("{$serviceUrl}/separate", ['model' => 'htdemucs_ft']);
             } finally {
                 $demucsLock->release();
                 if ($tmpWav) @unlink($tmpWav);
@@ -306,7 +306,7 @@ class DownloadAudioChunkJob implements ShouldQueue
             '-f', 'lavfi', '-t', (string) $chunkDur, '-i', 'anullsrc=r=44100:cl=mono',
             '-t', (string) $chunkDur, '-i', $bgAudioPath,
         ];
-        $filters   = ["[1:a]loudnorm=I=-18:TP=-1:LRA=7:linear=true,aresample=44100[bg]"];
+        $filters   = ["[1:a]volume=1.0,aresample=44100[bg]"];
         $mixInputs = ['[0:a]', '[bg]'];
         $inputIdx  = 2;
         $tmpFiles  = [];
