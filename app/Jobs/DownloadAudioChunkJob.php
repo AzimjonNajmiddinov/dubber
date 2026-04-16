@@ -291,11 +291,26 @@ class DownloadAudioChunkJob implements ShouldQueue
         $chunkDur = round($this->frameAlignedDuration($this->startTime, $this->endTime), 6);
         $outFile  = "{$aacDir}/bg-{$this->chunkIndex}.aac";
 
-        // If vocal-separated file exists for this chunk, prefer it over raw audio
+        // If vocal-separated file exists and has real content, prefer it over raw audio.
+        // If no_vocals is essentially silent (mean < -45dB, no background music),
+        // fall back to original audio at -20dB (Russian voice barely audible, no static).
         $workDir      = storage_path("app/instant-dub/{$this->sessionId}");
         $noVocalsFile = "{$workDir}/bg_chunk_{$this->chunkIndex}_novocals.wav";
+        $bgVolume     = '1.0';
         if (file_exists($noVocalsFile) && filesize($noVocalsFile) > 100) {
-            $bgAudioPath = $noVocalsFile;
+            $meanDb = $this->getAudioMeanDb($noVocalsFile);
+            if ($meanDb !== null && $meanDb < -45.0) {
+                // no_vocals is essentially empty — use original audio very quietly
+                // to avoid amplifying Demucs artifacts into audible static.
+                $originalPath = $session['bg_chunks'][$this->chunkIndex]['path'] ?? null;
+                if ($originalPath && file_exists($originalPath)) {
+                    $bgAudioPath = $originalPath;
+                    $bgVolume    = '0.1'; // -20dB: Russian voice barely audible
+                }
+                // else: keep bgAudioPath as-is (raw download) at volume=1.0
+            } else {
+                $bgAudioPath = $noVocalsFile;
+            }
         }
 
         $cmd      = [
@@ -303,10 +318,7 @@ class DownloadAudioChunkJob implements ShouldQueue
             '-f', 'lavfi', '-t', (string) $chunkDur, '-i', 'anullsrc=r=44100:cl=mono',
             '-t', (string) $chunkDur, '-i', $bgAudioPath,
         ];
-        // Normalize background to -18 dBFS. afftdn removes Demucs white-noise
-        // artifacts (the "radio static" that appears in speech regions of no_vocals).
-        $bgGainDb  = $this->measureVolumeGain($bgAudioPath, -18.0);
-        $filters   = ["[1:a]afftdn=nf=-20,volume={$bgGainDb}dB,aresample=44100[bg]"];
+        $filters   = ["[1:a]volume={$bgVolume},aresample=44100[bg]"];
         $mixInputs = ['[0:a]', '[bg]'];
         $inputIdx  = 2;
         $tmpFiles  = [];
@@ -363,24 +375,16 @@ class DownloadAudioChunkJob implements ShouldQueue
         }
     }
 
-    /**
-     * Measure mean volume of an audio file and return the gain (dB) needed
-     * to reach $targetDb. Clamped to [-6, +18] dB to avoid extremes.
-     */
-    private function measureVolumeGain(string $audioPath, float $targetDb = -20.0): float
+    private function getAudioMeanDb(string $audioPath): ?float
     {
         $result = Process::timeout(10)->run([
-            'ffmpeg', '-i', $audioPath,
-            '-af', 'volumedetect',
-            '-vn', '-sn', '-dn',
-            '-f', 'null', '/dev/null',
+            'ffmpeg', '-i', $audioPath, '-af', 'volumedetect',
+            '-vn', '-sn', '-dn', '-f', 'null', '/dev/null',
         ]);
         if (preg_match('/mean_volume:\s*([-\d.]+)\s*dB/', $result->errorOutput(), $m)) {
-            $meanDb = (float) $m[1];
-            return max(-6.0, min(18.0, $targetDb - $meanDb));
+            return (float) $m[1];
         }
-        // Fallback: no measurement → no gain change
-        return 0.0;
+        return null;
     }
 
     private function frameAlignedDuration(float $start, float $end): float
