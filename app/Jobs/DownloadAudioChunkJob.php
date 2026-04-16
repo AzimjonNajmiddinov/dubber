@@ -303,10 +303,10 @@ class DownloadAudioChunkJob implements ShouldQueue
             '-f', 'lavfi', '-t', (string) $chunkDur, '-i', 'anullsrc=r=44100:cl=mono',
             '-t', (string) $chunkDur, '-i', $bgAudioPath,
         ];
-        // Normalize background to -16 dBFS. For no_vocals: agate silences Demucs
-        // hissing artifacts (which appear in speech regions after vocal removal).
-        $bgGainDb  = $this->measureVolumeGain($bgAudioPath, -16.0);
-        $filters   = ["[1:a]agate=threshold=0.015:ratio=8:attack=10:release=100,volume={$bgGainDb}dB,aresample=44100[bg]"];
+        // Normalize background to -18 dBFS. afftdn removes Demucs white-noise
+        // artifacts (the "radio static" that appears in speech regions of no_vocals).
+        $bgGainDb  = $this->measureVolumeGain($bgAudioPath, -18.0);
+        $filters   = ["[1:a]afftdn=nf=-20,volume={$bgGainDb}dB,aresample=44100[bg]"];
         $mixInputs = ['[0:a]', '[bg]'];
         $inputIdx  = 2;
         $tmpFiles  = [];
