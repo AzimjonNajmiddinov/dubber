@@ -109,14 +109,19 @@ class DownloadAudioChunkJob implements ShouldQueue
             'session' => $this->sessionId,
         ]);
 
-        $bgForMix = $chunkFile;
+        // Generate bg chunk immediately with raw audio so the playlist never stalls.
+        // For subtitle chunks, Demucs can take 10-15s; generating raw first ensures
+        // the player always has the next segment on time.
+        $this->generateBgChunkAac($chunkFile);
+
         if ($this->hasSubtitlesInRange()) {
             $noVocalsFile = $this->separateVocals($chunkFile, $workDir);
-            $bgForMix = $noVocalsFile ?? $chunkFile;
-            // Vocals ready — apply prosody transfer to overlapping TTS segments
-            $this->applyProsodyToOverlappingSegments($workDir);
+            if ($noVocalsFile) {
+                // Demucs done — apply prosody and overwrite bg chunk with cleaner audio
+                $this->applyProsodyToOverlappingSegments($workDir);
+                $this->generateBgChunkAac($chunkFile); // no_vocals auto-selected inside
+            }
         }
-        $this->generateBgChunkAac($bgForMix);
 
         // Check if all TTS segments are ready + bg is now available → set complete/playable
         $this->checkAndSetComplete();
