@@ -294,10 +294,8 @@ class DownloadAudioChunkJob implements ShouldQueue
         // If vocal-separated file exists for this chunk, prefer it over raw audio
         $workDir      = storage_path("app/instant-dub/{$this->sessionId}");
         $noVocalsFile = "{$workDir}/bg_chunk_{$this->chunkIndex}_novocals.wav";
-        $isNoVocals   = false;
         if (file_exists($noVocalsFile) && filesize($noVocalsFile) > 100) {
             $bgAudioPath = $noVocalsFile;
-            $isNoVocals  = true;
         }
 
         $cmd      = [
@@ -305,11 +303,10 @@ class DownloadAudioChunkJob implements ShouldQueue
             '-f', 'lavfi', '-t', (string) $chunkDur, '-i', 'anullsrc=r=44100:cl=mono',
             '-t', (string) $chunkDur, '-i', $bgAudioPath,
         ];
-        // no_vocals has ~6-12dB less energy (speech removed) → boost to compensate.
-        // Raw audio is already at natural level → keep at 1.0.
-        // Simple fixed gain avoids dynaudnorm/loudnorm artifacts on short clips.
-        $bgVolume  = $isNoVocals ? '3.0' : '1.0';
-        $filters   = ["[1:a]volume={$bgVolume},aresample=44100[bg]"];
+        // Normalize background to a fixed target (-20 dBFS mean) so that
+        // no_vocals (quieter after vocal removal) and raw audio sound at the same level.
+        $bgGainDb  = $this->measureVolumeGain($bgAudioPath, -20.0);
+        $filters   = ["[1:a]volume={$bgGainDb}dB,aresample=44100[bg]"];
         $mixInputs = ['[0:a]', '[bg]'];
         $inputIdx  = 2;
         $tmpFiles  = [];
@@ -364,6 +361,26 @@ class DownloadAudioChunkJob implements ShouldQueue
                 'error'   => Str::limit($result->errorOutput(), 300),
             ]);
         }
+    }
+
+    /**
+     * Measure mean volume of an audio file and return the gain (dB) needed
+     * to reach $targetDb. Clamped to [-6, +18] dB to avoid extremes.
+     */
+    private function measureVolumeGain(string $audioPath, float $targetDb = -20.0): float
+    {
+        $result = Process::timeout(10)->run([
+            'ffmpeg', '-i', $audioPath,
+            '-af', 'volumedetect',
+            '-vn', '-sn', '-dn',
+            '-f', 'null', '/dev/null',
+        ]);
+        if (preg_match('/mean_volume:\s*([-\d.]+)\s*dB/', $result->errorOutput(), $m)) {
+            $meanDb = (float) $m[1];
+            return max(-6.0, min(18.0, $targetDb - $meanDb));
+        }
+        // Fallback: no measurement → no gain change
+        return 0.0;
     }
 
     private function frameAlignedDuration(float $start, float $end): float
