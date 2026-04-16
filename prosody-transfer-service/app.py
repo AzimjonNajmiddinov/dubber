@@ -88,12 +88,11 @@ def rms_gain_transfer(
     t_ref = np.linspace(0, 1, len(rms_ref))
     rms_ref_interp = np.interp(t_src, t_ref, rms_ref).astype(np.float32)
 
-    # Gain = ref_rms / src_rms, clipped to prevent extreme amplification
-    gain_frames = np.clip(rms_ref_interp / (rms_src + 1e-10), 0.2, 2.0)
+    # Gain = ref_rms / src_rms — tighter range to avoid extreme loud/quiet swings
+    gain_frames = np.clip(rms_ref_interp / (rms_src + 1e-10), 0.5, 1.5)
 
     # Noise gate: during TTS silence frames, hold gain at 1.0 to avoid
     # amplifying noise floor (which causes hissing artifacts).
-    # Threshold ~-40dBFS: frames below this are considered silence.
     silence_threshold = 0.01
     gain_frames = np.where(rms_src < silence_threshold, 1.0, gain_frames)
 
@@ -142,10 +141,15 @@ async def transfer(
         else:
             out_audio = src.copy()
 
-        # Normalize — peak 0.95
-        peak = np.abs(out_audio).max()
-        if peak > 0:
-            out_audio = out_audio / peak * 0.95
+        # Normalize to target RMS (-18 dBFS) so TTS stays at a consistent level
+        # regardless of how much energy transfer boosted/reduced it.
+        # Dynamics within the segment are preserved; only the absolute level is fixed.
+        target_rms = 10 ** (-18 / 20)   # ≈ 0.126
+        current_rms = np.sqrt(np.mean(out_audio ** 2))
+        if current_rms > 1e-6:
+            out_audio = out_audio * (target_rms / current_rms)
+        # Hard clip to prevent rare clipping after gain
+        out_audio = np.clip(out_audio, -1.0, 1.0)
 
         out_path = CACHE_PATH / f"{uuid.uuid4()}.wav"
         sf.write(str(out_path), out_audio, TARGET_SR)
