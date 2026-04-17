@@ -153,8 +153,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                     $path = $bgChunk['path'] ?? null;
                     if ($path && file_exists($path) && $this->startTime < $ce && $this->endTime > $cs) {
                         $job = new DownloadAudioChunkJob($this->sessionId, (int) $bgIdx, $cs, $ce);
-                        // This bg chunk overlaps a TTS segment → duck background
-                        $job->generateBgChunkAac($path, true);
+                        $job->generateBgChunkAac($path);
                     }
                 }
             }

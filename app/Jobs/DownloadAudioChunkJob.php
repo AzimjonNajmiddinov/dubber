@@ -109,18 +109,19 @@ class DownloadAudioChunkJob implements ShouldQueue
             'session' => $this->sessionId,
         ]);
 
-        // Background strategy:
-        // - subtitle chunks: duck original audio by -20dB so Russian speech is barely
-        //   audible (10% amplitude) while music/ambience is preserved. No Demucs needed.
-        // - non-subtitle chunks: original audio at full volume.
-        // Demucs still runs for prosody reference only (energy transfer to TTS).
+        // Generate bg immediately with raw audio — no playlist stall.
+        // Demucs runs after for subtitle chunks: no_vocals replaces bg if peak-normalized
+        // gain brings it to the same level as raw audio (consistent volume, no Russian speech).
         $hasSubtitles = $this->hasSubtitlesInRange();
-        $this->generateBgChunkAac($chunkFile, $hasSubtitles);
+        $this->generateBgChunkAac($chunkFile, false);
 
         if ($hasSubtitles) {
             $noVocalsFile = $this->separateVocals($chunkFile, $workDir);
             if ($noVocalsFile) {
                 $this->applyProsodyToOverlappingSegments($workDir);
+                // Overwrite bg with no_vocals normalized to raw audio peak level.
+                // Peak-based (not mean) avoids over-amplifying Demucs noise floor.
+                $this->generateBgChunkAac($chunkFile, false, $noVocalsFile);
             }
         }
 
@@ -280,11 +281,10 @@ class DownloadAudioChunkJob implements ShouldQueue
 
     /**
      * Generate bg-{chunkIndex}.aac for this chunk's full time range.
-     * $duckBackground=true: duck original audio by -20dB (subtitle chunk — Russian speech
-     * becomes inaudible while music/ambience is preserved; no Demucs artifacts).
-     * $duckBackground=false: full volume (non-subtitle chunk).
+     * If $noVocalsPath is given, use it normalized to match $bgAudioPath peak level
+     * so background volume stays consistent (no Russian speech, same loudness).
      */
-    public function generateBgChunkAac(string $bgAudioPath, bool $duckBackground = false): void
+    public function generateBgChunkAac(string $bgAudioPath, bool $duckBackground = false, ?string $noVocalsPath = null): void
     {
         $sessionKey = "instant-dub:{$this->sessionId}";
         $sessionJson = Redis::get($sessionKey);
@@ -298,13 +298,25 @@ class DownloadAudioChunkJob implements ShouldQueue
         $chunkDur = round($this->frameAlignedDuration($this->startTime, $this->endTime), 6);
         $outFile  = "{$aacDir}/bg-{$this->chunkIndex}.aac";
 
-        // Subtitle chunk: duck by -20dB so Russian speech is barely audible (0.1x amplitude).
-        // Non-subtitle chunk: full volume. No Demucs used for background.
-        $bgVolume = $duckBackground ? '0.1' : '1.0';
+        // If no_vocals provided, use it normalized to raw audio peak → same loudness, no Russian speech.
+        // Peak-based gain avoids over-amplifying Demucs noise floor (mean includes silence).
+        $useAudio = $bgAudioPath;
+        $bgVolume = '1.0';
+        if ($noVocalsPath && file_exists($noVocalsPath)) {
+            $rawPeakDb     = $this->getAudioPeakDb($bgAudioPath);
+            $noVocalsPeakDb = $this->getAudioPeakDb($noVocalsPath);
+            if ($rawPeakDb !== null && $noVocalsPeakDb !== null && $noVocalsPeakDb > -60.0) {
+                $gainDb   = round($rawPeakDb - $noVocalsPeakDb, 1);
+                // Clamp: max +30dB boost, never cut (no_vocals should only need boosting)
+                $gainDb   = min(30.0, max(0.0, $gainDb));
+                $useAudio = $noVocalsPath;
+                $bgVolume = round(pow(10, $gainDb / 20), 4) . ''; // dB → linear
+            }
+        }
         $cmd      = [
             'ffmpeg', '-y',
             '-f', 'lavfi', '-t', (string) $chunkDur, '-i', 'anullsrc=r=44100:cl=mono',
-            '-t', (string) $chunkDur, '-i', $bgAudioPath,
+            '-t', (string) $chunkDur, '-i', $useAudio,
         ];
         $filters   = ["[1:a]volume={$bgVolume},aresample=44100[bg]"];
         $mixInputs = ['[0:a]', '[bg]'];
@@ -361,6 +373,18 @@ class DownloadAudioChunkJob implements ShouldQueue
                 'error'   => Str::limit($result->errorOutput(), 300),
             ]);
         }
+    }
+
+    private function getAudioPeakDb(string $audioPath): ?float
+    {
+        $result = Process::timeout(10)->run([
+            'ffmpeg', '-i', $audioPath, '-af', 'volumedetect',
+            '-vn', '-sn', '-dn', '-f', 'null', '/dev/null',
+        ]);
+        if (preg_match('/max_volume:\s*([-\d.]+)\s*dB/', $result->errorOutput(), $m)) {
+            return (float) $m[1];
+        }
+        return null;
     }
 
     private function frameAlignedDuration(float $start, float $end): float
