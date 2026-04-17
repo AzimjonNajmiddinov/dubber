@@ -10,7 +10,7 @@ class AdminController extends Controller
     public function loginForm()
     {
         if (Auth::check()) {
-            return redirect()->route('admin.premium-dub');
+            return redirect()->route('admin.dubs.index');
         }
 
         return view('admin.login');
@@ -29,7 +29,7 @@ class AdminController extends Controller
 
         $request->session()->regenerate();
 
-        return redirect()->route('admin.premium-dub');
+        return redirect()->route('admin.dubs.index');
     }
 
     public function logout(Request $request)

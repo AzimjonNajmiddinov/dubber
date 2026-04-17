@@ -58,7 +58,7 @@ Route::post('/admin/login', [AdminController::class, 'login'])->name('admin.logi
 Route::post('/admin/logout', [AdminController::class, 'logout'])->name('admin.logout');
 
 Route::middleware('admin.auth')->prefix('admin')->name('admin.')->group(function () {
-    Route::get('/', fn() => redirect()->route('admin.premium-dub'));
+    Route::get('/', fn() => redirect()->route('admin.dubs.index'));
 
     Route::get('/dubs', [AdminDubController::class, 'index'])->name('dubs.index');
     Route::get('/dubs/{dub}', [AdminDubController::class, 'show'])->name('dubs.show');
