@@ -38,24 +38,22 @@ Route::prefix('live')->group(function () {
     Route::get('/{video}/status', [LiveDubController::class, 'status'])->name('api.live.status');
 });
 
-// Instant dub API (SRT → TTS → play over video)
-Route::prefix('instant-dub')->group(function () {
-    Route::post('/start', [InstantDubController::class, 'start'])->name('api.instant-dub.start');
-    Route::get('/{sessionId}/poll', [InstantDubController::class, 'poll'])->name('api.instant-dub.poll');
-    Route::post('/{sessionId}/stop', [InstantDubController::class, 'stop'])->name('api.instant-dub.stop');
-    Route::get('/{sessionId}/events', [InstantDubController::class, 'events'])->name('api.instant-dub.events');
-
-    // HLS endpoints for PlayerKit integration
-    Route::get('/{sessionId}/master.m3u8', [InstantDubController::class, 'hlsMaster'])->name('api.instant-dub.master');
-    Route::get('/{sessionId}/dub-audio.m3u8', [InstantDubController::class, 'hlsAudioPlaylist'])->name('api.instant-dub.dub-audio');
-    Route::get('/{sessionId}/dub-segment/init.mp4', [InstantDubController::class, 'hlsInitSegment'])->name('api.instant-dub.dub-init');
-    Route::get('/{sessionId}/dub-segment/lead.aac', [InstantDubController::class, 'hlsLeadSegment'])->name('api.instant-dub.dub-lead');
-    Route::get('/{sessionId}/dub-segment/bg-{index}.aac', [InstantDubController::class, 'hlsBgSegment'])->whereNumber('index')->name('api.instant-dub.dub-bg');
-    Route::get('/{sessionId}/dub-segment/tail.aac', [InstantDubController::class, 'hlsTailSegment'])->name('api.instant-dub.dub-tail');
-    Route::get('/{sessionId}/dub-segment/gap-{index}.aac', [InstantDubController::class, 'hlsGapSegment'])->whereNumber('index')->name('api.instant-dub.dub-gap');
-    Route::get('/{sessionId}/dub-segment/{index}.aac', [InstantDubController::class, 'hlsAudioSegment'])->whereNumber('index')->name('api.instant-dub.dub-segment');
-    Route::get('/{sessionId}/dub-subtitles.m3u8', [InstantDubController::class, 'hlsSubtitlePlaylist'])->name('api.instant-dub.dub-subtitles');
-    Route::get('/{sessionId}/dub-subtitles.vtt', [InstantDubController::class, 'hlsSubtitleVtt'])->name('api.instant-dub.dub-subtitles-vtt');
-    Route::get('/{sessionId}/proxy/{path}', [InstantDubController::class, 'hlsProxy'])->where('path', '.*')->name('api.instant-dub.proxy');
-});
+// Flow 1 (Instant Dub) — vaqtincha o'chirildi
+// Route::prefix('instant-dub')->group(function () {
+//     Route::post('/start', [InstantDubController::class, 'start'])->name('api.instant-dub.start');
+//     Route::get('/{sessionId}/poll', [InstantDubController::class, 'poll'])->name('api.instant-dub.poll');
+//     Route::post('/{sessionId}/stop', [InstantDubController::class, 'stop'])->name('api.instant-dub.stop');
+//     Route::get('/{sessionId}/events', [InstantDubController::class, 'events'])->name('api.instant-dub.events');
+//     Route::get('/{sessionId}/master.m3u8', [InstantDubController::class, 'hlsMaster'])->name('api.instant-dub.master');
+//     Route::get('/{sessionId}/dub-audio.m3u8', [InstantDubController::class, 'hlsAudioPlaylist'])->name('api.instant-dub.dub-audio');
+//     Route::get('/{sessionId}/dub-segment/init.mp4', [InstantDubController::class, 'hlsInitSegment'])->name('api.instant-dub.dub-init');
+//     Route::get('/{sessionId}/dub-segment/lead.aac', [InstantDubController::class, 'hlsLeadSegment'])->name('api.instant-dub.dub-lead');
+//     Route::get('/{sessionId}/dub-segment/bg-{index}.aac', [InstantDubController::class, 'hlsBgSegment'])->whereNumber('index')->name('api.instant-dub.dub-bg');
+//     Route::get('/{sessionId}/dub-segment/tail.aac', [InstantDubController::class, 'hlsTailSegment'])->name('api.instant-dub.dub-tail');
+//     Route::get('/{sessionId}/dub-segment/gap-{index}.aac', [InstantDubController::class, 'hlsGapSegment'])->whereNumber('index')->name('api.instant-dub.dub-gap');
+//     Route::get('/{sessionId}/dub-segment/{index}.aac', [InstantDubController::class, 'hlsAudioSegment'])->whereNumber('index')->name('api.instant-dub.dub-segment');
+//     Route::get('/{sessionId}/dub-subtitles.m3u8', [InstantDubController::class, 'hlsSubtitlePlaylist'])->name('api.instant-dub.dub-subtitles');
+//     Route::get('/{sessionId}/dub-subtitles.vtt', [InstantDubController::class, 'hlsSubtitleVtt'])->name('api.instant-dub.dub-subtitles-vtt');
+//     Route::get('/{sessionId}/proxy/{path}', [InstantDubController::class, 'hlsProxy'])->where('path', '.*')->name('api.instant-dub.proxy');
+// });
 
