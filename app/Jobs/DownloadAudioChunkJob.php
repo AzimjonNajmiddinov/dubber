@@ -295,16 +295,9 @@ class DownloadAudioChunkJob implements ShouldQueue
         $chunkDur = round($this->frameAlignedDuration($this->startTime, $this->endTime), 6);
         $outFile  = "{$aacDir}/bg-{$this->chunkIndex}.aac";
 
-        // Use no_vocals if available, otherwise raw audio.
-        // loudnorm=I=-18 normalizes to -18 LUFS using EBU R128 gating — correctly
-        // ignores silence, so no_vocals (quieter after vocal removal) reaches the
-        // same perceived loudness as raw audio sections.
-        $workDir      = storage_path("app/instant-dub/{$this->sessionId}");
-        $noVocalsFile = "{$workDir}/bg_chunk_{$this->chunkIndex}_novocals.wav";
-        if (file_exists($noVocalsFile) && filesize($noVocalsFile) > 100) {
-            $bgAudioPath = $noVocalsFile;
-        }
-
+        // Always use the passed $bgAudioPath (raw audio) — never switch to no_vocals.
+        // no_vocals is quieter (speech energy removed) and causes volume drops.
+        // Demucs runs only for prosody reference, not for background audio.
         $cmd      = [
             'ffmpeg', '-y',
             '-f', 'lavfi', '-t', (string) $chunkDur, '-i', 'anullsrc=r=44100:cl=mono',
