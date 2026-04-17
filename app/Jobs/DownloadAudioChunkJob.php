@@ -109,13 +109,15 @@ class DownloadAudioChunkJob implements ShouldQueue
             'session' => $this->sessionId,
         ]);
 
-        // Generate bg chunk immediately with raw audio — playlist never stalls.
-        // We do NOT overwrite after Demucs because the player caches segments by URL
-        // and won't re-download the updated file.
-        // Demucs still runs for prosody reference (energy transfer to TTS segments).
-        $this->generateBgChunkAac($chunkFile);
+        // Background strategy:
+        // - subtitle chunks: duck original audio by -20dB so Russian speech is barely
+        //   audible (10% amplitude) while music/ambience is preserved. No Demucs needed.
+        // - non-subtitle chunks: original audio at full volume.
+        // Demucs still runs for prosody reference only (energy transfer to TTS).
+        $hasSubtitles = $this->hasSubtitlesInRange();
+        $this->generateBgChunkAac($chunkFile, $hasSubtitles);
 
-        if ($this->hasSubtitlesInRange()) {
+        if ($hasSubtitles) {
             $noVocalsFile = $this->separateVocals($chunkFile, $workDir);
             if ($noVocalsFile) {
                 $this->applyProsodyToOverlappingSegments($workDir);
@@ -278,10 +280,11 @@ class DownloadAudioChunkJob implements ShouldQueue
 
     /**
      * Generate bg-{chunkIndex}.aac for this chunk's full time range.
-     * Contains background audio at 0.2 volume + any TTS segments in range mixed via adelay.
-     * Called when the bg chunk downloads. ProcessInstantDubSegmentJob calls it again after TTS arrives.
+     * $duckBackground=true: duck original audio by -20dB (subtitle chunk — Russian speech
+     * becomes inaudible while music/ambience is preserved; no Demucs artifacts).
+     * $duckBackground=false: full volume (non-subtitle chunk).
      */
-    public function generateBgChunkAac(string $bgAudioPath): void
+    public function generateBgChunkAac(string $bgAudioPath, bool $duckBackground = false): void
     {
         $sessionKey = "instant-dub:{$this->sessionId}";
         $sessionJson = Redis::get($sessionKey);
@@ -295,15 +298,15 @@ class DownloadAudioChunkJob implements ShouldQueue
         $chunkDur = round($this->frameAlignedDuration($this->startTime, $this->endTime), 6);
         $outFile  = "{$aacDir}/bg-{$this->chunkIndex}.aac";
 
-        // Always use the passed $bgAudioPath (raw audio) — never switch to no_vocals.
-        // no_vocals is quieter (speech energy removed) and causes volume drops.
-        // Demucs runs only for prosody reference, not for background audio.
+        // Subtitle chunk: duck by -20dB so Russian speech is barely audible (0.1x amplitude).
+        // Non-subtitle chunk: full volume. No Demucs used for background.
+        $bgVolume = $duckBackground ? '0.1' : '1.0';
         $cmd      = [
             'ffmpeg', '-y',
             '-f', 'lavfi', '-t', (string) $chunkDur, '-i', 'anullsrc=r=44100:cl=mono',
             '-t', (string) $chunkDur, '-i', $bgAudioPath,
         ];
-        $filters   = ["[1:a]volume=1.0,aresample=44100[bg]"];
+        $filters   = ["[1:a]volume={$bgVolume},aresample=44100[bg]"];
         $mixInputs = ['[0:a]', '[bg]'];
         $inputIdx  = 2;
         $tmpFiles  = [];
