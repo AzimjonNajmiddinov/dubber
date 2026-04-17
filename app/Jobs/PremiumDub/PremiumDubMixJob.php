@@ -2,7 +2,7 @@
 
 namespace App\Jobs\PremiumDub;
 
-use App\Services\Xtts\XttsClient;
+use App\Services\MmsTts\MmsTtsClient;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -160,12 +160,15 @@ class PremiumDubMixJob implements ShouldQueue
             // 6. Cleanup intermediate files
             @unlink($dubbedAudioPath);
 
-            // 7. Cleanup XTTS cloned voices
+            // 7. Cleanup cloned voices from MMS TTS service
             $clonedVoices = $session['cloned_voices'] ?? [];
             if (!empty($clonedVoices)) {
-                $client = new XttsClient();
-                foreach ($clonedVoices as $voiceId) {
-                    try { $client->deleteVoice($voiceId); } catch (\Throwable) {}
+                $client = new MmsTtsClient();
+                foreach ($clonedVoices as $voiceInfo) {
+                    $voiceId = is_array($voiceInfo) ? ($voiceInfo['voice_id'] ?? null) : $voiceInfo;
+                    if ($voiceId) {
+                        try { $client->deleteVoice($voiceId); } catch (\Throwable) {}
+                    }
                 }
             }
 

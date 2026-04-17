@@ -9,6 +9,7 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Facades\Redis;
@@ -100,10 +101,25 @@ class PremiumDubCloneAndSynthesizeJob implements ShouldQueue
                     $this->synthesizeWithEdgeTts($text, $language, $speaker, $outputWav);
                 }
 
-                // Adjust tempo to fit time slot
                 if (file_exists($outputWav) && filesize($outputWav) > 200) {
+                    // Adjust tempo to fit time slot
                     $slotDuration = ($seg['end'] ?? 0) - ($seg['start'] ?? 0);
                     $this->adjustTempo($outputWav, $slotDuration);
+
+                    // Prosody transfer: TTS → referens vocals energiyasiga moslashtirish
+                    if ($vocalsPath && file_exists($vocalsPath)) {
+                        $transferred = $this->applyProsodyTransfer(
+                            $outputWav,
+                            (float) ($seg['start'] ?? 0),
+                            (float) ($seg['end'] ?? 0),
+                            $vocalsPath,
+                            $ttsDir,
+                            $i
+                        );
+                        if ($transferred) {
+                            rename($transferred, $outputWav);
+                        }
+                    }
                 }
 
                 $synthesized++;
@@ -297,6 +313,61 @@ class PremiumDubCloneAndSynthesizeJob implements ShouldQueue
                 $outputWav,
             ]);
             @unlink($tmpMp3);
+        }
+    }
+
+    /**
+     * Vocals faylidan segment vaqtini kesib, prosody-transfer-service ga yuboradi.
+     * Muvaffaqiyatli bo'lsa transfer qilingan WAV faylini qaytaradi, aks holda null.
+     */
+    private function applyProsodyTransfer(
+        string $ttsWav,
+        float  $start,
+        float  $end,
+        string $vocalsPath,
+        string $tmpDir,
+        int    $index
+    ): ?string {
+        $serviceUrl = config('services.prosody_transfer.url') ?: env('PROSODY_TRANSFER_SERVICE_URL');
+        if (!$serviceUrl) return null;
+
+        // Vocals faylidan referens klip kesish
+        $refClip  = "{$tmpDir}/ref_{$index}.wav";
+        $duration = max(0.1, $end - $start);
+
+        $cut = Process::timeout(10)->run([
+            'ffmpeg', '-y',
+            '-ss', (string) round($start, 3),
+            '-t',  (string) round($duration, 3),
+            '-i',  $vocalsPath,
+            $refClip,
+        ]);
+
+        if (!$cut->successful() || !file_exists($refClip) || filesize($refClip) < 100) {
+            return null;
+        }
+
+        try {
+            $outWav = "{$tmpDir}/{$index}_prosody.wav";
+            $resp   = Http::timeout(30)
+                ->attach('tts_audio', file_get_contents($ttsWav),  'tts.wav')
+                ->attach('reference', file_get_contents($refClip), 'ref.wav')
+                ->post("{$serviceUrl}/transfer", ['energy_transfer' => 'true']);
+
+            @unlink($refClip);
+
+            if ($resp->failed()) return null;
+
+            file_put_contents($outWav, $resp->body());
+            if (!file_exists($outWav) || filesize($outWav) < 100) return null;
+
+            Log::info("[PREMIUM] [{$this->dubId}] Prosody transfer ok — seg #{$index}");
+            return $outWav;
+
+        } catch (\Throwable $e) {
+            @unlink($refClip);
+            Log::warning("[PREMIUM] [{$this->dubId}] Prosody transfer failed seg #{$index}: " . $e->getMessage());
+            return null;
         }
     }
 

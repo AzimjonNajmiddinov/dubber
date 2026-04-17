@@ -42,7 +42,7 @@ class PremiumDubSeparateStemsJob implements ShouldQueue
             // Upload audio to Demucs service and separate stems
             $response = Http::timeout(1800)
                 ->attach('audio', file_get_contents($audioPath), 'audio.wav')
-                ->post("{$serviceUrl}/separate");
+                ->post("{$serviceUrl}/separate", ['model' => 'htdemucs_ft']);
 
             if (!$response->successful()) {
                 throw new \RuntimeException("Demucs failed: " . $response->body());
