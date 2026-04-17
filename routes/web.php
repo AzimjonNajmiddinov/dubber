@@ -13,7 +13,7 @@ use App\Http\Controllers\SegmentPlayerController;
 use App\Http\Controllers\LiveDubController;
 use App\Http\Controllers\OnlineDubController;
 
-Route::get('/', [VideoController::class, 'index'])->name('videos.index');
+Route::get('/', fn() => abort(404));
 Route::post('/upload', [VideoController::class, 'upload'])->name('videos.upload');
 
 Route::get('/videos', [VideoController::class, 'list'])->name('videos.list');
