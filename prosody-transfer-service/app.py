@@ -1,15 +1,12 @@
 """
 Prosody Transfer Service — waveform-level energy matching (no WORLD vocoder).
 
-WORLD ishlatilmaydi — faqat frame-by-frame RMS gain envelope.
-Bu OpenVoice / MMS sifatini saqlab, referens energiya dinamikasini ko'chiradi.
-
 POST /transfer
-  tts_audio:       UploadFile  — MMS/OpenVoice chiqargan audio
-  reference:       UploadFile  — original aktyor ovozi (ruscha dublyaj)
+  tts_audio:       UploadFile  — Edge TTS chiqargan audio
+  reference:       UploadFile  — bandpass-filtered original audio (300-3400Hz)
   energy_transfer: bool        — energy ko'chirish (default: true)
   frame_ms:        int         — frame hajmi ms da (default: 20)
-  smooth_frames:   int         — gain smoothing (default: 7)
+  smooth_frames:   int         — gain smoothing (default: 80)
 
 Port: 8006
 """
@@ -35,7 +32,7 @@ CACHE_PATH.mkdir(parents=True, exist_ok=True)
 
 TARGET_SR = 22050
 
-app = FastAPI(title="Prosody Transfer Service", version="2.0.0")
+app = FastAPI(title="Prosody Transfer Service", version="3.0.0")
 
 
 @app.get("/health")
@@ -44,7 +41,6 @@ def health():
 
 
 def read_audio_mono(data: bytes, target_sr: int) -> np.ndarray:
-    """Har qanday formatdan mono float32 array."""
     arr, sr = sf.read(io.BytesIO(data), always_2d=True)
     arr = arr.mean(axis=1).astype(np.float32)
     if sr != target_sr:
@@ -53,24 +49,59 @@ def read_audio_mono(data: bytes, target_sr: int) -> np.ndarray:
     return arr
 
 
-def peak_normalize(src: np.ndarray, target_dbfs: float = -1.0) -> np.ndarray:
+def apply_energy_transfer(
+    src: np.ndarray,
+    ref: np.ndarray,
+    frame_ms: int = 20,
+    smooth_frames: int = 80,
+    max_gain_db: float = 6.0,
+    min_ref_rms: float = 0.01,
+) -> np.ndarray:
     """
-    Peak normalization only — no RMS gain, no modulation artifacts.
+    Frame-by-frame RMS gain envelope transfer.
 
-    Reference-based gain transfer o'chirildi: ref audio musiqa+ovoz o'z ichiga oladi,
-    shuning uchun ref_rms har doim TTS dan yuqori bo'ladi → gain = 1.5 (max clip) →
-    normalizatsiya uni qayta pasaytiradi → net effekt yo'q, lekin artefaktlar kuchayadi.
-
-    Faqat peak normalizatsiya: kliping oldini oladi, hech narsa kuchaytirmaydi.
+    - min_ref_rms: gaplar orasida (musiqa) referens energiyasi past bo'lsa
+      TTS ni ko'p kuchaytirmasligi uchun pastki chegara.
+    - max_gain_db: har bir frame uchun maksimal ±dB o'zgarish (pumping oldini oladi).
+    - smooth_frames: gain envelope ni yumshatish — keskin o'tishlar yo'qoladi.
     """
-    peak = float(np.max(np.abs(src)))
-    if peak < 1e-6:
-        return src.copy()
-    target_peak = 10 ** (target_dbfs / 20)
-    gain = target_peak / peak
-    # Cap gain: agar signal juda past bo'lsa ko'p kuchaytirmasin (noise floor)
-    gain = min(gain, 4.0)
-    return (src * gain).astype(np.float32)
+    frame_len = int(TARGET_SR * frame_ms / 1000)
+
+    def frame_rms(signal: np.ndarray) -> np.ndarray:
+        n = max(1, len(signal) // frame_len)
+        rms = np.zeros(n, dtype=np.float32)
+        for i in range(n):
+            chunk = signal[i * frame_len:(i + 1) * frame_len]
+            rms[i] = float(np.sqrt(np.mean(chunk ** 2) + 1e-10))
+        return rms
+
+    src_rms = frame_rms(src)
+    ref_rms = frame_rms(ref)
+
+    # ref qisqa bo'lsa oxirgi qiymat bilan to'ldirish
+    if len(ref_rms) < len(src_rms):
+        ref_rms = np.pad(ref_rms, (0, len(src_rms) - len(ref_rms)), mode='edge')
+    else:
+        ref_rms = ref_rms[:len(src_rms)]
+
+    # min_ref_rms: referens juda past bo'lsa (musiqa pauza, sukunat) katta boost yo'q
+    ref_rms_floored = np.maximum(ref_rms, min_ref_rms)
+    gain = ref_rms_floored / (src_rms + 1e-10)
+
+    # ±max_gain_db ga clamp
+    max_lin = 10 ** (max_gain_db / 20)
+    gain = np.clip(gain, 1.0 / max_lin, max_lin)
+
+    # Yumshoq envelope — keskin sakrashlar yo'qoladi
+    gain = uniform_filter1d(gain, size=smooth_frames).astype(np.float32)
+
+    out = src.copy()
+    for i, g in enumerate(gain):
+        start = i * frame_len
+        end = min(start + frame_len, len(out))
+        out[start:end] *= g
+
+    return out
 
 
 @app.post("/transfer")
@@ -79,14 +110,8 @@ async def transfer(
     reference:       UploadFile = File(...),
     energy_transfer: bool       = Form(True),
     frame_ms:        int        = Form(20),
-    smooth_frames:   int        = Form(15),
+    smooth_frames:   int        = Form(80),
 ):
-    """
-    TTS audio + referens → referens energiya dinamikasi bilan natija audio.
-
-    WORLD ishlatilmaydi. Frame-by-frame RMS gain envelope qo'llanadi.
-    OpenVoice / MMS sifati saqlanadi, faqat loudness dinamikasi ko'chiriladi.
-    """
     tts_bytes = await tts_audio.read()
     ref_bytes = await reference.read()
 
@@ -99,14 +124,11 @@ async def transfer(
         if len(ref) < TARGET_SR * 0.05:
             raise HTTPException(status_code=422, detail="Referens audio juda qisqa.")
 
-        src_peak_db = 20 * np.log10(np.max(np.abs(src)) + 1e-10)
-        logger.info(f"Peak normalize: src={len(src)/TARGET_SR:.2f}s peak={src_peak_db:.1f}dBFS")
+        if energy_transfer:
+            out_audio = apply_energy_transfer(src, ref, frame_ms=frame_ms, smooth_frames=smooth_frames)
+        else:
+            out_audio = src.copy()
 
-        # Peak normalize to -1 dBFS — kliping oldini oladi, hech narsa kuchaytirmaydi.
-        # RMS/energy transfer o'chirildi: ref (musiqa+ovoz) TTS (faqat ovoz) dan doim
-        # yuqori RMS → gain=1.5 max → normalizatsiya bekor qiladi → net effekt yo'q,
-        # lekin ikki qadam artefakt hosil qiladi.
-        out_audio = peak_normalize(src, target_dbfs=-1.0)
         out_audio = np.clip(out_audio, -1.0, 1.0)
 
         out_path = CACHE_PATH / f"{uuid.uuid4()}.wav"
