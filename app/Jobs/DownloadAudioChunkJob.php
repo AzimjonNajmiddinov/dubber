@@ -266,6 +266,7 @@ class DownloadAudioChunkJob implements ShouldQueue
                     '-ss', (string) round($segOffset, 3),
                     '-t',  (string) round($refDur, 3),
                     '-i',  $rawAudioPath,
+                    '-af', 'highpass=f=300,lowpass=f=3400',
                     '-ar', '44100', '-ac', '1',
                     $refClip,
                 ]);
