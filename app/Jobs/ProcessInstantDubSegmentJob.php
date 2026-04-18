@@ -142,7 +142,11 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                 'audio_duration' => $ttsDuration,
             ]));
 
-            // 5. Re-generate bg-{i}.aac for any bg chunks that overlap this segment
+            // 5. Energy transfer — bg chunk tayyor bo'lsa shu yerda apply qilish
+            // (yangi kinoda bg tez, TTS kech bo'ladi; shuning uchun TTS tarafdan ham chaqiramiz)
+            $this->applyEnergyTransferIfBgReady();
+
+            // 6. Re-generate bg-{i}.aac for any bg chunks that overlap this segment
             $freshJson = Redis::get($sessionKey);
             if ($freshJson) {
                 $fresh    = json_decode($freshJson, true);
@@ -308,6 +312,110 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
      * Segment vaqtiga mos vocals referensini topib, prosody-transfer-service ga yuboradi.
      * Muvaffaqiyatli bo'lsa transfer qilingan WAV faylini qaytaradi, aks holda null.
      */
+    private function applyEnergyTransferIfBgReady(): void
+    {
+        $serviceUrl = config('services.prosody_transfer.url') ?: env('PROSODY_TRANSFER_SERVICE_URL');
+        if (!$serviceUrl) return;
+
+        $sessionKey = "instant-dub:{$this->sessionId}";
+        $sessionJson = Redis::get($sessionKey);
+        if (!$sessionJson) return;
+        $session  = json_decode($sessionJson, true);
+        $bgChunks = $session['bg_chunks'] ?? [];
+
+        $bgPath = null; $bgStart = null; $bgEnd = null;
+        foreach ($bgChunks as $bgChunk) {
+            $cs   = (float) ($bgChunk['start'] ?? 0);
+            $ce   = (float) ($bgChunk['end'] ?? 0);
+            $path = $bgChunk['path'] ?? null;
+            if ($path && file_exists($path) && $this->startTime >= $cs && $this->startTime < $ce) {
+                $bgPath = $path; $bgStart = $cs; $bgEnd = $ce;
+                break;
+            }
+        }
+        if (!$bgPath) return;
+
+        $chunkKey  = "{$sessionKey}:chunk:{$this->index}";
+        $chunkJson = Redis::get($chunkKey);
+        if (!$chunkJson) return;
+        $chunk = json_decode($chunkJson, true);
+        $b64   = $chunk['audio_base64'] ?? null;
+        if (!$b64) return;
+
+        $tmpDir = '/tmp/instant-dub-' . $this->sessionId;
+        @mkdir($tmpDir, 0755, true);
+
+        try {
+            $tmpMp3 = "{$tmpDir}/et_{$this->index}.mp3";
+            file_put_contents($tmpMp3, base64_decode($b64));
+
+            $ttsWav = "{$tmpDir}/et_{$this->index}_tts.wav";
+            $conv = Process::timeout(10)->run([
+                'ffmpeg', '-y', '-i', $tmpMp3, '-ar', '44100', '-ac', '1', '-f', 'wav', $ttsWav,
+            ]);
+            @unlink($tmpMp3);
+            if (!$conv->successful() || !file_exists($ttsWav) || filesize($ttsWav) < 100) return;
+
+            $segOffset    = max(0.0, $this->startTime - $bgStart);
+            $availableRef = max(0.0, ($bgEnd - $bgStart) - $segOffset);
+            if ($availableRef < 0.15) { @unlink($ttsWav); return; }
+
+            $refDur  = min($this->endTime - $this->startTime, $availableRef);
+            $refClip = "{$tmpDir}/et_{$this->index}_ref.wav";
+            $cut = Process::timeout(10)->run([
+                'ffmpeg', '-y',
+                '-ss', (string) round($segOffset, 3),
+                '-t',  (string) round($refDur, 3),
+                '-i',  $bgPath,
+                '-af', 'highpass=f=300,lowpass=f=3400',
+                '-ar', '44100', '-ac', '1',
+                $refClip,
+            ]);
+            if (!$cut->successful() || !file_exists($refClip) || filesize($refClip) < 100) {
+                @unlink($ttsWav); return;
+            }
+
+            $resp = \Illuminate\Support\Facades\Http::timeout(30)
+                ->attach('tts_audio', file_get_contents($ttsWav), 'tts.wav')
+                ->attach('reference', file_get_contents($refClip), 'ref.wav')
+                ->post(rtrim($serviceUrl, '/') . '/transfer');
+
+            @unlink($ttsWav); @unlink($refClip);
+            if ($resp->failed()) return;
+
+            $outWav = "{$tmpDir}/et_{$this->index}_out.wav";
+            $outMp3 = "{$tmpDir}/et_{$this->index}_out.mp3";
+            file_put_contents($outWav, $resp->body());
+            if (!file_exists($outWav) || filesize($outWav) < 1000) { @unlink($outWav); return; }
+
+            $enc = Process::timeout(10)->run([
+                'ffmpeg', '-y', '-i', $outWav, '-codec:a', 'libmp3lame', '-b:a', '128k', $outMp3,
+            ]);
+            @unlink($outWav);
+            if (!$enc->successful() || !file_exists($outMp3) || filesize($outMp3) < 500) {
+                @unlink($outMp3); return;
+            }
+
+            $chunk['audio_base64'] = base64_encode(file_get_contents($outMp3));
+            @unlink($outMp3);
+            Redis::setex($chunkKey, 50400, json_encode($chunk));
+
+            Log::info("[DUB] Energy transfer ok — seg #{$this->index}", ['session' => $this->sessionId]);
+
+        } catch (\Throwable $e) {
+            Log::warning("[DUB] Energy transfer failed — seg #{$this->index}: " . $e->getMessage(), [
+                'session' => $this->sessionId,
+            ]);
+            foreach ([
+                "{$tmpDir}/et_{$this->index}.mp3",
+                "{$tmpDir}/et_{$this->index}_tts.wav",
+                "{$tmpDir}/et_{$this->index}_ref.wav",
+                "{$tmpDir}/et_{$this->index}_out.wav",
+                "{$tmpDir}/et_{$this->index}_out.mp3",
+            ] as $f) @unlink($f);
+        }
+    }
+
     private function applyProsodyTransfer(string $ttsWav, string $tmpDir): ?string
     {
         $serviceUrl = config('services.prosody_transfer.url') ?: env('PROSODY_TRANSFER_SERVICE_URL');
