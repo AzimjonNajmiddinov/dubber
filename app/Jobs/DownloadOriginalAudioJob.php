@@ -55,20 +55,27 @@ class DownloadOriginalAudioJob implements ShouldQueue
             Redis::setex($sessionKey, 50400, json_encode($s));
         }
 
-        // Dispatch one small DownloadAudioChunkJob per HLS .ts segment (~2-6s each).
-        // This lets the first chunk become available in seconds, unblocking playback
-        // far earlier than waiting for the entire video to download.
-        $chunkIndex = 0;
-        $currentTime = 0.0;
+        // Group TS segments into 30-second chunks — balances first-chunk latency
+        // (~8s) with queue size (~240 jobs for 2h film instead of ~1400).
+        $chunkIndex  = 0;
+        $chunkStart  = 0.0;
+        $chunkEnd    = 0.0;
+        $CHUNK_SIZE  = 30.0;
+
         foreach ($segments as $seg) {
-            $end = $currentTime + (float) $seg['duration'];
+            $chunkEnd += (float) $seg['duration'];
+            if ($chunkEnd - $chunkStart >= $CHUNK_SIZE) {
+                DownloadAudioChunkJob::dispatch(
+                    $this->sessionId, $chunkIndex, $chunkStart, $chunkEnd,
+                )->onQueue('default');
+                $chunkStart = $chunkEnd;
+                $chunkIndex++;
+            }
+        }
+        if ($chunkEnd > $chunkStart) {
             DownloadAudioChunkJob::dispatch(
-                $this->sessionId,
-                $chunkIndex,
-                $currentTime,
-                $end,
+                $this->sessionId, $chunkIndex, $chunkStart, $chunkEnd,
             )->onQueue('default');
-            $currentTime = $end;
             $chunkIndex++;
         }
 
