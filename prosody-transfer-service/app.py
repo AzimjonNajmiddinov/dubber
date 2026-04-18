@@ -1,12 +1,11 @@
 """
-Prosody Transfer Service — waveform-level energy matching (no WORLD vocoder).
+Prosody Transfer Service — WORLD vocoder (pitch + energy transfer).
 
 POST /transfer
   tts_audio:       UploadFile  — Edge TTS chiqargan audio
-  reference:       UploadFile  — bandpass-filtered original audio (300-3400Hz)
+  reference:       UploadFile  — bandpass-filtered (300-3400Hz) original audio
+  f0_mode:         str         — "stats" | "contour"  (default: stats)
   energy_transfer: bool        — energy ko'chirish (default: true)
-  frame_ms:        int         — frame hajmi ms da (default: 20)
-  smooth_frames:   int         — gain smoothing (default: 80)
 
 Port: 8006
 """
@@ -18,9 +17,10 @@ import math
 from pathlib import Path
 
 import numpy as np
+import pyworld as pw
 import soundfile as sf
 from scipy.signal import resample_poly
-from scipy.ndimage import uniform_filter1d
+from scipy.interpolate import interp1d
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.responses import FileResponse
 
@@ -30,9 +30,9 @@ logger = logging.getLogger(__name__)
 CACHE_PATH = Path("/tmp/prosody-cache")
 CACHE_PATH.mkdir(parents=True, exist_ok=True)
 
-TARGET_SR = 22050
+WORLD_SR = 22050
 
-app = FastAPI(title="Prosody Transfer Service", version="3.0.0")
+app = FastAPI(title="Prosody Transfer Service", version="4.0.0")
 
 
 @app.get("/health")
@@ -42,99 +42,135 @@ def health():
 
 def read_audio_mono(data: bytes, target_sr: int) -> np.ndarray:
     arr, sr = sf.read(io.BytesIO(data), always_2d=True)
-    arr = arr.mean(axis=1).astype(np.float32)
+    arr = arr.mean(axis=1).astype(np.float64)
     if sr != target_sr:
         g = math.gcd(sr, target_sr)
-        arr = resample_poly(arr, target_sr // g, sr // g).astype(np.float32)
+        arr = resample_poly(arr, target_sr // g, sr // g).astype(np.float64)
     return arr
 
 
-def apply_energy_transfer(
-    src: np.ndarray,
-    ref: np.ndarray,
-    frame_ms: int = 20,
-    smooth_frames: int = 80,
-    max_gain_db: float = 6.0,
-    min_ref_rms: float = 0.01,
-) -> np.ndarray:
-    """
-    Frame-by-frame RMS gain envelope transfer.
+def world_analyze(audio: np.ndarray, sr: int):
+    f0, t = pw.dio(audio, sr)
+    f0    = pw.stonemask(audio, f0, t, sr)
+    sp    = pw.cheaptrick(audio, f0, t, sr)
+    ap    = pw.d4c(audio, f0, t, sr)
+    return f0, sp, ap, t
 
-    - min_ref_rms: gaplar orasida (musiqa) referens energiyasi past bo'lsa
-      TTS ni ko'p kuchaytirmasligi uchun pastki chegara.
-    - max_gain_db: har bir frame uchun maksimal ±dB o'zgarish (pumping oldini oladi).
-    - smooth_frames: gain envelope ni yumshatish — keskin o'tishlar yo'qoladi.
-    """
-    frame_len = int(TARGET_SR * frame_ms / 1000)
 
-    def frame_rms(signal: np.ndarray) -> np.ndarray:
-        n = max(1, len(signal) // frame_len)
-        rms = np.zeros(n, dtype=np.float32)
-        for i in range(n):
-            chunk = signal[i * frame_len:(i + 1) * frame_len]
-            rms[i] = float(np.sqrt(np.mean(chunk ** 2) + 1e-10))
-        return rms
+def transfer_f0_stats(f0_src: np.ndarray, f0_ref: np.ndarray) -> np.ndarray:
+    """Pitch o'rtachasi va o'zgaruvchanligini ko'chirish — musiqa bor referens uchun xavfsiz."""
+    voiced_src = f0_src[f0_src > 0]
+    voiced_ref = f0_ref[f0_ref > 0]
+    if len(voiced_src) == 0 or len(voiced_ref) == 0:
+        return f0_src.copy()
+    mean_src, std_src = voiced_src.mean(), voiced_src.std() + 1e-8
+    mean_ref, std_ref = voiced_ref.mean(), voiced_ref.std() + 1e-8
+    f0_out = f0_src.copy()
+    mask = f0_src > 0
+    f0_out[mask] = (f0_src[mask] - mean_src) / std_src * std_ref + mean_ref
+    return np.maximum(f0_out, 0.0)
 
-    src_rms = frame_rms(src)
-    ref_rms = frame_rms(ref)
 
-    # ref qisqa bo'lsa oxirgi qiymat bilan to'ldirish
-    if len(ref_rms) < len(src_rms):
-        ref_rms = np.pad(ref_rms, (0, len(src_rms) - len(ref_rms)), mode='edge')
+def transfer_f0_contour(f0_src: np.ndarray, f0_ref: np.ndarray) -> np.ndarray:
+    """Referens pitch konturini to'liq ko'chirish — toza referens uchun."""
+    voiced_ref = f0_ref[f0_ref > 0]
+    if len(voiced_ref) == 0:
+        return f0_src.copy()
+
+    n_src, n_ref = len(f0_src), len(f0_ref)
+    ref_times = np.linspace(0, 1, n_ref)
+    src_times = np.linspace(0, 1, n_src)
+
+    ref_nonzero = np.where(f0_ref > 0)[0]
+    if len(ref_nonzero) > 1:
+        fn = interp1d(ref_times[ref_nonzero], f0_ref[ref_nonzero],
+                      kind='linear', bounds_error=False,
+                      fill_value=(f0_ref[ref_nonzero[0]], f0_ref[ref_nonzero[-1]]))
+        ref_filled = fn(ref_times)
     else:
-        ref_rms = ref_rms[:len(src_rms)]
+        ref_filled = np.where(f0_ref > 0, f0_ref, voiced_ref.mean())
 
-    # min_ref_rms: referens juda past bo'lsa (musiqa pauza, sukunat) katta boost yo'q
-    ref_rms_floored = np.maximum(ref_rms, min_ref_rms)
-    gain = ref_rms_floored / (src_rms + 1e-10)
+    fn2 = interp1d(ref_times, ref_filled, kind='linear',
+                   bounds_error=False, fill_value='extrapolate')
+    f0_stretched = fn2(src_times)
 
-    # ±max_gain_db ga clamp
-    max_lin = 10 ** (max_gain_db / 20)
-    gain = np.clip(gain, 1.0 / max_lin, max_lin)
+    f0_out = f0_src.copy()
+    mask = f0_src > 0
+    f0_out[mask] = np.maximum(f0_stretched[mask], 1.0)
 
-    # Yumshoq envelope — keskin sakrashlar yo'qoladi
-    gain = uniform_filter1d(gain, size=smooth_frames).astype(np.float32)
+    v_out = f0_out[f0_out > 0]
+    if len(v_out) > 0 and len(voiced_ref) > 0:
+        f0_out[f0_out > 0] *= voiced_ref.mean() / (v_out.mean() + 1e-8)
 
-    out = src.copy()
-    for i, g in enumerate(gain):
-        start = i * frame_len
-        end = min(start + frame_len, len(out))
-        out[start:end] *= g
+    return np.maximum(f0_out, 0.0)
 
-    return out
+
+def transfer_energy(sp_src: np.ndarray, sp_ref: np.ndarray) -> np.ndarray:
+    """Spektral energiya ko'chirish — temporal dinamikani saqlaydi."""
+    n_src = len(sp_src)
+    n_ref = len(sp_ref)
+
+    e_src = np.sqrt(np.mean(sp_src ** 2, axis=1)) + 1e-8
+    e_ref = np.sqrt(np.mean(sp_ref ** 2, axis=1)) + 1e-8
+
+    src_t = np.linspace(0, 1, n_src)
+    ref_t = np.linspace(0, 1, n_ref)
+    e_ref_s = interp1d(ref_t, e_ref, kind='linear',
+                       bounds_error=False, fill_value='extrapolate')(src_t)
+
+    # ±6dB clamp (0.5x – 2.0x)
+    ratio = np.clip(e_ref_s / e_src, 0.5, 2.0)
+    return sp_src * ratio[:, np.newaxis]
 
 
 @app.post("/transfer")
 async def transfer(
     tts_audio:       UploadFile = File(...),
     reference:       UploadFile = File(...),
+    f0_mode:         str        = Form("stats"),
     energy_transfer: bool       = Form(True),
-    frame_ms:        int        = Form(20),
-    smooth_frames:   int        = Form(80),
 ):
     tts_bytes = await tts_audio.read()
     ref_bytes = await reference.read()
 
     try:
-        src = read_audio_mono(tts_bytes, TARGET_SR)
-        ref = read_audio_mono(ref_bytes, TARGET_SR)
+        src = read_audio_mono(tts_bytes, WORLD_SR)
+        ref = read_audio_mono(ref_bytes, WORLD_SR)
 
-        if len(src) < TARGET_SR * 0.05:
+        if len(src) < WORLD_SR * 0.05:
             raise HTTPException(status_code=422, detail="TTS audio juda qisqa.")
-        if len(ref) < TARGET_SR * 0.05:
+        if len(ref) < WORLD_SR * 0.05:
             raise HTTPException(status_code=422, detail="Referens audio juda qisqa.")
 
-        if energy_transfer:
-            out_audio = apply_energy_transfer(src, ref, frame_ms=frame_ms, smooth_frames=smooth_frames)
-        else:
-            out_audio = src.copy()
+        logger.info(f"WORLD analyze: src={len(src)/WORLD_SR:.2f}s ref={len(ref)/WORLD_SR:.2f}s f0={f0_mode}")
 
-        out_audio = np.clip(out_audio, -1.0, 1.0)
+        f0_src, sp_src, ap_src, _ = world_analyze(src, WORLD_SR)
+        f0_ref, sp_ref, _,      _ = world_analyze(ref, WORLD_SR)
+
+        f0_out = transfer_f0_contour(f0_src, f0_ref) if f0_mode == "contour" \
+                 else transfer_f0_stats(f0_src, f0_ref)
+
+        sp_out = transfer_energy(sp_src, sp_ref) if energy_transfer else sp_src
+
+        out_audio = pw.synthesize(f0_out, sp_out, ap_src, WORLD_SR).astype(np.float32)
+
+        # 75% WORLD + 25% original — undosh tovushlar aniqligini saqlash uchun
+        n_out, n_src_len = len(out_audio), len(src)
+        if n_out != n_src_len:
+            g = math.gcd(n_src_len, n_out)
+            src_r = resample_poly(src, n_out // g, n_src_len // g).astype(np.float32)
+        else:
+            src_r = src.astype(np.float32)
+        out_audio = out_audio * 0.75 + src_r * 0.25
+
+        peak = np.abs(out_audio).max()
+        if peak > 0:
+            out_audio = (out_audio / peak * 0.95).astype(np.float32)
 
         out_path = CACHE_PATH / f"{uuid.uuid4()}.wav"
-        sf.write(str(out_path), out_audio, TARGET_SR)
+        sf.write(str(out_path), out_audio, WORLD_SR)
 
-        logger.info(f"Transfer ok: {len(out_audio)/TARGET_SR:.2f}s → {out_path.name}")
+        logger.info(f"Transfer ok: {len(out_audio)/WORLD_SR:.2f}s → {out_path.name}")
 
         import asyncio
         resp = FileResponse(str(out_path), media_type="audio/wav", filename=out_path.name)
