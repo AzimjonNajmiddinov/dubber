@@ -109,21 +109,8 @@ class DownloadAudioChunkJob implements ShouldQueue
             'session' => $this->sessionId,
         ]);
 
-        // Generate bg immediately with raw audio — no playlist stall.
-        // Demucs runs after for subtitle chunks: no_vocals replaces bg if peak-normalized
-        // gain brings it to the same level as raw audio (consistent volume, no Russian speech).
-        $hasSubtitles = $this->hasSubtitlesInRange();
-        $this->generateBgChunkAac($chunkFile, false);
-
-        if ($hasSubtitles) {
-            $noVocalsFile = $this->separateVocals($chunkFile, $workDir);
-            if ($noVocalsFile) {
-                $this->applyProsodyToOverlappingSegments($workDir);
-                // Overwrite bg with no_vocals normalized to raw audio peak level.
-                // Peak-based (not mean) avoids over-amplifying Demucs noise floor.
-                $this->generateBgChunkAac($chunkFile, false, $noVocalsFile);
-            }
-        }
+        $this->generateBgChunkAac($chunkFile);
+        $this->applyEnergyTransferToOverlappingSegments($chunkFile);
 
         // Check if all TTS segments are ready + bg is now available → set complete/playable
         $this->checkAndSetComplete();
@@ -152,139 +139,7 @@ class DownloadAudioChunkJob implements ShouldQueue
         Redis::eval($lua, 1, "instant-dub:{$this->sessionId}");
     }
 
-    /**
-     * Check if any subtitle segment overlaps this chunk's time range.
-     * Only chunks with dubbed speech need vocal separation.
-     */
-    private function hasSubtitlesInRange(): bool
-    {
-        $sessionKey = "instant-dub:{$this->sessionId}";
-        $sessionJson = Redis::get($sessionKey);
-        if (!$sessionJson) return false;
-
-        $session = json_decode($sessionJson, true);
-        $total = (int) ($session['total_segments'] ?? 0);
-        if ($total === 0) return false;
-
-        for ($i = 0; $i < $total; $i++) {
-            $chunkJson = Redis::get("{$sessionKey}:chunk:{$i}");
-            if (!$chunkJson) continue;
-            $chunk = json_decode($chunkJson, true);
-            $segStart = (float) ($chunk['start_time'] ?? 0);
-            $segEnd   = (float) ($chunk['end_time'] ?? 0);
-            if ($segStart < $this->endTime && $segEnd > $this->startTime) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    /**
-     * Upload chunk audio to Demucs RunPod service, download no_vocals track.
-     * Returns local path to no_vocals file, or null on failure (fallback to original).
-     */
-    private function separateVocals(string $audioPath, string $workDir): ?string
-    {
-        $serviceUrl = config('services.demucs.url') ?: env('DEMUCS_SERVICE_URL');
-        if (!$serviceUrl) return null;
-
-        try {
-            // Demucs WAV talab qiladi — AAC/other formatdan convert
-            $sendPath = $audioPath;
-            $tmpWav   = null;
-            if (!str_ends_with(strtolower($audioPath), '.wav')) {
-                $tmpWav   = "{$workDir}/bg_chunk_{$this->chunkIndex}_demucs.wav";
-                $conv = Process::timeout(30)->run([
-                    'ffmpeg', '-y', '-i', $audioPath,
-                    '-ac', '2', '-ar', '44100', '-f', 'wav', $tmpWav,
-                ]);
-                if ($conv->successful() && file_exists($tmpWav) && filesize($tmpWav) > 100) {
-                    $sendPath = $tmpWav;
-                }
-            }
-
-            // Demucs GPU da bir vaqtda 1 ta request — OOM oldini olish uchun
-            $demucsLock = \Illuminate\Support\Facades\Cache::lock('demucs-concurrency', 120);
-            $demucsLock->block(60);
-            try {
-                $response = Http::timeout(120)
-                    ->attach('audio', file_get_contents($sendPath), 'audio.wav')
-                    ->post("{$serviceUrl}/separate", ['model' => 'htdemucs_ft']);
-            } finally {
-                $demucsLock->release();
-                if ($tmpWav) @unlink($tmpWav);
-            }
-
-            if ($response->failed()) {
-                Log::warning("[DUB] Demucs separation failed for chunk {$this->chunkIndex}", [
-                    'session' => $this->sessionId,
-                    'status'  => $response->status(),
-                ]);
-                return null;
-            }
-
-            $result      = $response->json();
-            $noVocalsUrl = $result['no_vocals_url'] ?? null;
-            $vocalsUrl   = $result['vocals_url'] ?? null;
-            if (!$noVocalsUrl) return null;
-
-            // Relative URL bo'lsa service URL bilan to'ldirish
-            if ($noVocalsUrl && !str_starts_with($noVocalsUrl, 'http')) {
-                $noVocalsUrl = rtrim($serviceUrl, '/') . '/' . ltrim($noVocalsUrl, '/');
-            }
-            if ($vocalsUrl && !str_starts_with($vocalsUrl, 'http')) {
-                $vocalsUrl = rtrim($serviceUrl, '/') . '/' . ltrim($vocalsUrl, '/');
-            }
-
-            $noVocalsFile = "{$workDir}/bg_chunk_{$this->chunkIndex}_novocals.wav";
-            $download = Http::timeout(60)->get($noVocalsUrl);
-            if ($download->failed()) return null;
-            file_put_contents($noVocalsFile, $download->body());
-            if (!file_exists($noVocalsFile) || filesize($noVocalsFile) < 100) return null;
-
-            // vocals — prosody transfer uchun referens sifatida saqlanadi
-            if ($vocalsUrl) {
-                $vocalsFile = "{$workDir}/bg_chunk_{$this->chunkIndex}_vocals.wav";
-                $vocDownload = Http::timeout(60)->get($vocalsUrl);
-                if ($vocDownload->successful()) {
-                    file_put_contents($vocalsFile, $vocDownload->body());
-                    if (file_exists($vocalsFile) && filesize($vocalsFile) > 100) {
-                        // bg_chunks ga vocals_path qo'shish
-                        $lock = \Illuminate\Support\Facades\Cache::lock("instant-dub:{$this->sessionId}:bg-lock", 10);
-                        $lock->block(10, function () use ($vocalsFile) {
-                            $sJson = Redis::get("instant-dub:{$this->sessionId}");
-                            if (!$sJson) return;
-                            $s = json_decode($sJson, true);
-                            if (isset($s['bg_chunks'][$this->chunkIndex])) {
-                                $s['bg_chunks'][$this->chunkIndex]['vocals_path'] = $vocalsFile;
-                                Redis::setex("instant-dub:{$this->sessionId}", 50400, json_encode($s));
-                            }
-                        });
-                    }
-                }
-            }
-
-            Log::info("[DUB] Demucs chunk {$this->chunkIndex} separated (" . round(filesize($noVocalsFile) / 1024) . " KB)", [
-                'session' => $this->sessionId,
-            ]);
-
-            return $noVocalsFile;
-        } catch (\Throwable $e) {
-            Log::warning("[DUB] Demucs exception for chunk {$this->chunkIndex}", [
-                'session' => $this->sessionId,
-                'error'   => $e->getMessage(),
-            ]);
-            return null;
-        }
-    }
-
-    /**
-     * Generate bg-{chunkIndex}.aac for this chunk's full time range.
-     * If $noVocalsPath is given, use it normalized to match $bgAudioPath peak level
-     * so background volume stays consistent (no Russian speech, same loudness).
-     */
-    public function generateBgChunkAac(string $bgAudioPath, bool $duckBackground = false, ?string $noVocalsPath = null): void
+    public function generateBgChunkAac(string $bgAudioPath): void
     {
         $sessionKey = "instant-dub:{$this->sessionId}";
         $sessionJson = Redis::get($sessionKey);
@@ -298,27 +153,12 @@ class DownloadAudioChunkJob implements ShouldQueue
         $chunkDur = round($this->frameAlignedDuration($this->startTime, $this->endTime), 6);
         $outFile  = "{$aacDir}/bg-{$this->chunkIndex}.aac";
 
-        // If no_vocals provided, use it normalized to raw audio peak → same loudness, no Russian speech.
-        // Peak-based gain avoids over-amplifying Demucs noise floor (mean includes silence).
-        $useAudio = $bgAudioPath;
-        $bgVolume = '1.0';
-        if ($noVocalsPath && file_exists($noVocalsPath)) {
-            $rawPeakDb     = $this->getAudioPeakDb($bgAudioPath);
-            $noVocalsPeakDb = $this->getAudioPeakDb($noVocalsPath);
-            if ($rawPeakDb !== null && $noVocalsPeakDb !== null && $noVocalsPeakDb > -60.0) {
-                $gainDb   = round($rawPeakDb - $noVocalsPeakDb, 1);
-                // Clamp: max +30dB boost, never cut (no_vocals should only need boosting)
-                $gainDb   = min(30.0, max(0.0, $gainDb));
-                $useAudio = $noVocalsPath;
-                $bgVolume = round(pow(10, $gainDb / 20), 4) . ''; // dB → linear
-            }
-        }
         $cmd      = [
             'ffmpeg', '-y',
             '-f', 'lavfi', '-t', (string) $chunkDur, '-i', 'anullsrc=r=44100:cl=mono',
-            '-t', (string) $chunkDur, '-i', $useAudio,
+            '-t', (string) $chunkDur, '-i', $bgAudioPath,
         ];
-        $filters   = ["[1:a]volume={$bgVolume},aresample=44100[bg]"];
+        $filters   = ["[1:a]volume=0.2,aresample=44100[bg]"];
         $mixInputs = ['[0:a]', '[bg]'];
         $inputIdx  = 2;
         $tmpFiles  = [];
@@ -375,37 +215,10 @@ class DownloadAudioChunkJob implements ShouldQueue
         }
     }
 
-    private function getAudioPeakDb(string $audioPath): ?float
-    {
-        $result = Process::timeout(10)->run([
-            'ffmpeg', '-i', $audioPath, '-af', 'volumedetect',
-            '-vn', '-sn', '-dn', '-f', 'null', '/dev/null',
-        ]);
-        if (preg_match('/max_volume:\s*([-\d.]+)\s*dB/', $result->errorOutput(), $m)) {
-            return (float) $m[1];
-        }
-        return null;
-    }
-
-    private function frameAlignedDuration(float $start, float $end): float
-    {
-        $startFrames = (int) round($start * 44100 / 1024);
-        $endFrames = (int) round($end * 44100 / 1024);
-        return max(1, $endFrames - $startFrames) * 1024 / 44100;
-    }
-
-    /**
-     * After Demucs separates vocals for this chunk, apply prosody transfer to all
-     * TTS segments in this time range and update their audio_base64 in Redis.
-     * This runs for both live and cache-hit sessions.
-     */
-    private function applyProsodyToOverlappingSegments(string $workDir): void
+    private function applyEnergyTransferToOverlappingSegments(string $rawAudioPath): void
     {
         $serviceUrl = config('services.prosody_transfer.url') ?: env('PROSODY_TRANSFER_SERVICE_URL');
         if (!$serviceUrl) return;
-
-        $vocalsFile = "{$workDir}/bg_chunk_{$this->chunkIndex}_vocals.wav";
-        if (!file_exists($vocalsFile) || filesize($vocalsFile) < 100) return;
 
         $sessionKey = "instant-dub:{$this->sessionId}";
         $sessionJson = Redis::get($sessionKey);
@@ -424,18 +237,13 @@ class DownloadAudioChunkJob implements ShouldQueue
             $segEnd   = (float) ($chunk['end_time'] ?? 0);
             $b64      = $chunk['audio_base64'] ?? null;
 
-            // Only process segments whose START falls within this bg chunk.
-            // Segments overlapping the boundary will be handled by the chunk that owns their start.
-            // This prevents double-processing (which can overwrite with a wrong reference).
             if ($segStart < $this->startTime || $segStart >= $this->endTime) continue;
             if (!$b64) continue;
 
             try {
-                // Write TTS audio to temp file
                 $tmpMp3 = "/tmp/prosody_{$this->sessionId}_{$this->chunkIndex}_{$i}.mp3";
                 file_put_contents($tmpMp3, base64_decode($b64));
 
-                // Convert TTS MP3 → WAV for prosody service
                 $ttsWav = "/tmp/prosody_{$this->sessionId}_{$this->chunkIndex}_{$i}_tts.wav";
                 $conv = Process::timeout(10)->run([
                     'ffmpeg', '-y', '-i', $tmpMp3,
@@ -444,11 +252,9 @@ class DownloadAudioChunkJob implements ShouldQueue
                 @unlink($tmpMp3);
                 if (!$conv->successful() || !file_exists($ttsWav) || filesize($ttsWav) < 100) continue;
 
-                // Cut vocals reference — clamp to bg chunk boundary to avoid empty clips
-                $segOffset  = max(0.0, $segStart - $this->startTime);
-                $chunkDur   = $this->endTime - $this->startTime;
+                $segOffset    = max(0.0, $segStart - $this->startTime);
+                $chunkDur     = $this->endTime - $this->startTime;
                 $availableRef = max(0.0, $chunkDur - $segOffset);
-                // Need at least 0.15s of reference audio, otherwise prosody won't help
                 if ($availableRef < 0.15) {
                     @unlink($ttsWav);
                     continue;
@@ -459,7 +265,8 @@ class DownloadAudioChunkJob implements ShouldQueue
                     'ffmpeg', '-y',
                     '-ss', (string) round($segOffset, 3),
                     '-t',  (string) round($refDur, 3),
-                    '-i',  $vocalsFile,
+                    '-i',  $rawAudioPath,
+                    '-ar', '44100', '-ac', '1',
                     $refClip,
                 ]);
                 if (!$cut->successful() || !file_exists($refClip) || filesize($refClip) < 100) {
@@ -467,10 +274,9 @@ class DownloadAudioChunkJob implements ShouldQueue
                     continue;
                 }
 
-                // Call prosody transfer service (RMS gain envelope only, no WORLD)
                 $resp = \Illuminate\Support\Facades\Http::timeout(30)
-                    ->attach('tts_audio',  file_get_contents($ttsWav),  'tts.wav')
-                    ->attach('reference',  file_get_contents($refClip), 'ref.wav')
+                    ->attach('tts_audio', file_get_contents($ttsWav), 'tts.wav')
+                    ->attach('reference', file_get_contents($refClip), 'ref.wav')
                     ->post(rtrim($serviceUrl, '/') . '/transfer', [
                         'energy_transfer' => 'true',
                     ]);
@@ -480,11 +286,9 @@ class DownloadAudioChunkJob implements ShouldQueue
 
                 if ($resp->failed()) continue;
 
-                // Convert result WAV → MP3 and update Redis
                 $outWav = "/tmp/prosody_{$this->sessionId}_{$this->chunkIndex}_{$i}_out.wav";
                 $outMp3 = "/tmp/prosody_{$this->sessionId}_{$this->chunkIndex}_{$i}_out.mp3";
                 file_put_contents($outWav, $resp->body());
-                // Sanity check: output must be reasonably large and not silent
                 if (!file_exists($outWav) || filesize($outWav) < 1000) {
                     @unlink($outWav);
                     continue;
@@ -495,27 +299,23 @@ class DownloadAudioChunkJob implements ShouldQueue
                     '-codec:a', 'libmp3lame', '-b:a', '128k', $outMp3,
                 ]);
                 @unlink($outWav);
-                // Output MP3 must be meaningfully larger than an empty file
                 if (!$enc->successful() || !file_exists($outMp3) || filesize($outMp3) < 500) {
                     @unlink($outMp3);
                     continue;
                 }
 
-                $newB64 = base64_encode(file_get_contents($outMp3));
+                $chunk['audio_base64'] = base64_encode(file_get_contents($outMp3));
                 @unlink($outMp3);
-
-                $chunk['audio_base64'] = $newB64;
                 Redis::setex($chunkKey, 50400, json_encode($chunk));
 
-                Log::info("[DUB] Prosody applied to seg #{$i} via bg-chunk {$this->chunkIndex}", [
+                Log::info("[DUB] Energy transfer applied to seg #{$i} via bg-chunk {$this->chunkIndex}", [
                     'session' => $this->sessionId,
                 ]);
 
             } catch (\Throwable $e) {
-                Log::warning("[DUB] Prosody for seg #{$i} failed: " . $e->getMessage(), [
+                Log::warning("[DUB] Energy transfer for seg #{$i} failed: " . $e->getMessage(), [
                     'session' => $this->sessionId,
                 ]);
-                // Cleanup any leftover temp files
                 foreach ([
                     "/tmp/prosody_{$this->sessionId}_{$this->chunkIndex}_{$i}.mp3",
                     "/tmp/prosody_{$this->sessionId}_{$this->chunkIndex}_{$i}_tts.wav",
@@ -525,6 +325,13 @@ class DownloadAudioChunkJob implements ShouldQueue
                 ] as $f) @unlink($f);
             }
         }
+    }
+
+    private function frameAlignedDuration(float $start, float $end): float
+    {
+        $startFrames = (int) round($start * 44100 / 1024);
+        $endFrames = (int) round($end * 44100 / 1024);
+        return max(1, $endFrames - $startFrames) * 1024 / 44100;
     }
 
     public function failed(\Throwable $exception): void
