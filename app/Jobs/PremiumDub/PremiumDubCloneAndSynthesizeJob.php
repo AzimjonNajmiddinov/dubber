@@ -223,25 +223,33 @@ class PremiumDubCloneAndSynthesizeJob implements ShouldQueue
             $file = $files[$counters[$gender] % count($files)];
             $counters[$gender]++;
 
-            // Cache key: hash of file path so same file → same voice_id across runs
             $cacheKey = 'voice-pool-id:mms:' . md5($file);
-            $voiceId = \Illuminate\Support\Facades\Redis::get($cacheKey);
+            $voiceId  = \Illuminate\Support\Facades\Redis::get($cacheKey);
+            $name     = pathinfo($file, PATHINFO_FILENAME);
 
             Log::info("[PREMIUM] [{$this->dubId}] Speaker {$speaker} → gender:{$gender}, voice:{$file}");
 
+            if ($voiceId) {
+                // MMS restart bo'lsa cached voice_id o'chiriladi — test qilib tekshir
+                try {
+                    $client->synthesize($voiceId, 'test', ['language' => 'uz', 'speed' => 1.0]);
+                    Log::info("[PREMIUM] [{$this->dubId}] Cached voice ok: {$voiceId}");
+                } catch (\Throwable $e) {
+                    Log::warning("[PREMIUM] [{$this->dubId}] Cached voice_id eskirgan, qayta clone: {$voiceId}");
+                    \Illuminate\Support\Facades\Redis::del($cacheKey);
+                    $voiceId = null;
+                }
+            }
+
             if (!$voiceId) {
                 try {
-                    $name = pathinfo($file, PATHINFO_FILENAME);
                     $voiceId = $client->addVoice("pool-{$name}", [$file]);
-                    // Cache for 7 days (pod restarts clear XTTS voices anyway)
                     \Illuminate\Support\Facades\Redis::setex($cacheKey, 604800, $voiceId);
                     Log::info("[PREMIUM] [{$this->dubId}] Cloned pool voice '{$name}' → {$voiceId}");
                 } catch (\Throwable $e) {
                     Log::warning("[PREMIUM] [{$this->dubId}] Pool voice clone failed for {$file}: " . $e->getMessage());
                     continue;
                 }
-            } else {
-                Log::info("[PREMIUM] [{$this->dubId}] Using cached pool voice for {$speaker}: {$voiceId}");
             }
 
             $voiceGender = pathinfo(dirname($file), PATHINFO_FILENAME);

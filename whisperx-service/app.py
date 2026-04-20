@@ -193,7 +193,6 @@ def get_diarize_pipeline() -> Optional[DiarizationPipeline]:
                     from pyannote.audio import Pipeline as PyannotePipeline
                     pipe = PyannotePipeline.from_pretrained(DIARIZATION_MODEL)
                     pipe = pipe.to(torch.device(DEVICE))
-                    # Create DiarizationPipeline instance manually
                     dp = object.__new__(DiarizationPipeline)
                     dp.model = pipe
                     dp.device = DEVICE
@@ -204,6 +203,17 @@ def get_diarize_pipeline() -> Optional[DiarizationPipeline]:
             except Exception as e:
                 logger.error(f"Diarization pipeline init failed: {e}")
                 return None
+
+            # Raise clustering threshold: less sensitive to within-speaker variation,
+            # prevents monologue from being split into multiple "speakers".
+            # Default ~0.7 → 0.85 merges more aggressively.
+            try:
+                pipe = _diarize_pipeline.model if hasattr(_diarize_pipeline, 'model') else None
+                if pipe is not None and hasattr(pipe, 'klustering'):
+                    pipe.klustering.threshold = float(os.environ.get("DIARIZE_THRESHOLD", "0.85"))
+                    logger.info(f"Clustering threshold set to {pipe.klustering.threshold}")
+            except Exception as e:
+                logger.warning(f"Could not set clustering threshold: {e}")
     return _diarize_pipeline
 
 
