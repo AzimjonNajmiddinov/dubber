@@ -192,10 +192,14 @@ if ! $WHISPERX_PYTHON -c "import whisperx" 2>/dev/null; then
     echo "  whisperx missing — installing (faster-whisper + whisperx + speechbrain)..."
     $WHISPERX_PYTHON -m pip install -q faster-whisper whisperx speechbrain
 fi
-# Ensure uvicorn is available in system Python
+# Ensure uvicorn + librosa are available in system Python
 if ! $WHISPERX_PYTHON -c "import uvicorn" 2>/dev/null; then
     echo "  Installing uvicorn in system Python..."
     $WHISPERX_PYTHON -m pip install -q uvicorn fastapi python-multipart
+fi
+if ! $WHISPERX_PYTHON -c "import librosa" 2>/dev/null; then
+    echo "  Installing librosa in system Python..."
+    $WHISPERX_PYTHON -m pip install -q librosa
 fi
 
 # ===========================================
