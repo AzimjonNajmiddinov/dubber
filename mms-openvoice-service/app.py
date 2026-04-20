@@ -120,12 +120,21 @@ def load_models():
 @app.on_event("startup")
 async def startup_event():
     import asyncio
-    asyncio.create_task(asyncio.to_thread(load_models))
+    async def _load():
+        try:
+            await asyncio.to_thread(load_models)
+        except Exception as e:
+            logger.error(f"Startup model loading failed: {e}", exc_info=True)
+    asyncio.create_task(_load())
 
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "model": "mms-tts-uzb+openvoice-v2"}
+    return {
+        "status": "healthy" if (_mms_model is not None and _ov_converter is not None) else "loading",
+        "model": "mms-tts-uzb+openvoice-v2",
+        "models_ready": _mms_model is not None and _ov_converter is not None,
+    }
 
 
 @app.get("/ready")
@@ -165,6 +174,11 @@ async def clone_voice(
     ref_text: Optional[str] = Form(None),
 ):
     """Save reference audio and extract OpenVoice tone color embedding."""
+    if _ov_converter is None or _mms_model is None:
+        try:
+            load_models()
+        except Exception as e:
+            raise HTTPException(status_code=503, detail=f"Models not ready: {e}")
     try:
         voice_id = hashlib.md5(f"{name}_{uuid.uuid4()}".encode()).hexdigest()[:16]
         voice_dir = VOICES_PATH / voice_id
@@ -218,9 +232,12 @@ class SynthesizeRequest(BaseModel):
 @app.post("/synthesize")
 async def synthesize(request: SynthesizeRequest):
     """MMS TTS → Uzbek audio → OpenVoice tone color convert → cloned voice."""
+    if _ov_converter is None or _mms_model is None:
+        try:
+            load_models()
+        except Exception as e:
+            raise HTTPException(status_code=503, detail=f"Models not ready: {e}")
     try:
-        if _mms_model is None or _ov_converter is None:
-            raise HTTPException(status_code=503, detail="Models not loaded yet")
 
         voice_dir = VOICES_PATH / request.voice_id
         se_path = voice_dir / "target_se.pth"
