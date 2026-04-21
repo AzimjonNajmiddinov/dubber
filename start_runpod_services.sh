@@ -132,7 +132,13 @@ TTS_VENV=/workspace/tts-venv
 echo "Checking shared TTS venv ($TTS_VENV)..."
 
 TTS_VENV_OK=false
-if [ -d "$TTS_VENV" ] && $TTS_VENV/bin/python -c "import transformers; import uvicorn; import demucs" 2>/dev/null; then
+if [ -d "$TTS_VENV" ] && $TTS_VENV/bin/python -c "
+import transformers, uvicorn, demucs
+import torchaudio  # triggers native .so load
+import torch
+# confirm torch+torchaudio share the same version base
+assert torchaudio.__version__.split('+')[0] == torch.__version__.split('+')[0], 'version mismatch'
+" 2>/dev/null; then
     echo "  TTS venv OK"
     TTS_VENV_OK=true
 fi
@@ -144,21 +150,21 @@ if [ "$TTS_VENV_OK" = false ]; then
 
     $TTS_VENV/bin/pip install -q --upgrade pip
 
-    echo "    Installing torch (cu126, matches system)..."
+    echo "    Installing torch 2.8.0 (cu126, pinned)..."
     $TTS_VENV/bin/pip install -q \
-        torch torchaudio \
+        torch==2.8.0 torchaudio==2.8.0 \
         --index-url https://download.pytorch.org/whl/cu126
 
     echo "    Installing MMS+OpenVoice deps..."
     $TTS_VENV/bin/pip install -q \
-        transformers uvicorn fastapi python-multipart soundfile scipy \
+        "transformers>=4.48,<4.50" uvicorn fastapi python-multipart soundfile scipy \
         "av" --prefer-binary
 
     echo "    Installing Demucs..."
     $TTS_VENV/bin/pip install -q --no-deps demucs
     $TTS_VENV/bin/pip install -q dora-search lameenc julius diffq einops openunmix treetable
 
-    if $TTS_VENV/bin/python -c "import transformers; import torch; import demucs; print(f'TTS venv OK - torch {torch.__version__}')" 2>/dev/null; then
+    if $TTS_VENV/bin/python -c "import transformers, torch, torchaudio, demucs; print(f'TTS venv OK - torch {torch.__version__}')" 2>/dev/null; then
         echo "  TTS venv created successfully"
     else
         echo "  ERROR: TTS venv creation failed! Check manually."
