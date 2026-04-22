@@ -31,7 +31,7 @@ class InstantDubController extends Controller
         $language = $request->input('language', 'uz');
         $videoUrl = $request->input('video_url', '');
         $translateFrom = $request->input('translate_from', '');
-        $srt = $request->input('srt', '');
+        $srt = (string) ($request->input('srt') ?? '');
         $title = $request->input('title', 'Untitled');
         $quality = $request->input('quality', 'standard');
         $ttsDriver = $quality === 'premium' ? 'elevenlabs' : 'mms';
