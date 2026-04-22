@@ -235,14 +235,55 @@ function stopDubbing() {
 // ─── YouTube data extraction ───────────────────────────────────────────────
 
 function getYouTubeData() {
+    // Try background scripting API first (MAIN world access), fallback to DOM parsing
     return new Promise(resolve => {
+        let done = false;
+        const finish = (val) => { if (!done) { done = true; resolve(val); } };
+
+        // Timeout: if background doesn't respond in 3s, fall back to DOM
+        const timer = setTimeout(() => finish(getDomYouTubeData()), 3000);
+
         try {
             chrome.runtime.sendMessage({ type: 'getYouTubeData' }, data => {
-                if (chrome.runtime.lastError) { resolve(null); return; }
-                resolve(data || null);
+                clearTimeout(timer);
+                if (chrome.runtime.lastError || !data) {
+                    finish(getDomYouTubeData());
+                } else {
+                    finish(data);
+                }
             });
-        } catch { resolve(null); }
+        } catch {
+            clearTimeout(timer);
+            finish(getDomYouTubeData());
+        }
     });
+}
+
+function getDomYouTubeData() {
+    // Fallback: read ytInitialPlayerResponse from <script> tag textContent
+    try {
+        for (const s of document.querySelectorAll('script')) {
+            const text = s.textContent;
+            if (!text.includes('captionTracks')) continue;
+            const key = '"captionTracks"';
+            const idx = text.indexOf(key);
+            if (idx === -1) continue;
+            const arrStart = text.indexOf('[', idx + key.length);
+            if (arrStart === -1) continue;
+            let depth = 0, i = arrStart;
+            for (; i < text.length; i++) {
+                const c = text[i];
+                if (c === '[' || c === '{') depth++;
+                else if (c === ']' || c === '}') { if (--depth === 0) break; }
+            }
+            try {
+                const tracks = JSON.parse(text.slice(arrStart, i + 1));
+                if (Array.isArray(tracks) && tracks.length > 0)
+                    return { captionTracks: tracks, audioUrl: null };
+            } catch {}
+        }
+    } catch {}
+    return null;
 }
 
 async function extractCaptionsFromTracks(tracks) {
