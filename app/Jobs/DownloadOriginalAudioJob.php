@@ -21,8 +21,9 @@ class DownloadOriginalAudioJob implements ShouldQueue
     public int $tries = 3;
 
     public function __construct(
-        public string $sessionId,
-        public string $videoUrl,
+        public string  $sessionId,
+        public string  $videoUrl,
+        public ?string $audioUrl = null,
     ) {}
 
     public function handle(): void
@@ -35,7 +36,11 @@ class DownloadOriginalAudioJob implements ShouldQueue
         if (($session['status'] ?? '') === 'stopped') return;
 
         if (str_contains($this->videoUrl, 'youtube.com') || str_contains($this->videoUrl, 'youtu.be')) {
-            $this->handleYoutube();
+            if ($this->audioUrl) {
+                $this->handleYoutubeDirectUrl($this->audioUrl);
+            } else {
+                $this->handleYoutube();
+            }
             return;
         }
 
@@ -159,6 +164,80 @@ class DownloadOriginalAudioJob implements ShouldQueue
         }
     }
 
+    private function handleYoutubeDirectUrl(string $audioUrl): void
+    {
+        $sessionKey = "instant-dub:{$this->sessionId}";
+        $workDir    = storage_path("app/instant-dub/{$this->sessionId}");
+        @mkdir($workDir, 0755, true);
+        $audioPath = "{$workDir}/source_audio.m4a";
+
+        Log::info("[DUB] YouTube: downloading audio via direct URL", ['session' => $this->sessionId]);
+
+        $result = Process::timeout(300)->run([
+            'ffmpeg', '-y',
+            '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            '-i', $audioUrl,
+            '-vn', '-acodec', 'copy',
+            $audioPath,
+        ]);
+
+        if (!file_exists($audioPath) || filesize($audioPath) < 1000) {
+            Log::warning("[DUB] YouTube direct audio download failed, falling back to yt-dlp", [
+                'session' => $this->sessionId,
+                'error'   => Str::limit($result->errorOutput(), 300),
+            ]);
+            $this->handleYoutube();
+            return;
+        }
+
+        $this->dispatchChunksFromLocalFile($audioPath, $sessionKey);
+    }
+
+    private function dispatchChunksFromLocalFile(string $audioPath, string $sessionKey): void
+    {
+        $probeResult = Process::timeout(15)->run([
+            'ffprobe', '-v', 'error',
+            '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            $audioPath,
+        ]);
+        $totalDuration = (float) trim($probeResult->output());
+        if ($totalDuration <= 0) {
+            Log::warning("[DUB] Could not determine audio duration", ['session' => $this->sessionId]);
+            return;
+        }
+
+        $sessionJson = Redis::get($sessionKey);
+        if ($sessionJson) {
+            $s = json_decode($sessionJson, true);
+            $s['video_duration'] = $totalDuration;
+            Redis::setex($sessionKey, 50400, json_encode($s));
+        }
+
+        $CHUNK_SIZE = 30.0;
+        $chunkIndex = 0;
+        $chunkStart = 0.0;
+        while ($chunkStart < $totalDuration) {
+            $chunkEnd = min($chunkStart + $CHUNK_SIZE, $totalDuration);
+            DownloadAudioChunkJob::dispatch(
+                $this->sessionId, $chunkIndex, $chunkStart, $chunkEnd, $audioPath,
+            )->onQueue('default');
+            $chunkStart = $chunkEnd;
+            $chunkIndex++;
+        }
+
+        $sessionJson = Redis::get($sessionKey);
+        if ($sessionJson) {
+            $s = json_decode($sessionJson, true);
+            $s['total_bg_chunks'] = $chunkIndex;
+            Redis::setex($sessionKey, 50400, json_encode($s));
+        }
+
+        Log::info("[DUB] Audio dispatched ({$chunkIndex} chunks, {$totalDuration}s)", [
+            'session' => $this->sessionId,
+        ]);
+    }
+
     private function handleYoutube(): void
     {
         $sessionKey = "instant-dub:{$this->sessionId}";
@@ -188,51 +267,7 @@ class DownloadOriginalAudioJob implements ShouldQueue
             return;
         }
 
-        // Get total duration via ffprobe
-        $probeResult = Process::timeout(15)->run([
-            'ffprobe', '-v', 'error',
-            '-show_entries', 'format=duration',
-            '-of', 'default=noprint_wrappers=1:nokey=1',
-            $audioPath,
-        ]);
-        $totalDuration = (float) trim($probeResult->output());
-        if ($totalDuration <= 0) {
-            Log::warning("[DUB] YouTube: could not determine audio duration", ['session' => $this->sessionId]);
-            return;
-        }
-
-        // Update session with video duration
-        $sessionJson = Redis::get($sessionKey);
-        if ($sessionJson) {
-            $s = json_decode($sessionJson, true);
-            $s['video_duration'] = $totalDuration;
-            Redis::setex($sessionKey, 50400, json_encode($s));
-        }
-
-        // Dispatch 30s chunks using local file path
-        $CHUNK_SIZE  = 30.0;
-        $chunkIndex  = 0;
-        $chunkStart  = 0.0;
-
-        while ($chunkStart < $totalDuration) {
-            $chunkEnd = min($chunkStart + $CHUNK_SIZE, $totalDuration);
-            DownloadAudioChunkJob::dispatch(
-                $this->sessionId, $chunkIndex, $chunkStart, $chunkEnd, $audioPath,
-            )->onQueue('default');
-            $chunkStart = $chunkEnd;
-            $chunkIndex++;
-        }
-
-        $sessionJson = Redis::get($sessionKey);
-        if ($sessionJson) {
-            $s = json_decode($sessionJson, true);
-            $s['total_bg_chunks'] = $chunkIndex;
-            Redis::setex($sessionKey, 50400, json_encode($s));
-        }
-
-        Log::info("[DUB] YouTube audio dispatched ({$chunkIndex} chunks, {$totalDuration}s)", [
-            'session' => $this->sessionId,
-        ]);
+        $this->dispatchChunksFromLocalFile($audioPath, $sessionKey);
     }
 
     public function failed(\Throwable $exception): void

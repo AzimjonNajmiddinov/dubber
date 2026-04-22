@@ -22,6 +22,7 @@ class InstantDubController extends Controller
             'srt' => 'nullable|string',
             'language' => 'required|string|max:10',
             'video_url' => 'nullable|string',
+            'audio_url' => 'nullable|string',
             'translate_from' => 'nullable|string|max:10',
             'title' => 'nullable|string|max:255',
             'quality' => 'nullable|string|in:standard,premium',
@@ -31,8 +32,9 @@ class InstantDubController extends Controller
         $language = $request->input('language', 'uz');
         $videoUrl = $request->input('video_url', '');
         $translateFrom = $request->input('translate_from', '');
-        $srt = (string) ($request->input('srt') ?? '');
-        $title = $request->input('title', 'Untitled');
+        $srt      = (string) ($request->input('srt') ?? '');
+        $audioUrl = (string) ($request->input('audio_url') ?? '') ?: null;
+        $title    = $request->input('title', 'Untitled');
         $quality = $request->input('quality', 'standard');
         $ttsDriver = $quality === 'premium' ? 'elevenlabs' : 'mms';
 
@@ -119,7 +121,7 @@ class InstantDubController extends Controller
         Redis::setex("instant-dub:{$sessionId}", 50400, json_encode($session));
 
         PrepareInstantDubJob::dispatch(
-            $sessionId, $videoUrl, $language, $translateFrom, $srt,
+            $sessionId, $videoUrl, $language, $translateFrom, $srt, null, $audioUrl,
         )->onQueue('segment-generation');
 
         Log::info("[DUB] Session created", ['session' => $sessionId, 'title' => $title, 'language' => $language]);

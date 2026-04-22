@@ -123,15 +123,17 @@ async function startDubbing(overlay) {
     const startBtn = document.getElementById('dubber-start');
     startBtn.disabled = true;
     startBtn.textContent = 'Yuklanmoqda...';
-    msgEl.textContent = 'YouTube subtitrlari olinmoqda...';
+    msgEl.textContent = 'YouTube ma\'lumotlari olinmoqda...';
 
     try {
         const videoUrl = location.href.split('&list')[0].split('&index')[0];
-        const srt      = await extractYouTubeCaptions();
+        const ytData   = await getYouTubeData();
+        const srt      = await extractCaptionsFromTracks(ytData?.captionTracks);
+        const audioUrl = ytData?.audioUrl || null;
 
         msgEl.textContent = srt
             ? `${countSrt(srt)} subtitle topildi. Serverga yuborilmoqda...`
-            : 'Subtitle topilmadi — nutq tanib olish ishlatiladi...';
+            : 'Subtitle topilmadi. Serverga yuborilmoqda...';
 
         const resp = await fetch(`${dubState.apiBase}/api/instant-dub/start`, {
             method:  'POST',
@@ -140,6 +142,7 @@ async function startDubbing(overlay) {
                 video_url:      videoUrl,
                 language:       dubState.language,
                 srt:            srt || '',
+                audio_url:      audioUrl || '',
                 title:          document.title.replace(' - YouTube', ''),
                 quality:        'standard',
             }),
@@ -229,35 +232,30 @@ function stopDubbing() {
     toast("Dubbing to'xtatildi");
 }
 
-// ─── YouTube caption extraction ───────────────────────────────────────────────
+// ─── YouTube data extraction ───────────────────────────────────────────────
 
-async function extractYouTubeCaptions() {
+function getYouTubeData() {
+    return new Promise(resolve => {
+        try {
+            chrome.runtime.sendMessage({ type: 'getYouTubeData' }, data => {
+                if (chrome.runtime.lastError) { resolve(null); return; }
+                resolve(data || null);
+            });
+        } catch { resolve(null); }
+    });
+}
+
+async function extractCaptionsFromTracks(tracks) {
     try {
-        const tracks = await getYtCaptionTracks();
         if (!tracks || !tracks.length) return null;
-
         const track = tracks.find(t => t.languageCode?.startsWith('en')) ||
                       tracks.find(t => !t.kind || t.kind !== 'asr') ||
                       tracks[0];
         if (!track?.baseUrl) return null;
-
         const resp = await fetch(track.baseUrl + '&fmt=json3');
         const data = await resp.json();
         return json3ToSrt(data);
     } catch { return null; }
-}
-
-function getYtCaptionTracks() {
-    // Ask background service worker to run in MAIN world and read
-    // window.ytInitialPlayerResponse directly — bypasses isolated world limit.
-    return new Promise(resolve => {
-        try {
-            chrome.runtime.sendMessage({ type: 'getCaptionTracks' }, tracks => {
-                if (chrome.runtime.lastError) { resolve(null); return; }
-                resolve(tracks || null);
-            });
-        } catch { resolve(null); }
-    });
 }
 
 function json3ToSrt(data) {

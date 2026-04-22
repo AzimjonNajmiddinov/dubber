@@ -22,12 +22,13 @@ class PrepareInstantDubJob implements ShouldQueue
     public int $tries = 2;
 
     public function __construct(
-        public string $sessionId,
-        public string $videoUrl,
-        public string $language,
-        public string $translateFrom,
-        public string $srt,
-        public ?int   $cachedDubId = null,
+        public string  $sessionId,
+        public string  $videoUrl,
+        public string  $language,
+        public string  $translateFrom,
+        public string  $srt,
+        public ?int    $cachedDubId = null,
+        public ?string $audioUrl = null,
     ) {}
 
     public function handle(): void
@@ -98,7 +99,7 @@ class PrepareInstantDubJob implements ShouldQueue
         // 2b. Dispatch background audio download in parallel (non-blocking)
         // Must go on 'default' queue — NOT 'segment-generation' — so TTS jobs
         // (which are on segment-generation with higher priority) aren't blocked.
-        DownloadOriginalAudioJob::dispatch($this->sessionId, $this->videoUrl)
+        DownloadOriginalAudioJob::dispatch($this->sessionId, $this->videoUrl, $this->audioUrl)
             ->onQueue('default');
 
         // 3. Filter to speakable segments
@@ -228,7 +229,7 @@ class PrepareInstantDubJob implements ShouldQueue
         $this->updateSession(['total_segments' => $total, 'status' => 'processing']);
 
         // Download background audio (needed for remix)
-        DownloadOriginalAudioJob::dispatch($this->sessionId, $this->videoUrl)
+        DownloadOriginalAudioJob::dispatch($this->sessionId, $this->videoUrl, $this->audioUrl)
             ->onQueue('default');
 
         // Dispatch TTS for segments that need re-TTS
