@@ -233,7 +233,7 @@ function stopDubbing() {
 
 async function extractYouTubeCaptions() {
     try {
-        const tracks = getYtCaptionTracks();
+        const tracks = await getYtCaptionTracks();
         if (!tracks || !tracks.length) return null;
 
         const track = tracks.find(t => t.languageCode?.startsWith('en')) ||
@@ -248,16 +248,18 @@ async function extractYouTubeCaptions() {
 }
 
 function getYtCaptionTracks() {
-    for (const s of document.querySelectorAll('script')) {
-        const m = s.textContent.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\});(?:\s*if\s*\(|var |let |const |\s*<)/s);
-        if (m) {
-            try {
-                const d = JSON.parse(m[1]);
-                return d?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-            } catch {}
-        }
-    }
-    return null;
+    return new Promise((resolve) => {
+        const eventName = '__dubber_caps_' + Date.now();
+        const script = document.createElement('script');
+        script.textContent = `(function(){
+            var d = window.ytInitialPlayerResponse;
+            var t = d && d.captions && d.captions.playerCaptionsTracklistRenderer &&
+                    d.captions.playerCaptionsTracklistRenderer.captionTracks;
+            window.dispatchEvent(new CustomEvent(${JSON.stringify(eventName)}, { detail: t || null }));
+        })();`;
+        window.addEventListener(eventName, (e) => { script.remove(); resolve(e.detail); }, { once: true });
+        document.documentElement.appendChild(script);
+    });
 }
 
 function json3ToSrt(data) {
