@@ -22,10 +22,11 @@ class DownloadAudioChunkJob implements ShouldQueue
     public int $tries = 3;
 
     public function __construct(
-        public string $sessionId,
-        public int    $chunkIndex,
-        public float  $startTime,
-        public float  $endTime,
+        public string  $sessionId,
+        public int     $chunkIndex,
+        public float   $startTime,
+        public float   $endTime,
+        public ?string $localAudioPath = null,
     ) {}
 
     public function handle(): void
@@ -37,48 +38,61 @@ class DownloadAudioChunkJob implements ShouldQueue
         $session = json_decode($sessionJson, true);
         if (($session['status'] ?? '') === 'stopped') return;
 
-        $segmentsJson = Redis::get("instant-dub:{$this->sessionId}:audio-segments");
-        if (!$segmentsJson) return;
-
-        $allSegments = json_decode($segmentsJson, true);
-
-        // Find .ts segments within our time range
-        $currentTime = 0;
-        $tsUrls = [];
-        foreach ($allSegments as $seg) {
-            $segEnd = $currentTime + $seg['duration'];
-            if ($segEnd > $this->startTime && $currentTime < $this->endTime) {
-                $tsUrls[] = $seg['url'];
-            }
-            $currentTime = $segEnd;
-            if ($currentTime >= $this->endTime) break;
-        }
-
-        if (empty($tsUrls)) return;
-
         $workDir = storage_path("app/instant-dub/{$this->sessionId}");
         @mkdir($workDir, 0755, true);
 
         $chunkFile = "{$workDir}/bg_chunk_{$this->chunkIndex}.aac";
 
-        $tmpPlaylist = "{$workDir}/chunk_{$this->chunkIndex}.m3u8";
-        $m3u8 = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n#EXT-X-MEDIA-SEQUENCE:0\n";
-        foreach ($tsUrls as $url) {
-            $m3u8 .= "#EXTINF:10.0,\n{$url}\n";
+        if ($this->localAudioPath) {
+            // YouTube path: cut directly from pre-downloaded local file
+            $duration = round($this->endTime - $this->startTime, 3);
+            $result = Process::timeout(90)->run([
+                'ffmpeg', '-y',
+                '-ss', (string) round($this->startTime, 3),
+                '-t',  (string) $duration,
+                '-i',  $this->localAudioPath,
+                '-vn', '-ac', '1', '-ar', '44100',
+                '-c:a', 'aac', '-b:a', '96k',
+                '-f', 'adts', $chunkFile,
+            ]);
+        } else {
+            // HLS path: fetch .ts segments and build temp playlist
+            $segmentsJson = Redis::get("instant-dub:{$this->sessionId}:audio-segments");
+            if (!$segmentsJson) return;
+
+            $allSegments = json_decode($segmentsJson, true);
+            $currentTime = 0;
+            $tsUrls = [];
+            foreach ($allSegments as $seg) {
+                $segEnd = $currentTime + $seg['duration'];
+                if ($segEnd > $this->startTime && $currentTime < $this->endTime) {
+                    $tsUrls[] = $seg['url'];
+                }
+                $currentTime = $segEnd;
+                if ($currentTime >= $this->endTime) break;
+            }
+
+            if (empty($tsUrls)) return;
+
+            $tmpPlaylist = "{$workDir}/chunk_{$this->chunkIndex}.m3u8";
+            $m3u8 = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n#EXT-X-MEDIA-SEQUENCE:0\n";
+            foreach ($tsUrls as $url) {
+                $m3u8 .= "#EXTINF:10.0,\n{$url}\n";
+            }
+            $m3u8 .= "#EXT-X-ENDLIST\n";
+            file_put_contents($tmpPlaylist, $m3u8);
+
+            $result = Process::timeout(90)->run([
+                'ffmpeg', '-y',
+                '-protocol_whitelist', 'file,http,https,tcp,tls,crypto',
+                '-i', $tmpPlaylist,
+                '-vn', '-ac', '1', '-ar', '44100',
+                '-c:a', 'aac', '-b:a', '96k',
+                '-f', 'adts', $chunkFile,
+            ]);
+
+            @unlink($tmpPlaylist);
         }
-        $m3u8 .= "#EXT-X-ENDLIST\n";
-        file_put_contents($tmpPlaylist, $m3u8);
-
-        $result = Process::timeout(90)->run([
-            'ffmpeg', '-y',
-            '-protocol_whitelist', 'file,http,https,tcp,tls,crypto',
-            '-i', $tmpPlaylist,
-            '-vn', '-ac', '1', '-ar', '44100',
-            '-c:a', 'aac', '-b:a', '96k',
-            '-f', 'adts', $chunkFile,
-        ]);
-
-        @unlink($tmpPlaylist);
 
         if (!$result->successful() || !file_exists($chunkFile) || filesize($chunkFile) < 100) {
             Log::warning("[DUB] Audio chunk {$this->chunkIndex} download failed", [

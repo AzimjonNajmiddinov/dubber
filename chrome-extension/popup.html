@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dubber Settings</title>
+<style>
+  body {
+    font-family: Arial, sans-serif;
+    background: #1a1a2e;
+    color: #fff;
+    width: 280px;
+    padding: 16px;
+    margin: 0;
+  }
+  h2 { font-size: 15px; margin: 0 0 14px; color: #7eb8f7; }
+  label { display: block; font-size: 12px; color: #aaa; margin-bottom: 4px; }
+  input, select {
+    width: 100%; box-sizing: border-box;
+    background: #252540; border: 1px solid #444; color: #fff;
+    border-radius: 6px; padding: 7px 10px; font-size: 13px; margin-bottom: 12px;
+  }
+  button {
+    width: 100%; padding: 9px; background: #1a73e8; color: white;
+    border: none; border-radius: 6px; cursor: pointer; font-size: 14px;
+    font-weight: bold;
+  }
+  button:hover { background: #1558b0; }
+  #saved { color: #4caf50; font-size: 12px; text-align: center; margin-top: 8px; display: none; }
+</style>
+</head>
+<body>
+<h2>⚙️ Dubber sozlamalari</h2>
+<label>API manzili</label>
+<input type="text" id="apiBase" placeholder="https://dubbing.uz">
+<label>Standart til</label>
+<select id="language">
+  <option value="uz">O'zbek</option>
+  <option value="ru">Русский</option>
+  <option value="en">English</option>
+  <option value="tr">Türkçe</option>
+  <option value="kk">Қазақша</option>
+</select>
+<button id="save">Saqlash</button>
+<div id="saved">✓ Saqlandi!</div>
+<script src="popup.js"></script>
+</body>
+</html>

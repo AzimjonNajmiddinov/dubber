@@ -34,6 +34,11 @@ class DownloadOriginalAudioJob implements ShouldQueue
         $session = json_decode($sessionJson, true);
         if (($session['status'] ?? '') === 'stopped') return;
 
+        if (str_contains($this->videoUrl, 'youtube.com') || str_contains($this->videoUrl, 'youtu.be')) {
+            $this->handleYoutube();
+            return;
+        }
+
         if (!str_contains($this->videoUrl, '.m3u8')) return;
 
         // Parse audio playlist to get segment URLs + durations
@@ -152,6 +157,82 @@ class DownloadOriginalAudioJob implements ShouldQueue
             ]);
             return [];
         }
+    }
+
+    private function handleYoutube(): void
+    {
+        $sessionKey = "instant-dub:{$this->sessionId}";
+        $workDir = storage_path("app/instant-dub/{$this->sessionId}");
+        @mkdir($workDir, 0755, true);
+
+        $audioPath = "{$workDir}/source_audio.m4a";
+
+        Log::info("[DUB] YouTube: downloading audio via yt-dlp", ['session' => $this->sessionId]);
+
+        $result = Process::timeout(300)->run([
+            'yt-dlp',
+            '-f', 'bestaudio[ext=m4a]/bestaudio',
+            '-o', $audioPath,
+            '--no-playlist', '--quiet', '--no-warnings',
+            '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            '--force-ipv4',
+            '--extractor-args', 'youtube:player_client=web',
+            $this->videoUrl,
+        ]);
+
+        if (!$result->successful() || !file_exists($audioPath) || filesize($audioPath) < 1000) {
+            Log::warning("[DUB] YouTube audio download failed", [
+                'session' => $this->sessionId,
+                'error'   => Str::limit($result->errorOutput(), 300),
+            ]);
+            return;
+        }
+
+        // Get total duration via ffprobe
+        $probeResult = Process::timeout(15)->run([
+            'ffprobe', '-v', 'error',
+            '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            $audioPath,
+        ]);
+        $totalDuration = (float) trim($probeResult->output());
+        if ($totalDuration <= 0) {
+            Log::warning("[DUB] YouTube: could not determine audio duration", ['session' => $this->sessionId]);
+            return;
+        }
+
+        // Update session with video duration
+        $sessionJson = Redis::get($sessionKey);
+        if ($sessionJson) {
+            $s = json_decode($sessionJson, true);
+            $s['video_duration'] = $totalDuration;
+            Redis::setex($sessionKey, 50400, json_encode($s));
+        }
+
+        // Dispatch 30s chunks using local file path
+        $CHUNK_SIZE  = 30.0;
+        $chunkIndex  = 0;
+        $chunkStart  = 0.0;
+
+        while ($chunkStart < $totalDuration) {
+            $chunkEnd = min($chunkStart + $CHUNK_SIZE, $totalDuration);
+            DownloadAudioChunkJob::dispatch(
+                $this->sessionId, $chunkIndex, $chunkStart, $chunkEnd, $audioPath,
+            )->onQueue('default');
+            $chunkStart = $chunkEnd;
+            $chunkIndex++;
+        }
+
+        $sessionJson = Redis::get($sessionKey);
+        if ($sessionJson) {
+            $s = json_decode($sessionJson, true);
+            $s['total_bg_chunks'] = $chunkIndex;
+            Redis::setex($sessionKey, 50400, json_encode($s));
+        }
+
+        Log::info("[DUB] YouTube audio dispatched ({$chunkIndex} chunks, {$totalDuration}s)", [
+            'session' => $this->sessionId,
+        ]);
     }
 
     public function failed(\Throwable $exception): void

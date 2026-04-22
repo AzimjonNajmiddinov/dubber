@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "Dubber - O'zbek Dubbing",
+  "version": "1.0",
+  "description": "YouTube videolarini o'zbek tiliga real-vaqtda dubbing qiladi",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://www.youtube.com/*",
+    "https://dubbing.uz/*",
+    "http://localhost/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://www.youtube.com/watch*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Dubber Settings"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["icons/*"],
+      "matches": ["https://www.youtube.com/*"]
+    }
+  ]
+}
