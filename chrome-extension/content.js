@@ -248,34 +248,16 @@ async function extractYouTubeCaptions() {
 }
 
 function getYtCaptionTracks() {
-    // Read ytInitialPlayerResponse directly from <script> tag text content.
-    // Content scripts can read script tag textContent even though they can't
-    // inject scripts (YouTube CSP blocks inline script injection).
-    for (const s of document.querySelectorAll('script')) {
-        const text = s.textContent;
-        if (!text.includes('captionTracks')) continue;
-
-        // Find captionTracks array using bracket matching
-        const key = '"captionTracks"';
-        const idx = text.indexOf(key);
-        if (idx === -1) continue;
-
-        const arrStart = text.indexOf('[', idx + key.length);
-        if (arrStart === -1) continue;
-
-        let depth = 0, i = arrStart;
-        for (; i < text.length; i++) {
-            const c = text[i];
-            if (c === '[' || c === '{') depth++;
-            else if (c === ']' || c === '}') { depth--; if (depth === 0) break; }
-        }
-
+    // Ask background service worker to run in MAIN world and read
+    // window.ytInitialPlayerResponse directly — bypasses isolated world limit.
+    return new Promise(resolve => {
         try {
-            const tracks = JSON.parse(text.slice(arrStart, i + 1));
-            if (Array.isArray(tracks) && tracks.length > 0) return Promise.resolve(tracks);
-        } catch {}
-    }
-    return Promise.resolve(null);
+            chrome.runtime.sendMessage({ type: 'getCaptionTracks' }, tracks => {
+                if (chrome.runtime.lastError) { resolve(null); return; }
+                resolve(tracks || null);
+            });
+        } catch { resolve(null); }
+    });
 }
 
 function json3ToSrt(data) {
