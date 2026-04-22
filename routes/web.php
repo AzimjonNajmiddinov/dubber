@@ -49,7 +49,15 @@ Route::post('/dub/complete', [OnlineDubController::class, 'uploadComplete'])->na
 Route::get('/dub/{video}', [OnlineDubController::class, 'progress'])->name('dub.progress');
 
 // Instant dub (SRT → TTS over video)
-Route::get('/instant-dub', fn() => view('instant-dub'))->name('instant-dub');
+// ?embedded=1 mode: allow framing from YouTube Chrome extension
+Route::get('/instant-dub', function () {
+    $response = response(view('instant-dub'));
+    if (request()->has('embedded')) {
+        $response->headers->set('X-Frame-Options', 'ALLOWALL');
+        $response->headers->set('Content-Security-Policy', "frame-ancestors *");
+    }
+    return $response;
+})->name('instant-dub');
 
 
 // Admin panel

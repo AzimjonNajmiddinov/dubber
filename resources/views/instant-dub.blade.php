@@ -501,6 +501,82 @@
     }
     function formatTime(s) { return String(Math.floor(s/60)).padStart(2,'0') + ':' + String(Math.floor(s%60)).padStart(2,'0'); }
     function truncate(s, n) { return s.length > n ? s.substring(0, n) + '...' : s; }
+
+    // ── Embedded / extension mode ─────────────────────────────────────────────
+    (function() {
+        const params       = new URLSearchParams(location.search);
+        const preSessionId = params.get('session_id');
+        const isEmbedded   = params.has('embedded');
+
+        if (!preSessionId) return;
+
+        // Minimal UI for embedded popup
+        if (isEmbedded) {
+            document.querySelector('.layout > .panel:first-child').style.display = 'none';
+            const hdr = document.querySelector('[style*="justify-content"]');
+            if (hdr) hdr.style.display = 'none';
+        }
+
+        // Connect to pre-existing session: poll for playable, then stream dubbed HLS audio
+        sessionId = preSessionId;
+        btnStart.disabled = true;
+        btnStop.disabled  = false;
+        statusBar.classList.add('active');
+        statusText.textContent = 'Dubbing yuklanmoqda...';
+
+        let pollHandle = setInterval(async () => {
+            try {
+                const resp = await fetch(`/api/instant-dub/${sessionId}/poll?after=${lastChunkIndex}`);
+                if (!resp.ok) { if (resp.status === 404) clearInterval(pollHandle); return; }
+                const data = await resp.json();
+
+                const ready = data.segments_ready || 0;
+                const total = data.total_segments || 0;
+                if (total > 0 && !totalSegments) { totalSegments = total; chunks = new Array(total).fill(null); }
+                if (total > 0) statusText.textContent = `${ready} / ${total} segment tayyor...`;
+                progressFill.style.width = total > 0 ? Math.round(ready / total * 100) + '%' : '0%';
+
+                // Store chunk metadata for subtitles (skip audio_base64 — HLS stream handles audio)
+                if (data.chunks) {
+                    for (const c of data.chunks) {
+                        if (c.index > lastChunkIndex) lastChunkIndex = c.index;
+                        chunks[c.index] = { start_time: c.start_time, end_time: c.end_time, text: c.text, speaker: c.speaker };
+                    }
+                    updateSegmentList();
+                }
+
+                // Once playable: load dubbed HLS audio and play it
+                if ((data.playable || data.status === 'complete') && !video.src.includes('dub-audio')) {
+                    loadVideo(`/api/instant-dub/${sessionId}/dub-audio.m3u8`).then(() => {
+                        video.play().catch(() => {});
+                        statusText.textContent = 'Ijro etilmoqda...';
+                    });
+                }
+
+                if (data.status === 'complete') {
+                    clearInterval(pollHandle);
+                    statusText.textContent = `Tayyor! ${total} segment`;
+                    progressFill.style.width = '100%';
+                }
+                if (data.status === 'error') {
+                    clearInterval(pollHandle);
+                    statusText.textContent = 'Xato: ' + (data.error || 'Noma\'lum xato');
+                }
+            } catch (e) { console.error('Embedded poll error:', e); }
+        }, 2000);
+
+        // Subtitle display driven by HLS video clock
+        video.addEventListener('timeupdate', updateSubtitle);
+
+        // Sync commands from YouTube content script via postMessage
+        window.addEventListener('message', (e) => {
+            const d = e.data;
+            if (!d || d.source !== 'dubber-ext') return;
+            if (d.type === 'seek')  { video.currentTime = d.time; }
+            if (d.type === 'pause') { video.pause(); }
+            if (d.type === 'play')  { video.play().catch(() => {}); }
+        });
+    })();
 })();
 </script>
 </body>
