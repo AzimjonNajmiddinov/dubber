@@ -244,7 +244,8 @@ function getYouTubeData() {
         const timer = setTimeout(() => finish(getDomYouTubeData()), 3000);
 
         try {
-            chrome.runtime.sendMessage({ type: 'getYouTubeData' }, data => {
+            const videoUrl = location.href.split('&list')[0].split('&index')[0];
+            chrome.runtime.sendMessage({ type: 'getYouTubeData', videoUrl }, data => {
                 clearTimeout(timer);
                 if (chrome.runtime.lastError || !data) {
                     finish(getDomYouTubeData());
