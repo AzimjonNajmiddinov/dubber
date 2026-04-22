@@ -251,13 +251,19 @@ function getYtCaptionTracks() {
     return new Promise((resolve) => {
         const eventName = '__dubber_caps_' + Date.now();
         const script = document.createElement('script');
+        // Dispatch on document.documentElement (shared DOM node) so content script can receive it
         script.textContent = `(function(){
             var d = window.ytInitialPlayerResponse;
             var t = d && d.captions && d.captions.playerCaptionsTracklistRenderer &&
                     d.captions.playerCaptionsTracklistRenderer.captionTracks;
-            window.dispatchEvent(new CustomEvent(${JSON.stringify(eventName)}, { detail: t || null }));
+            document.documentElement.dispatchEvent(
+                new CustomEvent(${JSON.stringify(eventName)}, { detail: t || null })
+            );
         })();`;
-        window.addEventListener(eventName, (e) => { script.remove(); resolve(e.detail); }, { once: true });
+        document.documentElement.addEventListener(eventName, (e) => {
+            script.remove();
+            resolve(e.detail);
+        }, { once: true });
         document.documentElement.appendChild(script);
     });
 }
