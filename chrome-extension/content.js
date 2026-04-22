@@ -248,24 +248,34 @@ async function extractYouTubeCaptions() {
 }
 
 function getYtCaptionTracks() {
-    return new Promise((resolve) => {
-        const eventName = '__dubber_caps_' + Date.now();
-        const script = document.createElement('script');
-        // Dispatch on document.documentElement (shared DOM node) so content script can receive it
-        script.textContent = `(function(){
-            var d = window.ytInitialPlayerResponse;
-            var t = d && d.captions && d.captions.playerCaptionsTracklistRenderer &&
-                    d.captions.playerCaptionsTracklistRenderer.captionTracks;
-            document.documentElement.dispatchEvent(
-                new CustomEvent(${JSON.stringify(eventName)}, { detail: t || null })
-            );
-        })();`;
-        document.documentElement.addEventListener(eventName, (e) => {
-            script.remove();
-            resolve(e.detail);
-        }, { once: true });
-        document.documentElement.appendChild(script);
-    });
+    // Read ytInitialPlayerResponse directly from <script> tag text content.
+    // Content scripts can read script tag textContent even though they can't
+    // inject scripts (YouTube CSP blocks inline script injection).
+    for (const s of document.querySelectorAll('script')) {
+        const text = s.textContent;
+        if (!text.includes('captionTracks')) continue;
+
+        // Find captionTracks array using bracket matching
+        const key = '"captionTracks"';
+        const idx = text.indexOf(key);
+        if (idx === -1) continue;
+
+        const arrStart = text.indexOf('[', idx + key.length);
+        if (arrStart === -1) continue;
+
+        let depth = 0, i = arrStart;
+        for (; i < text.length; i++) {
+            const c = text[i];
+            if (c === '[' || c === '{') depth++;
+            else if (c === ']' || c === '}') { depth--; if (depth === 0) break; }
+        }
+
+        try {
+            const tracks = JSON.parse(text.slice(arrStart, i + 1));
+            if (Array.isArray(tracks) && tracks.length > 0) return Promise.resolve(tracks);
+        } catch {}
+    }
+    return Promise.resolve(null);
 }
 
 function json3ToSrt(data) {
