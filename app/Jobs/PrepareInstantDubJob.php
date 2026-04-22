@@ -63,6 +63,12 @@ class PrepareInstantDubJob implements ShouldQueue
             $detectedLang = $hlsResult['language'];
         }
 
+        // YouTube fallback: download auto-captions via yt-dlp
+        if (trim($srt) === '' && (str_contains($this->videoUrl, 'youtube.com') || str_contains($this->videoUrl, 'youtu.be'))) {
+            $this->updateStatus('Fetching YouTube subtitles...');
+            $srt = $this->fetchYouTubeSrt($this->videoUrl);
+        }
+
         if (trim($srt) === '') {
             $this->updateStatus('error', 'No subtitles available');
             return;
@@ -538,6 +544,46 @@ class PrepareInstantDubJob implements ShouldQueue
         if (!$json) return;
         $session = json_decode($json, true);
         Redis::setex($sessionKey, 50400, json_encode(array_merge($session, $data)));
+    }
+
+    private function fetchYouTubeSrt(string $url): string
+    {
+        try {
+            $tmpDir = sys_get_temp_dir() . '/yt_subs_' . $this->sessionId;
+            @mkdir($tmpDir, 0755, true);
+
+            // Try manual subs first, then auto-generated
+            foreach (['--write-subs', '--write-auto-subs'] as $subFlag) {
+                $result = \Illuminate\Support\Facades\Process::timeout(60)->run([
+                    'yt-dlp',
+                    $subFlag,
+                    '--skip-download',
+                    '--sub-langs', 'en,ru,uz',
+                    '--sub-format', 'vtt',
+                    '--convert-subs', 'srt',
+                    '-o', $tmpDir . '/sub',
+                    '--no-playlist',
+                    '--quiet',
+                    $url,
+                ]);
+
+                // Find any .srt file written
+                $files = glob($tmpDir . '/*.srt') ?: [];
+                if (!empty($files)) {
+                    $srt = file_get_contents($files[0]);
+                    array_map('unlink', glob($tmpDir . '/*'));
+                    @rmdir($tmpDir);
+                    Log::info("[DUB] YouTube SRT fetched via yt-dlp ({$subFlag})", ['session' => $this->sessionId]);
+                    return $srt ?: '';
+                }
+            }
+
+            @rmdir($tmpDir);
+        } catch (\Throwable $e) {
+            Log::warning("[DUB] YouTube SRT fetch failed: " . $e->getMessage(), ['session' => $this->sessionId]);
+        }
+
+        return '';
     }
 
     public function failed(\Throwable $exception): void
