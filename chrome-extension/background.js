@@ -15,16 +15,46 @@ async function getYouTubeData(tabId, videoUrl) {
             target: { tabId },
             world: 'MAIN',
             func: () => {
-                const pr = window.ytInitialPlayerResponse;
-                console.log('[Dubber-main] pr:', !!pr, typeof pr);
-                if (!pr) return { debug: 'no_pr' };
-                const captionTracks = pr.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
-                console.log('[Dubber-main] tracks:', captionTracks.length);
-                const formats = pr.streamingData?.adaptiveFormats || [];
-                const audioFmt = formats
-                    .filter(f => f.mimeType?.startsWith('audio/') && f.url)
-                    .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
-                return { captionTracks, audioUrl: audioFmt?.url || null, debug: 'ok' };
+                try {
+                    const pr = window.ytInitialPlayerResponse;
+                    if (!pr) return null;
+
+                    const captionTracks = pr.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
+                    const formats = pr.streamingData?.adaptiveFormats || [];
+                    const audioFmt = formats
+                        .filter(f => f.mimeType?.startsWith('audio/') && f.url)
+                        .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+                    const audioUrl = audioFmt?.url || null;
+
+                    if (!captionTracks.length) return { srt: null, audioUrl };
+
+                    const track = captionTracks.find(t => t.languageCode?.startsWith('en') && t.kind !== 'asr')
+                        || captionTracks.find(t => t.languageCode?.startsWith('en'))
+                        || captionTracks[0];
+
+                    if (!track?.baseUrl) return { srt: null, audioUrl };
+
+                    // Sync XHR in page context — cookies included automatically
+                    const xhr = new XMLHttpRequest();
+                    xhr.open('GET', track.baseUrl + '&fmt=json3', false);
+                    xhr.send();
+
+                    if (!xhr.responseText) return { srt: null, audioUrl };
+
+                    const data = JSON.parse(xhr.responseText);
+                    let srt = '', idx = 1;
+                    const p = n => String(n).padStart(2, '0');
+                    const fmt = ms => `${p(Math.floor(ms/3600000))}:${p(Math.floor(ms%3600000/60000))}:${p(Math.floor(ms%60000/1000))},${String(ms%1000).padStart(3,'0')}`;
+                    for (const ev of data.events || []) {
+                        if (!ev.segs || !ev.dDurationMs) continue;
+                        const text = ev.segs.map(s => (s.utf8 || '').replace(/\n/g, ' ')).join('').trim();
+                        if (!text) continue;
+                        const s = ev.tStartMs || 0, e = s + ev.dDurationMs;
+                        srt += `${idx}\n${fmt(s)} --> ${fmt(e)}\n${text}\n\n`;
+                        idx++;
+                    }
+                    return { srt: srt || null, audioUrl };
+                } catch { return null; }
             },
         });
         const d = results?.[0]?.result;
