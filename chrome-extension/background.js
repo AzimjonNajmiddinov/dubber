@@ -24,7 +24,6 @@ async function getYouTubeData(tabId, videoUrl) {
                     if (url && url.includes('/api/timedtext')) {
                         p.then(r => r.clone().text()).then(t => {
                             if (t && t.length > 10) {
-                                console.log('[Dubber] intercepted fetch timedtext len:', t.length);
                                 window.__dubberSRT = t;
                             }
                         }).catch(() => {});
@@ -43,7 +42,6 @@ async function getYouTubeData(tabId, videoUrl) {
                     if (this.__dubberCaption) {
                         this.addEventListener('load', function() {
                             if (this.responseText && this.responseText.length > 10) {
-                                console.log('[Dubber] intercepted XHR timedtext len:', this.responseText.length);
                                 window.__dubberSRT = this.responseText;
                             }
                         });
