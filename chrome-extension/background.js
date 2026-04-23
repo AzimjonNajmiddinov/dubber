@@ -8,117 +8,92 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 async function getYouTubeData(tabId, videoUrl) {
     if (!videoUrl) return null;
 
-    // Step 1: get captionTracks + audioUrl from page via MAIN world (sync, no XHR)
-    let captionTracks = [], audioUrl = null;
+    // Step 1: get captionTracks + audioUrl from MAIN world (sync)
+    let captionTrack = null, audioUrl = null;
     try {
-        const results = await chrome.scripting.executeScript({
+        const r = await chrome.scripting.executeScript({
             target: { tabId },
             world: 'MAIN',
             func: () => {
-                try {
-                    const pr = window.ytInitialPlayerResponse;
-                    if (!pr) return null;
-
-                    const captionTracks = pr.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
-                    const formats = pr.streamingData?.adaptiveFormats || [];
-                    const audioFmt = formats
-                        .filter(f => f.mimeType?.startsWith('audio/') && f.url)
-                        .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
-                    const audioUrl = audioFmt?.url || null;
-
-                    if (!captionTracks.length) return { srt: null, audioUrl };
-
-                    const track = captionTracks.find(t => t.languageCode?.startsWith('en') && t.kind !== 'asr')
-                        || captionTracks.find(t => t.languageCode?.startsWith('en'))
-                        || captionTracks[0];
-
-                    if (!track?.baseUrl) return { srt: null, audioUrl };
-
-                    // Try multiple caption URL variants via sync XHR (page context = cookies)
-                    const videoId = pr.videoDetails?.videoId;
-                    const urls = [
-                        track.baseUrl + '&fmt=json3',
-                        `https://www.youtube.com/api/timedtext?v=${videoId}&lang=${track.languageCode}&fmt=json3`,
-                        `https://www.youtube.com/api/timedtext?v=${videoId}&lang=${track.languageCode}&fmt=json3&kind=${track.kind || ''}`,
-                    ];
-
-                    let xhrText = '';
-                    for (const url of urls) {
-                        try {
-                            const xhr = new XMLHttpRequest();
-                            xhr.open('GET', url, false);
-                            xhr.send();
-                            console.log('[Dubber-main] XHR', url.slice(50, 100), 'status:', xhr.status, 'len:', xhr.responseText.length);
-                            if (xhr.responseText) { xhrText = xhr.responseText; break; }
-                        } catch {}
-                    }
-                    if (!xhrText) return { srt: null, audioUrl, debug: 'all_xhr_empty' };
-
-                    const data = JSON.parse(xhrText);
-                    let srt = '', idx = 1;
-                    const p = n => String(n).padStart(2, '0');
-                    const fmt = ms => `${p(Math.floor(ms/3600000))}:${p(Math.floor(ms%3600000/60000))}:${p(Math.floor(ms%60000/1000))},${String(ms%1000).padStart(3,'0')}`;
-                    for (const ev of data.events || []) {
-                        if (!ev.segs || !ev.dDurationMs) continue;
-                        const text = ev.segs.map(s => (s.utf8 || '').replace(/\n/g, ' ')).join('').trim();
-                        if (!text) continue;
-                        const s = ev.tStartMs || 0, e = s + ev.dDurationMs;
-                        srt += `${idx}\n${fmt(s)} --> ${fmt(e)}\n${text}\n\n`;
-                        idx++;
-                    }
-                    return { srt: srt || null, audioUrl };
-                } catch { return null; }
-            },
-        });
-        const d = results?.[0]?.result;
-        if (d?.captionTracks?.length) {
-            captionTracks = d.captionTracks;
-            audioUrl = d.audioUrl;
-        }
-    } catch {}
-
-    // Step 2: if no captionTracks from page, fetch YouTube page HTML
-    if (!captionTracks.length) {
-        try {
-            const pageResp = await fetch(videoUrl, { headers: { 'Accept-Language': 'en-US,en;q=0.9' } });
-            const html = await pageResp.text();
-            const pr = parsePlayerResponse(html);
-            captionTracks = pr?.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
-            if (!audioUrl) {
-                const formats = pr?.streamingData?.adaptiveFormats || [];
+                const pr = window.ytInitialPlayerResponse;
+                if (!pr) return null;
+                const tracks = pr.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
+                const formats = pr.streamingData?.adaptiveFormats || [];
                 const audioFmt = formats
                     .filter(f => f.mimeType?.startsWith('audio/') && f.url)
                     .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
-                audioUrl = audioFmt?.url || null;
+                const track = tracks.find(t => t.languageCode?.startsWith('en') && t.kind !== 'asr')
+                    || tracks.find(t => t.languageCode?.startsWith('en'))
+                    || tracks[0];
+                return { track: track || null, audioUrl: audioFmt?.url || null };
+            },
+        });
+        const d = r?.[0]?.result;
+        if (d?.track) { captionTrack = d.track; audioUrl = d.audioUrl; }
+    } catch {}
+
+    // If no track from page, try fetching page HTML
+    if (!captionTrack) {
+        try {
+            const html = await (await fetch(videoUrl, { headers: { 'Accept-Language': 'en-US,en;q=0.9' } })).text();
+            const pr = parsePlayerResponse(html);
+            const tracks = pr?.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
+            captionTrack = tracks.find(t => t.languageCode?.startsWith('en') && t.kind !== 'asr')
+                || tracks.find(t => t.languageCode?.startsWith('en'))
+                || tracks[0] || null;
+            if (!audioUrl) {
+                const formats = pr?.streamingData?.adaptiveFormats || [];
+                const fmt = formats.filter(f => f.mimeType?.startsWith('audio/') && f.url)
+                    .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+                audioUrl = fmt?.url || null;
             }
         } catch {}
     }
 
-    // Step 3: pick best caption track
-    const track = captionTracks.find(t => t.languageCode?.startsWith('en') && t.kind !== 'asr')
-        || captionTracks.find(t => t.languageCode?.startsWith('en'))
-        || captionTracks[0];
+    if (!captionTrack?.baseUrl) return { srt: null, audioUrl };
 
-    if (!track?.baseUrl) return { srt: null, audioUrl };
+    const captionUrl = captionTrack.baseUrl + '&fmt=json3';
 
-    // Step 4: get YouTube cookies and fetch caption URL with them
+    // Step 2: trigger async fetch in MAIN world (page context = cookies), store in global
     try {
-        const cookies = await chrome.cookies.getAll({ domain: '.youtube.com' });
-        const cookieHeader = cookies.map(c => `${c.name}=${c.value}`).join('; ');
-
-        const capResp = await fetch(track.baseUrl + '&fmt=json3', {
-            headers: {
-                'Cookie': cookieHeader,
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        await chrome.scripting.executeScript({
+            target: { tabId },
+            world: 'MAIN',
+            func: (url) => {
+                window.__dubberSRT = 'loading';
+                fetch(url).then(r => r.text()).then(t => {
+                    window.__dubberSRT = t || 'empty';
+                }).catch(e => {
+                    window.__dubberSRT = 'err:' + e.message;
+                });
             },
+            args: [captionUrl],
         });
-        const text = await capResp.text();
-        if (!text) return { srt: null, audioUrl };
-
-        const data = JSON.parse(text);
-        const srt = json3ToSrt(data);
-        return { srt, audioUrl };
     } catch { return { srt: null, audioUrl }; }
+
+    // Step 3: poll for result (up to 5s)
+    for (let i = 0; i < 10; i++) {
+        await new Promise(r => setTimeout(r, 500));
+        try {
+            const r2 = await chrome.scripting.executeScript({
+                target: { tabId },
+                world: 'MAIN',
+                func: () => {
+                    const v = window.__dubberSRT;
+                    if (v && v !== 'loading') { delete window.__dubberSRT; return v; }
+                    return null;
+                },
+            });
+            const text = r2?.[0]?.result;
+            if (text && text !== 'empty' && !text.startsWith('err:')) {
+                const data = JSON.parse(text);
+                return { srt: json3ToSrt(data), audioUrl };
+            }
+            if (text && text !== 'loading') break; // empty or error — stop polling
+        } catch {}
+    }
+
+    return { srt: null, audioUrl };
 }
 
 function parsePlayerResponse(html) {
