@@ -128,7 +128,8 @@ async function startDubbing(overlay) {
     try {
         const videoUrl = location.href.split('&list')[0].split('&index')[0];
         const ytData   = await getYouTubeData();
-        const srt      = await extractCaptionsFromTracks(ytData?.captionTracks);
+        // background may have already fetched SRT (fallback path)
+        const srt      = ytData?.srt || await extractCaptionsFromTracks(ytData?.captionTracks);
         const audioUrl = ytData?.audioUrl || null;
 
         msgEl.textContent = srt
