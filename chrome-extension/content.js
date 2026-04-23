@@ -128,7 +128,7 @@ async function startDubbing(overlay) {
     try {
         const videoUrl = location.href.split('&list')[0].split('&index')[0];
         const ytData   = await getYouTubeData();
-        console.log('[Dubber] ytData:', ytData ? {srt_len: ytData.srt?.length, audio: !!ytData.audioUrl} : null);
+        console.log('[Dubber v10] ytData:', JSON.stringify(ytData)?.slice(0, 120));
         const srt      = ytData?.srt || null;
         const audioUrl = ytData?.audioUrl || null;
 

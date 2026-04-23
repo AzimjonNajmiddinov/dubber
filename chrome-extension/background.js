@@ -16,13 +16,15 @@ async function getYouTubeData(tabId, videoUrl) {
             world: 'MAIN',
             func: () => {
                 const pr = window.ytInitialPlayerResponse;
-                if (!pr) return null;
+                console.log('[Dubber-main] pr:', !!pr, typeof pr);
+                if (!pr) return { debug: 'no_pr' };
                 const captionTracks = pr.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
+                console.log('[Dubber-main] tracks:', captionTracks.length);
                 const formats = pr.streamingData?.adaptiveFormats || [];
                 const audioFmt = formats
                     .filter(f => f.mimeType?.startsWith('audio/') && f.url)
                     .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
-                return { captionTracks, audioUrl: audioFmt?.url || null };
+                return { captionTracks, audioUrl: audioFmt?.url || null, debug: 'ok' };
             },
         });
         const d = results?.[0]?.result;
