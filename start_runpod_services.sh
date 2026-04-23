@@ -158,7 +158,9 @@ if [ "$TTS_VENV_OK" = false ]; then
     echo "    Installing MMS+OpenVoice deps..."
     $TTS_VENV/bin/pip install -q \
         "transformers>=4.48,<4.50" uvicorn fastapi python-multipart soundfile scipy \
-        pyworld librosa "av" --prefer-binary
+        pyworld librosa "av" "inflect==7.0.0" "unidecode==1.3.7" wavmark pydub \
+        "eng_to_ipa==0.0.2" "cn2an==0.5.22" "jieba==0.42.1" "langid==1.1.6" pypinyin \
+        --prefer-binary
 
     echo "    Installing OpenVoice..."
     if [ -d /workspace/openvoice-v2 ]; then

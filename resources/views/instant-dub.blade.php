@@ -510,20 +510,79 @@
 
         if (!preSessionId) return;
 
-        // Minimal UI for embedded popup
         if (isEmbedded) {
             document.querySelector('.layout > .panel:first-child').style.display = 'none';
             const hdr = document.querySelector('[style*="justify-content"]');
             if (hdr) hdr.style.display = 'none';
         }
 
-        // Connect to pre-existing session: poll for playable, then stream dubbed HLS audio
         sessionId = preSessionId;
         btnStart.disabled = true;
         btnStop.disabled  = false;
         statusBar.classList.add('active');
         statusText.textContent = 'Dubbing yuklanmoqda...';
 
+        // AudioContext — popup opened via user gesture (window.open on button click)
+        if (!audioCtx) {
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        }
+
+        // Time tracking driven by postMessage from YouTube content script
+        let embTime    = 0;
+        let embPlaying = false;
+        let tickHandle = null;
+
+        function embTick() {
+            if (!embPlaying) return;
+            embTime += 0.1;
+            embUpdateAudio(embTime);
+            embUpdateSubtitle(embTime);
+        }
+
+        function embUpdateAudio(t) {
+            if (!audioCtx) return;
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+
+            let target = -1;
+            for (let i = 0; i < chunks.length; i++) {
+                const c = chunks[i];
+                if (!c || !c._audioBuffer) continue;
+                if (t >= c.start_time && t < c.start_time + c._audioBuffer.duration) { target = i; break; }
+            }
+            if (target === currentDubIndex) return;
+            stopCurrentAudio();
+            currentDubIndex = target;
+            if (target < 0) return;
+            const chunk = chunks[target];
+            const offset = Math.max(0, t - chunk.start_time);
+            if (offset >= chunk._audioBuffer.duration) return;
+            try {
+                const src = audioCtx.createBufferSource();
+                src.buffer = chunk._audioBuffer;
+                src.connect(audioCtx.destination);
+                src.start(0, offset);
+                src.onended = () => { if (currentDubIndex === target) { currentSource = null; currentDubIndex = -1; } };
+                currentSource = src;
+            } catch (e) {}
+        }
+
+        function embUpdateSubtitle(t) {
+            let found = '', speaker = '';
+            for (let i = 0; i < chunks.length; i++) {
+                const c = chunks[i];
+                if (c && t >= c.start_time && t <= c.end_time) { found = c.text; speaker = c.speaker || ''; break; }
+            }
+            const key = speaker + ':' + found;
+            if (key === lastSubKey) return;
+            lastSubKey = key;
+            const span = subtitleOverlay.querySelector('span');
+            const color = speakerColors[speaker] || '#fff';
+            span.innerHTML = found
+                ? `<b style="color:${color};font-size:0.75em;opacity:0.7">[${speaker}]</b> <span style="color:${color}">${found}</span>`
+                : '';
+        }
+
+        // Poll and decode audio — same as non-embedded mode
         let pollHandle = setInterval(async () => {
             try {
                 const resp = await fetch(`/api/instant-dub/${sessionId}/poll?after=${lastChunkIndex}`);
@@ -536,45 +595,57 @@
                 if (total > 0) statusText.textContent = `${ready} / ${total} segment tayyor...`;
                 progressFill.style.width = total > 0 ? Math.round(ready / total * 100) + '%' : '0%';
 
-                // Store chunk metadata for subtitles (skip audio_base64 — HLS stream handles audio)
-                if (data.chunks) {
+                if (data.chunks && data.chunks.length > 0) {
                     for (const c of data.chunks) {
                         if (c.index > lastChunkIndex) lastChunkIndex = c.index;
-                        chunks[c.index] = { start_time: c.start_time, end_time: c.end_time, text: c.text, speaker: c.speaker };
+                        const cd = { start_time: c.start_time, end_time: c.end_time, text: c.text, speaker: c.speaker };
+                        if (c.audio_base64) {
+                            try {
+                                cd._audioBuffer = await audioCtx.decodeAudioData(base64ToArrayBuffer(c.audio_base64));
+                                decodeSuccessCount++;
+                            } catch (e) { decodeFailCount++; }
+                        }
+                        if (c.error) cd.error = c.error;
+                        chunks[c.index] = cd;
                     }
                     updateSegmentList();
                 }
 
-                // Once playable: load dubbed HLS audio and play it
-                if ((data.playable || data.status === 'complete') && !video.src.includes('dub-audio')) {
-                    loadVideo(`/api/instant-dub/${sessionId}/dub-audio.m3u8`).then(() => {
-                        video.play().catch(() => {});
-                        statusText.textContent = 'Ijro etilmoqda...';
-                    });
-                }
-
                 if (data.status === 'complete') {
                     clearInterval(pollHandle);
-                    statusText.textContent = `Tayyor! ${total} segment`;
+                    statusText.textContent = `Tayyor! ${total} / ${total} segment`;
                     progressFill.style.width = '100%';
                 }
                 if (data.status === 'error') {
                     clearInterval(pollHandle);
-                    statusText.textContent = 'Xato: ' + (data.error || 'Noma\'lum xato');
+                    statusText.textContent = "Xato: " + (data.error || "Noma'lum xato");
                 }
             } catch (e) { console.error('Embedded poll error:', e); }
         }, 2000);
 
-        // Subtitle display driven by HLS video clock
-        video.addEventListener('timeupdate', updateSubtitle);
-
-        // Sync commands from YouTube content script via postMessage
+        // Sync commands from YouTube content script
         window.addEventListener('message', (e) => {
             const d = e.data;
             if (!d || d.source !== 'dubber-ext') return;
-            if (d.type === 'seek')  { video.currentTime = d.time; }
-            if (d.type === 'pause') { video.pause(); }
-            if (d.type === 'play')  { video.play().catch(() => {}); }
+            if (d.type === 'seek') {
+                embTime = d.time;
+                stopCurrentAudio();
+                currentDubIndex = -1;
+                embUpdateAudio(embTime);
+                embUpdateSubtitle(embTime);
+            }
+            if (d.type === 'pause') {
+                embPlaying = false;
+                clearInterval(tickHandle);
+                tickHandle = null;
+                stopCurrentAudio();
+            }
+            if (d.type === 'play') {
+                embPlaying = true;
+                if (!tickHandle) tickHandle = setInterval(embTick, 100);
+                if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+                embUpdateAudio(embTime);
+            }
         });
     })();
 })();
