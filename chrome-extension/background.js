@@ -61,9 +61,23 @@ async function getYouTubeData(tabId, videoUrl) {
             world: 'MAIN',
             func: (url) => {
                 window.__dubberSRT = 'loading';
-                fetch(url).then(r => r.text()).then(t => {
+
+                // Also try YouTube player API
+                try {
+                    const pl = document.querySelector('#movie_player');
+                    if (pl?.getPlayerCaptionTrackList) {
+                        console.log('[Dubber-async] player tracks:', JSON.stringify(pl.getPlayerCaptionTrackList()));
+                    }
+                } catch {}
+
+                fetch(url).then(r => {
+                    console.log('[Dubber-async] fetch status:', r.status, 'content-type:', r.headers.get('content-type'));
+                    return r.text();
+                }).then(t => {
+                    console.log('[Dubber-async] text len:', t.length, 'preview:', t.slice(0, 80));
                     window.__dubberSRT = t || 'empty';
                 }).catch(e => {
+                    console.log('[Dubber-async] error:', e.message);
                     window.__dubberSRT = 'err:' + e.message;
                 });
             },
