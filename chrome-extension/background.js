@@ -35,13 +35,21 @@ async function getYouTubeData(tabId, videoUrl) {
                     if (!track?.baseUrl) return { srt: null, audioUrl };
 
                     // Sync XHR in page context — cookies included automatically
-                    const xhr = new XMLHttpRequest();
-                    xhr.open('GET', track.baseUrl + '&fmt=json3', false);
-                    xhr.send();
+                    let xhrStatus, xhrLen, xhrText;
+                    try {
+                        const xhr = new XMLHttpRequest();
+                        xhr.open('GET', track.baseUrl + '&fmt=json3', false);
+                        xhr.send();
+                        xhrStatus = xhr.status;
+                        xhrLen = xhr.responseText.length;
+                        xhrText = xhr.responseText;
+                    } catch(xe) {
+                        return { srt: null, audioUrl, debug: 'xhr_error:' + xe.message };
+                    }
+                    console.log('[Dubber-main] XHR status:', xhrStatus, 'len:', xhrLen);
+                    if (!xhrText) return { srt: null, audioUrl, debug: 'xhr_empty' };
 
-                    if (!xhr.responseText) return { srt: null, audioUrl };
-
-                    const data = JSON.parse(xhr.responseText);
+                    const data = JSON.parse(xhrText);
                     let srt = '', idx = 1;
                     const p = n => String(n).padStart(2, '0');
                     const fmt = ms => `${p(Math.floor(ms/3600000))}:${p(Math.floor(ms%3600000/60000))}:${p(Math.floor(ms%60000/1000))},${String(ms%1000).padStart(3,'0')}`;
