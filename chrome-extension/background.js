@@ -18,6 +18,7 @@ async function getYouTubeData(tabId, videoUrl) {
                     if (!pr) return null;
 
                     const captionTracks = pr.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
+                    console.log('[Dubber-sync] tracks:', captionTracks.length);
                     const formats = pr.streamingData?.adaptiveFormats || [];
                     const audioFmt = formats
                         .filter(f => f.mimeType?.startsWith('audio/') && f.url)
@@ -36,6 +37,7 @@ async function getYouTubeData(tabId, videoUrl) {
                     const xhr = new XMLHttpRequest();
                     xhr.open('GET', track.baseUrl + '&fmt=json3', false);
                     xhr.send();
+                    console.log('[Dubber-sync] XHR status:', xhr.status, 'len:', xhr.responseText.length, 'url:', track.baseUrl.slice(0, 60));
 
                     if (!xhr.responseText) return { srt: null, audioUrl };
 
