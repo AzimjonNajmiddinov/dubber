@@ -6,27 +6,60 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 async function getYouTubeData(tabId, videoUrl) {
-    // 1. Try MAIN world — direct access to window.ytInitialPlayerResponse
-    //    Content script then fetches caption URL (same browser session = valid ei token)
+    // 1. Run entirely in MAIN world: get captionTracks, fetch caption content, return SRT
     try {
         const results = await chrome.scripting.executeScript({
             target: { tabId },
             world: 'MAIN',
-            func: () => {
+            func: async () => {
                 try {
                     const pr = window.ytInitialPlayerResponse;
                     if (!pr) return null;
-                    const captionTracks = pr.captions?.playerCaptionsTracklistRenderer?.captionTracks || null;
+
+                    const captionTracks = pr.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
                     const formats = pr.streamingData?.adaptiveFormats || [];
                     const audioFmt = formats
                         .filter(f => f.mimeType?.startsWith('audio/') && f.url)
                         .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
-                    return { captionTracks, audioUrl: audioFmt?.url || null };
-                } catch { return null; }
+                    const audioUrl = audioFmt?.url || null;
+
+                    if (!captionTracks.length) return { srt: null, audioUrl };
+
+                    // Pick best track
+                    const track = captionTracks.find(t => t.languageCode?.startsWith('en') && t.kind !== 'asr')
+                        || captionTracks.find(t => t.languageCode?.startsWith('en'))
+                        || captionTracks[0];
+
+                    if (!track?.baseUrl) return { srt: null, audioUrl };
+
+                    // Fetch caption from page context (has YouTube cookies)
+                    const resp = await fetch(track.baseUrl + '&fmt=json3');
+                    const data = await resp.json();
+
+                    // Convert json3 to SRT inline
+                    let srt = '', idx = 1;
+                    for (const ev of data.events || []) {
+                        if (!ev.segs || !ev.dDurationMs) continue;
+                        const text = ev.segs.map(s => (s.utf8 || '').replace(/\n/g, ' ')).join('').trim();
+                        if (!text) continue;
+                        const s = ev.tStartMs || 0, e = s + ev.dDurationMs;
+                        const fmt = ms => {
+                            const h = Math.floor(ms/3600000), m = Math.floor(ms%3600000/60000),
+                                  sc = Math.floor(ms%60000/1000), f = ms%1000;
+                            const p = n => String(n).padStart(2,'0');
+                            return `${p(h)}:${p(m)}:${p(sc)},${String(f).padStart(3,'0')}`;
+                        };
+                        srt += `${idx}\n${fmt(s)} --> ${fmt(e)}\n${text}\n\n`;
+                        idx++;
+                    }
+
+                    return { srt: srt || null, audioUrl };
+                } catch (e) { return null; }
             },
         });
         const data = results?.[0]?.result;
-        if (data?.captionTracks?.length) return data;
+        if (data?.srt) return data;
+        if (data) return data; // has audioUrl at least
     } catch {}
 
     // 2. Fallback: fetch YouTube page + caption content entirely in background

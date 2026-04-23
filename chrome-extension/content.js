@@ -128,11 +128,9 @@ async function startDubbing(overlay) {
     try {
         const videoUrl = location.href.split('&list')[0].split('&index')[0];
         const ytData   = await getYouTubeData();
-        console.log('[Dubber] ytData:', ytData ? {srt_len: ytData.srt?.length, tracks: ytData.captionTracks?.length, audio: !!ytData.audioUrl} : null);
-        // background may have already fetched SRT (fallback path)
-        const srt      = ytData?.srt || await extractCaptionsFromTracks(ytData?.captionTracks);
+        console.log('[Dubber] ytData:', ytData ? {srt_len: ytData.srt?.length, audio: !!ytData.audioUrl} : null);
+        const srt      = ytData?.srt || null;
         const audioUrl = ytData?.audioUrl || null;
-        console.log('[Dubber] srt length:', srt?.length, 'audioUrl:', !!audioUrl);
 
         msgEl.textContent = srt
             ? `${countSrt(srt)} subtitle topildi. Serverga yuborilmoqda...`
