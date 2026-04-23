@@ -296,11 +296,21 @@ async function extractCaptionsFromTracks(tracks) {
         const track = tracks.find(t => t.languageCode?.startsWith('en')) ||
                       tracks.find(t => !t.kind || t.kind !== 'asr') ||
                       tracks[0];
+        console.log('[Dubber] track:', track?.languageCode, track?.kind, 'hasUrl:', !!track?.baseUrl);
         if (!track?.baseUrl) return null;
-        const resp = await fetch(track.baseUrl + '&fmt=json3');
-        const data = await resp.json();
-        return json3ToSrt(data);
-    } catch { return null; }
+        const url = track.baseUrl + '&fmt=json3';
+        const resp = await fetch(url);
+        console.log('[Dubber] caption fetch status:', resp.status, 'size:', resp.headers.get('content-length'));
+        const text = await resp.text();
+        console.log('[Dubber] caption text preview:', text.slice(0, 100));
+        const data = JSON.parse(text);
+        const srt = json3ToSrt(data);
+        console.log('[Dubber] srt result:', srt ? srt.slice(0, 80) : null);
+        return srt;
+    } catch (e) {
+        console.error('[Dubber] extractCaptionsFromTracks error:', e);
+        return null;
+    }
 }
 
 function json3ToSrt(data) {
