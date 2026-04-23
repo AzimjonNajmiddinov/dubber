@@ -609,6 +609,8 @@
                         chunks[c.index] = cd;
                     }
                     updateSegmentList();
+                    // Immediately try to play if we're in playing state
+                    if (embPlaying) embUpdateAudio(embTime);
                 }
 
                 if (data.status === 'complete') {

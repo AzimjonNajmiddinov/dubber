@@ -159,11 +159,11 @@ async function startDubbing(overlay) {
         // Open the existing instant-dub player in a popup window
         openPlayerPopup(session_id);
 
-        // Setup YouTube ↔ popup sync
+        // Setup YouTube ↔ popup sync (mutes YouTube original audio)
         setupVideoSync();
 
         updateButton(true);
-        toast('Dubbing player ochildi!');
+        toast('Dubbing yuklanmoqda... tayyor bo\'lgach o\'zbek ovozi chiqadi');
 
     } catch (err) {
         msgEl.textContent = `Xato: ${err.message}`;
@@ -195,6 +195,10 @@ function setupVideoSync() {
     const video = document.querySelector('video');
     if (!video) return;
 
+    // Mute original audio while dubbing
+    dubState._origVolume = video.volume;
+    video.volume = 0;
+
     const send = (msg) => {
         if (dubState.popup && !dubState.popup.closed) {
             dubState.popup.postMessage({ source: 'dubber-ext', ...msg },
@@ -206,17 +210,33 @@ function setupVideoSync() {
     video.addEventListener('pause',   () => send({ type: 'pause' }));
     video.addEventListener('play',    () => send({ type: 'play'  }));
 
-    // Periodic drift correction (every 10s)
+    // Send initial state — retry a few times while popup loads
+    const sendInitial = () => {
+        send({ type: 'seek', time: video.currentTime });
+        if (!video.paused) send({ type: 'play' });
+    };
+    setTimeout(sendInitial, 500);
+    setTimeout(sendInitial, 1500);
+    setTimeout(sendInitial, 3000);
+
+    // Periodic drift correction (every 3s)
     dubState._syncInterval = setInterval(() => {
         if (!dubState.active || !video) return;
         send({ type: 'seek', time: video.currentTime });
-    }, 10000);
+        if (!video.paused) send({ type: 'play' });
+    }, 3000);
 }
 
 // ─── Stop ────────────────────────────────────────────────────────────────────
 
 function stopDubbing() {
     if (!dubState.active) return;
+
+    // Restore original video volume
+    const video = document.querySelector('video');
+    if (video && dubState._origVolume != null) {
+        video.volume = dubState._origVolume;
+    }
 
     if (dubState.sessionId) {
         fetch(`${dubState.apiBase}/api/instant-dub/${dubState.sessionId}/stop`, { method: 'POST' }).catch(() => {});
@@ -225,9 +245,10 @@ function stopDubbing() {
     if (dubState.popup && !dubState.popup.closed) dubState.popup.close();
     clearInterval(dubState._syncInterval);
 
-    dubState.active    = false;
-    dubState.sessionId = null;
-    dubState.popup     = null;
+    dubState.active      = false;
+    dubState.sessionId   = null;
+    dubState.popup       = null;
+    dubState._origVolume = null;
 
     updateButton(false);
     toast("Dubbing to'xtatildi");
