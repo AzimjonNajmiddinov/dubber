@@ -14,6 +14,7 @@ async function getYouTubeData(tabId, videoUrl) {
             func: async () => {
                 try {
                     const pr = window.ytInitialPlayerResponse;
+                    console.log('[Dubber-MAIN] pr:', !!pr, 'captions:', !!pr?.captions);
                     if (!pr) return null;
 
                     const captionTracks = pr.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
@@ -30,10 +31,12 @@ async function getYouTubeData(tabId, videoUrl) {
                         || captionTracks.find(t => t.languageCode?.startsWith('en'))
                         || captionTracks[0];
 
+                    console.log('[Dubber-MAIN] track:', track?.languageCode, 'url:', !!track?.baseUrl);
                     if (!track?.baseUrl) return { srt: null, audioUrl };
 
                     // Fetch caption from page context (has YouTube cookies)
                     const resp = await fetch(track.baseUrl + '&fmt=json3');
+                    console.log('[Dubber-MAIN] caption fetch status:', resp.status, 'size:', resp.headers.get('content-length'));
                     const data = await resp.json();
 
                     // Convert json3 to SRT inline
