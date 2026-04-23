@@ -124,7 +124,13 @@ class InstantDubController extends Controller
             $sessionId, $videoUrl, $language, $translateFrom, $srt, null, $audioUrl,
         )->onQueue('segment-generation');
 
-        Log::info("[DUB] Session created", ['session' => $sessionId, 'title' => $title, 'language' => $language]);
+        Log::info("[DUB] Session created", [
+            'session'   => $sessionId,
+            'title'     => $title,
+            'language'  => $language,
+            'srt_len'   => strlen($srt),
+            'audio_url' => $audioUrl ? substr($audioUrl, 0, 60) : null,
+        ]);
 
         return response()->json(['session_id' => $sessionId]);
     }
