@@ -34,20 +34,25 @@ async function getYouTubeData(tabId, videoUrl) {
 
                     if (!track?.baseUrl) return { srt: null, audioUrl };
 
-                    // Sync XHR in page context — cookies included automatically
-                    let xhrStatus, xhrLen, xhrText;
-                    try {
-                        const xhr = new XMLHttpRequest();
-                        xhr.open('GET', track.baseUrl + '&fmt=json3', false);
-                        xhr.send();
-                        xhrStatus = xhr.status;
-                        xhrLen = xhr.responseText.length;
-                        xhrText = xhr.responseText;
-                    } catch(xe) {
-                        return { srt: null, audioUrl, debug: 'xhr_error:' + xe.message };
+                    // Try multiple caption URL variants via sync XHR (page context = cookies)
+                    const videoId = pr.videoDetails?.videoId;
+                    const urls = [
+                        track.baseUrl + '&fmt=json3',
+                        `https://www.youtube.com/api/timedtext?v=${videoId}&lang=${track.languageCode}&fmt=json3`,
+                        `https://www.youtube.com/api/timedtext?v=${videoId}&lang=${track.languageCode}&fmt=json3&kind=${track.kind || ''}`,
+                    ];
+
+                    let xhrText = '';
+                    for (const url of urls) {
+                        try {
+                            const xhr = new XMLHttpRequest();
+                            xhr.open('GET', url, false);
+                            xhr.send();
+                            console.log('[Dubber-main] XHR', url.slice(50, 100), 'status:', xhr.status, 'len:', xhr.responseText.length);
+                            if (xhr.responseText) { xhrText = xhr.responseText; break; }
+                        } catch {}
                     }
-                    console.log('[Dubber-main] XHR status:', xhrStatus, 'len:', xhrLen);
-                    if (!xhrText) return { srt: null, audioUrl, debug: 'xhr_empty' };
+                    if (!xhrText) return { srt: null, audioUrl, debug: 'all_xhr_empty' };
 
                     const data = JSON.parse(xhrText);
                     let srt = '', idx = 1;
