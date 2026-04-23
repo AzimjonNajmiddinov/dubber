@@ -6,10 +6,91 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 async function getYouTubeData(tabId, videoUrl) {
-    if (!videoUrl) return null;
+    // Step 1: inject fetch/XHR interceptor + trigger CC button in MAIN world
+    try {
+        await chrome.scripting.executeScript({
+            target: { tabId },
+            world: 'MAIN',
+            func: () => {
+                if (window.__dubberInterceptorSet) return;
+                window.__dubberInterceptorSet = true;
+                window.__dubberSRT = null;
 
-    // Step 1: get captionTracks + audioUrl from MAIN world (sync)
-    let captionTrack = null, audioUrl = null;
+                // Intercept fetch
+                const origFetch = window.fetch;
+                window.fetch = function(input, init) {
+                    const url = typeof input === 'string' ? input : input?.url;
+                    const p = origFetch.call(this, input, init);
+                    if (url && url.includes('/api/timedtext')) {
+                        p.then(r => r.clone().text()).then(t => {
+                            if (t && t.length > 10) {
+                                console.log('[Dubber] intercepted fetch timedtext len:', t.length);
+                                window.__dubberSRT = t;
+                            }
+                        }).catch(() => {});
+                    }
+                    return p;
+                };
+
+                // Intercept XHR
+                const origOpen = XMLHttpRequest.prototype.open;
+                XMLHttpRequest.prototype.open = function(m, url, ...a) {
+                    if (url && url.includes('/api/timedtext')) this.__dubberCaption = true;
+                    return origOpen.apply(this, [m, url, ...a]);
+                };
+                const origSend = XMLHttpRequest.prototype.send;
+                XMLHttpRequest.prototype.send = function(...a) {
+                    if (this.__dubberCaption) {
+                        this.addEventListener('load', function() {
+                            if (this.responseText && this.responseText.length > 10) {
+                                console.log('[Dubber] intercepted XHR timedtext len:', this.responseText.length);
+                                window.__dubberSRT = this.responseText;
+                            }
+                        });
+                    }
+                    return origSend.apply(this, a);
+                };
+
+                // Trigger CC button to make player fetch captions
+                const ccBtn = document.querySelector('.ytp-subtitles-button');
+                const wasActive = ccBtn?.getAttribute('aria-pressed') === 'true';
+                if (ccBtn && !wasActive) {
+                    ccBtn.click();
+                    window.__dubberCCWasOff = true;
+                }
+            },
+        });
+    } catch {}
+
+    // Step 2: poll up to 6s for intercepted SRT
+    let srtText = null;
+    for (let i = 0; i < 12; i++) {
+        await new Promise(r => setTimeout(r, 500));
+        try {
+            const r = await chrome.scripting.executeScript({
+                target: { tabId },
+                world: 'MAIN',
+                func: () => {
+                    const v = window.__dubberSRT;
+                    if (v) {
+                        window.__dubberSRT = null;
+                        // Restore CC button if we enabled it
+                        if (window.__dubberCCWasOff) {
+                            window.__dubberCCWasOff = false;
+                            document.querySelector('.ytp-subtitles-button')?.click();
+                        }
+                        return v;
+                    }
+                    return null;
+                },
+            });
+            srtText = r?.[0]?.result;
+            if (srtText) break;
+        } catch {}
+    }
+
+    // Step 3: get audioUrl from MAIN world
+    let audioUrl = null;
     try {
         const r = await chrome.scripting.executeScript({
             target: { tabId },
@@ -17,113 +98,21 @@ async function getYouTubeData(tabId, videoUrl) {
             func: () => {
                 const pr = window.ytInitialPlayerResponse;
                 if (!pr) return null;
-                const tracks = pr.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
                 const formats = pr.streamingData?.adaptiveFormats || [];
-                const audioFmt = formats
-                    .filter(f => f.mimeType?.startsWith('audio/') && f.url)
+                const f = formats.filter(f => f.mimeType?.startsWith('audio/') && f.url)
                     .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
-                const track = tracks.find(t => t.languageCode?.startsWith('en') && t.kind !== 'asr')
-                    || tracks.find(t => t.languageCode?.startsWith('en'))
-                    || tracks[0];
-                return { track: track || null, audioUrl: audioFmt?.url || null };
+                return f?.url || null;
             },
         });
-        const d = r?.[0]?.result;
-        if (d?.track) { captionTrack = d.track; audioUrl = d.audioUrl; }
+        audioUrl = r?.[0]?.result || null;
     } catch {}
 
-    // If no track from page, try fetching page HTML
-    if (!captionTrack) {
-        try {
-            const html = await (await fetch(videoUrl, { headers: { 'Accept-Language': 'en-US,en;q=0.9' } })).text();
-            const pr = parsePlayerResponse(html);
-            const tracks = pr?.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
-            captionTrack = tracks.find(t => t.languageCode?.startsWith('en') && t.kind !== 'asr')
-                || tracks.find(t => t.languageCode?.startsWith('en'))
-                || tracks[0] || null;
-            if (!audioUrl) {
-                const formats = pr?.streamingData?.adaptiveFormats || [];
-                const fmt = formats.filter(f => f.mimeType?.startsWith('audio/') && f.url)
-                    .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
-                audioUrl = fmt?.url || null;
-            }
-        } catch {}
-    }
+    if (!srtText) return { srt: null, audioUrl };
 
-    if (!captionTrack?.baseUrl) return { srt: null, audioUrl };
-
-    const captionUrl = captionTrack.baseUrl + '&fmt=json3';
-
-    // Step 2: trigger async fetch in MAIN world (page context = cookies), store in global
     try {
-        await chrome.scripting.executeScript({
-            target: { tabId },
-            world: 'MAIN',
-            func: (url) => {
-                window.__dubberSRT = 'loading';
-
-                // Also try YouTube player API
-                try {
-                    const pl = document.querySelector('#movie_player');
-                    if (pl?.getPlayerCaptionTrackList) {
-                        console.log('[Dubber-async] player tracks:', JSON.stringify(pl.getPlayerCaptionTrackList()));
-                    }
-                } catch {}
-
-                fetch(url).then(r => {
-                    console.log('[Dubber-async] fetch status:', r.status, 'content-type:', r.headers.get('content-type'));
-                    return r.text();
-                }).then(t => {
-                    console.log('[Dubber-async] text len:', t.length, 'preview:', t.slice(0, 80));
-                    window.__dubberSRT = t || 'empty';
-                }).catch(e => {
-                    console.log('[Dubber-async] error:', e.message);
-                    window.__dubberSRT = 'err:' + e.message;
-                });
-            },
-            args: [captionUrl],
-        });
+        const data = JSON.parse(srtText);
+        return { srt: json3ToSrt(data), audioUrl };
     } catch { return { srt: null, audioUrl }; }
-
-    // Step 3: poll for result (up to 5s)
-    for (let i = 0; i < 10; i++) {
-        await new Promise(r => setTimeout(r, 500));
-        try {
-            const r2 = await chrome.scripting.executeScript({
-                target: { tabId },
-                world: 'MAIN',
-                func: () => {
-                    const v = window.__dubberSRT;
-                    if (v && v !== 'loading') { delete window.__dubberSRT; return v; }
-                    return null;
-                },
-            });
-            const text = r2?.[0]?.result;
-            if (text && text !== 'empty' && !text.startsWith('err:')) {
-                const data = JSON.parse(text);
-                return { srt: json3ToSrt(data), audioUrl };
-            }
-            if (text && text !== 'loading') break; // empty or error — stop polling
-        } catch {}
-    }
-
-    return { srt: null, audioUrl };
-}
-
-function parsePlayerResponse(html) {
-    try {
-        const idx = html.indexOf('ytInitialPlayerResponse');
-        if (idx === -1) return null;
-        const objStart = html.indexOf('{', idx);
-        if (objStart === -1) return null;
-        let depth = 0, i = objStart;
-        for (; i < html.length; i++) {
-            const c = html[i];
-            if (c === '{' || c === '[') depth++;
-            else if (c === '}' || c === ']') { if (--depth === 0) break; }
-        }
-        return JSON.parse(html.slice(objStart, i + 1));
-    } catch { return null; }
 }
 
 function json3ToSrt(data) {
