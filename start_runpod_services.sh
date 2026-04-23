@@ -160,6 +160,7 @@ if [ "$TTS_VENV_OK" = false ]; then
         "transformers>=4.48,<4.50" uvicorn fastapi python-multipart soundfile scipy \
         pyworld librosa "av" "inflect==7.0.0" "unidecode==1.3.7" wavmark pydub \
         "eng_to_ipa==0.0.2" "cn2an==0.5.22" "jieba==0.42.1" "langid==1.1.6" pypinyin \
+        ctranslate2 "faster-whisper==0.9.0" openai-whisper dtw-python \
         --prefer-binary
 
     echo "    Installing OpenVoice..."
