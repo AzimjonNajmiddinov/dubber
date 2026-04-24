@@ -16,7 +16,6 @@ let dubState = {
     currentSrc:      null,
     currentIdx:      -1,
     pollTimer:       null,
-    _nextTimer:      null,
     _origVolume:     null,
 };
 
@@ -310,7 +309,6 @@ function playDubAudio(t) {
     if (!ctx) return;
     if (ctx.state === 'suspended') ctx.resume();
 
-    // Find chunk that covers current video time
     let target = -1;
     for (let i = 0; i < dubState.chunks.length; i++) {
         const c = dubState.chunks[i];
@@ -322,13 +320,8 @@ function playDubAudio(t) {
     stopCurrentAudio();
     if (target < 0) return;
 
-    _startChunk(target, Math.max(0, t - dubState.chunks[target].start_time));
-}
-
-function _startChunk(idx, offset) {
-    const ctx   = dubState.audioCtx;
-    const chunk = dubState.chunks[idx];
-    if (!ctx || !chunk || !chunk._audioBuffer) return;
+    const chunk  = dubState.chunks[target];
+    const offset = Math.max(0, t - chunk.start_time);
     if (offset >= chunk._audioBuffer.duration) return;
 
     try {
@@ -340,52 +333,21 @@ function _startChunk(idx, offset) {
         gain.connect(ctx.destination);
         src.start(0, offset);
         dubState.currentSrc = src;
-        dubState.currentIdx = idx;
+        dubState.currentIdx = target;
 
+        // On chunk end: immediately try next chunk without waiting for timeupdate
         src.onended = () => {
-            if (dubState.currentIdx !== idx) return;
+            if (dubState.currentIdx !== target) return;
             dubState.currentSrc = null;
             dubState.currentIdx = -1;
-            _playNextChunk(idx);
+            if (dubState.active && dubState._video && !dubState._video.paused) {
+                playDubAudio(dubState._video.currentTime);
+            }
         };
     } catch (e) {}
 }
 
-// Called when a chunk ends — immediately find and start the next one
-function _playNextChunk(fromIdx) {
-    if (!dubState.active) return;
-    const video = dubState._video;
-    if (!video || video.paused) return;
-
-    const t = video.currentTime;
-    // Find nearest upcoming chunk
-    let best = -1, bestStart = Infinity;
-    for (let i = 0; i < dubState.chunks.length; i++) {
-        const c = dubState.chunks[i];
-        if (!c || !c._audioBuffer) continue;
-        const end = c.start_time + c._audioBuffer.duration;
-        if (end <= t) continue;             // already past
-        if (c.start_time < bestStart) { bestStart = c.start_time; best = i; }
-    }
-    if (best < 0) return;
-
-    const gap = bestStart - t; // seconds until chunk starts
-    if (gap <= 0.05) {
-        // Start immediately (within 50ms tolerance)
-        _startChunk(best, Math.max(0, t - bestStart));
-    } else {
-        // Wait until video reaches the next chunk
-        const timer = setTimeout(() => {
-            if (!dubState.active || dubState.currentIdx !== -1) return;
-            const vt = dubState._video?.currentTime ?? t;
-            _startChunk(best, Math.max(0, vt - dubState.chunks[best].start_time));
-        }, gap * 1000 - 30); // 30ms early to compensate setTimeout jitter
-        dubState._nextTimer = timer;
-    }
-}
-
 function stopCurrentAudio() {
-    if (dubState._nextTimer) { clearTimeout(dubState._nextTimer); dubState._nextTimer = null; }
     if (dubState.currentSrc) {
         try { dubState.currentSrc.stop(); } catch (e) {}
         dubState.currentSrc = null;
@@ -466,7 +428,6 @@ function stopDubbing() {
     dubState.chunks       = [];
     dubState.lastChunkIdx = -1;
     dubState._origVolume  = null;
-    dubState._nextTimer   = null;
     dubState._video       = null;
 
     updateButton(false);
