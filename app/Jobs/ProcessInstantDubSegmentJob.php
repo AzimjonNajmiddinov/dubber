@@ -488,33 +488,40 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
 
     private function generateWithMms(string $outputMp3, string $tmpDir, array $speakerEntry = []): void
     {
-        $gender = $speakerEntry['gender']
-            ?? (str_starts_with($this->speaker, 'F') ? 'female'
-                : (str_starts_with($this->speaker, 'C') ? 'child' : 'male'));
-        $poolName   = $speakerEntry['pool_name'] ?? null;
-        $speakerIdx = (int) preg_replace('/\D/', '', $this->speaker) ?: 0;
-
-        $voiceFile = $poolName
-            ? $this->mmsPoolFileByName($gender, $poolName)
-            : $this->mmsPoolFile($gender, $speakerIdx);
-
-        if (!$voiceFile) {
-            throw new \RuntimeException("MMS: no voice pool file for gender '{$gender}'" . ($poolName ? " name '{$poolName}'" : ''));
-        }
-
-        $cacheKey = 'voice-pool-id:mms:' . md5($voiceFile);
-        $voiceId  = \Illuminate\Support\Facades\Redis::get($cacheKey);
-
         $client = new MmsTtsClient();
-        if (!$voiceId) {
-            $name    = pathinfo($voiceFile, PATHINFO_FILENAME);
-            $voiceId = $client->addVoice("pool-{$name}", [$voiceFile]);
-            \Illuminate\Support\Facades\Redis::setex($cacheKey, 604800, $voiceId);
-        }
 
-        $name  = pathinfo($voiceFile, PATHINFO_FILENAME);
-        $speed = AdminVoicePoolController::getSpeed($gender, $name);
-        $tau   = AdminVoicePoolController::getTau($gender, $name);
+        // Force voice: direct MMS service voice ID — skip local pool lookup
+        if (!empty($speakerEntry['mms_voice_id'])) {
+            $voiceId = $speakerEntry['mms_voice_id'];
+            $speed   = 1.0;
+            $tau     = 0.7;
+        } else {
+            $gender = $speakerEntry['gender']
+                ?? (str_starts_with($this->speaker, 'F') ? 'female'
+                    : (str_starts_with($this->speaker, 'C') ? 'child' : 'male'));
+            $poolName   = $speakerEntry['pool_name'] ?? null;
+            $speakerIdx = (int) preg_replace('/\D/', '', $this->speaker) ?: 0;
+
+            $voiceFile = $poolName
+                ? $this->mmsPoolFileByName($gender, $poolName)
+                : $this->mmsPoolFile($gender, $speakerIdx);
+
+            if (!$voiceFile) {
+                throw new \RuntimeException("MMS: no voice pool file for gender '{$gender}'" . ($poolName ? " name '{$poolName}'" : ''));
+            }
+
+            $cacheKey = 'voice-pool-id:mms:' . md5($voiceFile);
+            $voiceId  = \Illuminate\Support\Facades\Redis::get($cacheKey);
+            if (!$voiceId) {
+                $name    = pathinfo($voiceFile, PATHINFO_FILENAME);
+                $voiceId = $client->addVoice("pool-{$name}", [$voiceFile]);
+                \Illuminate\Support\Facades\Redis::setex($cacheKey, 604800, $voiceId);
+            }
+
+            $name  = pathinfo($voiceFile, PATHINFO_FILENAME);
+            $speed = AdminVoicePoolController::getSpeed($gender, $name);
+            $tau   = AdminVoicePoolController::getTau($gender, $name);
+        }
 
         $text    = TextNormalizer::normalize($this->text, $this->language);
         $wavData = $client->synthesize($voiceId, $text, [

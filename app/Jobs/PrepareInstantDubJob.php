@@ -268,7 +268,7 @@ class PrepareInstantDubJob implements ShouldQueue
         if ($forceVoice) {
             $voiceMap = [];
             foreach (array_keys($speakers) as $tag) {
-                $voiceMap[$tag] = ['driver' => 'mms', 'pool_name' => $forceVoice, 'gender' => null];
+                $voiceMap[$tag] = ['driver' => 'mms', 'mms_voice_id' => $forceVoice];
             }
             $voiceKey = "instant-dub:{$this->sessionId}:voices";
             Redis::setex($voiceKey, 50400, json_encode($voiceMap));
