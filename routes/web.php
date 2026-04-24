@@ -14,6 +14,8 @@ use App\Http\Controllers\LiveDubController;
 use App\Http\Controllers\OnlineDubController;
 
 Route::get('/', fn() => abort(404));
+Route::get('/extension', fn() => view('extension'))->name('extension');
+Route::get('/privacy', fn() => view('privacy'))->name('privacy');
 Route::post('/upload', [VideoController::class, 'upload'])->name('videos.upload');
 
 Route::get('/videos', [VideoController::class, 'list'])->name('videos.list');
