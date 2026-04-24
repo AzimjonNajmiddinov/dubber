@@ -217,14 +217,15 @@ async function doPoll() {
                 const cd = { start_time: c.start_time, end_time: c.end_time, text: c.text };
                 if (c.audio_base64 && ctx) {
                     try {
-                        const buf = base64ToArrayBuffer(c.audio_base64);
-                        cd._audioBuffer = await ctx.decodeAudioData(buf);
+                        cd._audioBuffer = await ctx.decodeAudioData(base64ToArrayBuffer(c.audio_base64));
                     } catch (e) {}
                 }
                 dubState.chunks[c.index] = cd;
             }
+        }
 
-            // Try to play immediately if video is playing
+        // Play as soon as playable or any chunk arrived
+        if (data.playable || (data.chunks && data.chunks.length > 0)) {
             const video = document.querySelector('video');
             if (video && !video.paused) playDubAudio(video.currentTime);
         }
