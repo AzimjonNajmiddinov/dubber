@@ -463,7 +463,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                 ->attach('tts_audio',  file_get_contents($ttsWav),  'tts.wav')
                 ->attach('reference',  file_get_contents($refClip), 'ref.wav')
                 ->post("{$serviceUrl}/transfer", [
-                    'f0_mode'         => 'contour',
+                    'f0_mode'         => 'stats',
                     'energy_transfer' => 'true',
                 ]);
 

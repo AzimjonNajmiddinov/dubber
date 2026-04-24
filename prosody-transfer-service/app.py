@@ -118,8 +118,8 @@ def transfer_energy(sp_src: np.ndarray, sp_ref: np.ndarray) -> np.ndarray:
     e_ref_s = interp1d(ref_t, e_ref, kind='linear',
                        bounds_error=False, fill_value='extrapolate')(src_t)
 
-    # ±6dB clamp (0.5x – 2.0x)
-    ratio = np.clip(e_ref_s / e_src, 0.5, 2.0)
+    # ±3dB clamp (0.7x – 1.4x) — softened for natural-sounding output
+    ratio = np.clip(e_ref_s / e_src, 0.7, 1.4)
     return sp_src * ratio[:, np.newaxis]
 
 
@@ -161,7 +161,7 @@ async def transfer(
             src_r = resample_poly(src, n_out // g, n_src_len // g).astype(np.float32)
         else:
             src_r = src.astype(np.float32)
-        out_audio = out_audio * 0.75 + src_r * 0.25
+        out_audio = out_audio * 0.55 + src_r * 0.45
 
         peak = np.abs(out_audio).max()
         if peak > 0:
