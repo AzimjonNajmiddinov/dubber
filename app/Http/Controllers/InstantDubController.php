@@ -16,16 +16,44 @@ use Illuminate\Support\Str;
 
 class InstantDubController extends Controller
 {
+    public function voices(): JsonResponse
+    {
+        $mmsUrl = config('services.mms_tts.url') ?: env('MMS_TTS_SERVICE_URL');
+
+        if ($mmsUrl) {
+            try {
+                $resp = Http::timeout(5)->get(rtrim($mmsUrl, '/') . '/voices');
+                if ($resp->successful() && is_array($resp->json())) {
+                    return response()->json($resp->json());
+                }
+            } catch (\Throwable) {}
+        }
+
+        // Fallback: read from local voice pool
+        $voices = [];
+        foreach (['male', 'female'] as $gender) {
+            $dir   = storage_path("app/voice-pool/{$gender}");
+            $files = is_dir($dir) ? glob("{$dir}/*.{wav,mp3,m4a}", GLOB_BRACE) : [];
+            foreach ($files as $file) {
+                $name     = pathinfo($file, PATHINFO_FILENAME);
+                $voices[] = ['voice_id' => $name, 'name' => ucfirst($name), 'gender' => $gender, 'language' => 'uz'];
+            }
+        }
+
+        return response()->json($voices);
+    }
+
     public function start(Request $request): JsonResponse
     {
         $request->validate([
-            'srt' => 'nullable|string',
-            'language' => 'required|string|max:10',
-            'video_url' => 'nullable|string',
-            'audio_url' => 'nullable|string',
+            'srt'            => 'nullable|string',
+            'language'       => 'required|string|max:10',
+            'video_url'      => 'nullable|string',
+            'audio_url'      => 'nullable|string',
             'translate_from' => 'nullable|string|max:10',
-            'title' => 'nullable|string|max:255',
-            'quality' => 'nullable|string|in:standard,premium',
+            'title'          => 'nullable|string|max:255',
+            'quality'        => 'nullable|string|in:standard,premium',
+            'voice_id'       => 'nullable|string|max:100',
         ]);
 
         $sessionId = Str::uuid()->toString();
@@ -35,8 +63,9 @@ class InstantDubController extends Controller
         $srt      = (string) ($request->input('srt') ?? '');
         $audioUrl = (string) ($request->input('audio_url') ?? '') ?: null;
         $title    = $request->input('title', 'Untitled');
-        $quality = $request->input('quality', 'standard');
-        $ttsDriver = $quality === 'premium' ? 'elevenlabs' : 'mms';
+        $quality    = $request->input('quality', 'standard');
+        $forceVoice = $request->input('voice_id') ?: null;
+        $ttsDriver  = $quality === 'premium' ? 'elevenlabs' : 'mms';
 
         // Parse video URL components for HLS
         $urlWithoutQuery = strtok($videoUrl, '?');
@@ -113,6 +142,7 @@ class InstantDubController extends Controller
             'status'         => 'preparing',
             'quality'        => $quality,
             'tts_driver'     => $ttsDriver,
+            'force_voice'    => $forceVoice,
             'total_segments' => 0,
             'segments_ready' => 0,
             'created_at'     => now()->toIso8601String(),

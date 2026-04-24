@@ -56,9 +56,12 @@ EMOTION_MODEL_ID = os.environ.get(
 )
 
 # Optional toggles (to reduce load if needed)
+# NOTE: Diarization + Gender + Emotion are used by Flow 2 (Premium Dub) only.
+# Flow 3 (Chrome Extension) bypasses these — user picks a voice manually.
+# To fully disable for resource savings: set ENABLE_DIARIZATION=0 ENABLE_GENDER=0 ENABLE_EMOTION=0
 ENABLE_DIARIZATION = os.environ.get("ENABLE_DIARIZATION", "1") == "1" and bool(HF_TOKEN)
-ENABLE_GENDER = os.environ.get("ENABLE_GENDER", "1") == "1"
-ENABLE_EMOTION = os.environ.get("ENABLE_EMOTION", "1") == "1"
+ENABLE_GENDER = os.environ.get("ENABLE_GENDER", "1") == "1"  # STATUS: Flow 2 only
+ENABLE_EMOTION = os.environ.get("ENABLE_EMOTION", "1") == "1"  # STATUS: Flow 2 only
 
 app = FastAPI()
 

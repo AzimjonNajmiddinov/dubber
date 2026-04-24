@@ -259,6 +259,25 @@ class PrepareInstantDubJob implements ShouldQueue
 
     private function buildVoiceMap(array $speakers): void
     {
+        $sessionJson = Redis::get("instant-dub:{$this->sessionId}");
+        $session     = $sessionJson ? json_decode($sessionJson, true) : [];
+        $forceVoice  = $session['force_voice'] ?? null;
+
+        // Flow 3 (Chrome Extension): user picked a specific voice — assign it to ALL speakers.
+        // Gender-based cycling (old approach) is DISABLED when force_voice is set.
+        if ($forceVoice) {
+            $voiceMap = [];
+            foreach (array_keys($speakers) as $tag) {
+                $voiceMap[$tag] = ['driver' => 'mms', 'pool_name' => $forceVoice, 'gender' => null];
+            }
+            $voiceKey = "instant-dub:{$this->sessionId}:voices";
+            Redis::setex($voiceKey, 50400, json_encode($voiceMap));
+            Log::info("[DUB] Voice map built (force_voice={$forceVoice}): " . implode(', ', array_keys($speakers)), [
+                'session' => $this->sessionId,
+            ]);
+            return;
+        }
+
         // 1. Load saved voice map from DB (admin may have customised it)
         $voiceMap = [];
         if ($this->cachedDubId) {
@@ -271,8 +290,6 @@ class PrepareInstantDubJob implements ShouldQueue
         }
 
         // 2. For any speaker not in saved map, assign a default based on driver
-        $sessionJson = Redis::get("instant-dub:{$this->sessionId}");
-        $session = $sessionJson ? json_decode($sessionJson, true) : [];
         $driver = $session['tts_driver'] ?? config('dubber.tts.default', 'edge');
 
         if ($driver === 'mms') {

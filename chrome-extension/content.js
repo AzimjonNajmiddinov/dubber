@@ -5,17 +5,18 @@
  */
 
 let dubState = {
-    active:       false,
-    sessionId:    null,
-    apiBase:      'https://dubbing.uz',
-    language:     'uz',
-    audioCtx:     null,
-    chunks:       [],
-    lastChunkIdx: -1,
-    currentSrc:   null,
-    currentIdx:   -1,
-    pollTimer:    null,
-    _origVolume:  null,
+    active:          false,
+    sessionId:       null,
+    apiBase:         'https://dubbing.uz',
+    language:        'uz',
+    selectedVoiceId: null,
+    audioCtx:        null,
+    chunks:          [],
+    lastChunkIdx:    -1,
+    currentSrc:      null,
+    currentIdx:      -1,
+    pollTimer:       null,
+    _origVolume:     null,
 };
 
 chrome.storage.sync.get({ apiBase: 'https://dubbing.uz', language: 'uz' }, (s) => {
@@ -66,7 +67,7 @@ function onButtonClick() {
     }
 }
 
-function showOverlay() {
+async function showOverlay() {
     if (document.getElementById('dubber-overlay')) return;
 
     const languages = [
@@ -83,11 +84,11 @@ function showOverlay() {
         position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);
         background:#1a1a2e;color:#fff;border-radius:12px;padding:24px 32px;
         z-index:9999;box-shadow:0 8px 32px rgba(0,0,0,.7);
-        font-family:Arial,sans-serif;min-width:300px;text-align:center;
+        font-family:Arial,sans-serif;min-width:320px;text-align:center;
     `;
     overlay.innerHTML = `
         <div style="font-size:18px;font-weight:bold;margin-bottom:16px">🎙 Dubber</div>
-        <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-bottom:20px">
+        <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-bottom:16px">
             ${languages.map(l => `
                 <button data-lang="${l.code}" style="
                     padding:8px 14px;border-radius:8px;border:2px solid #1a73e8;
@@ -95,6 +96,10 @@ function showOverlay() {
                     color:white;cursor:pointer;font-size:13px;
                 ">${l.label}</button>
             `).join('')}
+        </div>
+        <div style="margin-bottom:8px;font-size:13px;color:#aaa;text-align:left">Ovoz tanlang:</div>
+        <div id="dubber-voices" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;justify-content:center">
+            <span style="color:#888;font-size:13px">Yuklanmoqda...</span>
         </div>
         <div style="display:flex;gap:8px;justify-content:center">
             <button id="dubber-start" style="padding:10px 24px;background:#1a73e8;color:white;
@@ -122,6 +127,49 @@ function showOverlay() {
 
     document.getElementById('dubber-cancel').addEventListener('click', () => overlay.remove());
     document.getElementById('dubber-start').addEventListener('click', () => startDubbing(overlay));
+
+    // Load available voices
+    loadVoices(overlay);
+}
+
+async function loadVoices(overlay) {
+    const container = document.getElementById('dubber-voices');
+    if (!container) return;
+
+    try {
+        const resp = await fetch(`${dubState.apiBase}/api/instant-dub/voices`);
+        const voices = resp.ok ? await resp.json() : [];
+
+        if (!voices || voices.length === 0) {
+            container.innerHTML = '<span style="color:#888;font-size:13px">Ovozlar topilmadi</span>';
+            return;
+        }
+
+        container.innerHTML = '';
+        voices.forEach((v, i) => {
+            const btn = document.createElement('button');
+            btn.dataset.voiceId = v.voice_id;
+            const genderIcon = v.gender === 'female' ? '♀' : v.gender === 'male' ? '♂' : '◆';
+            btn.textContent = `${genderIcon} ${v.name || v.voice_id}`;
+            btn.style.cssText = `
+                padding:7px 12px;border-radius:8px;border:2px solid #555;
+                background:transparent;color:white;cursor:pointer;font-size:13px;
+            `;
+            btn.addEventListener('click', () => {
+                dubState.selectedVoiceId = v.voice_id;
+                container.querySelectorAll('button').forEach(b => b.style.borderColor = '#555');
+                btn.style.borderColor = '#1a73e8';
+            });
+            // Auto-select first
+            if (i === 0) {
+                dubState.selectedVoiceId = v.voice_id;
+                btn.style.borderColor = '#1a73e8';
+            }
+            container.appendChild(btn);
+        });
+    } catch (e) {
+        container.innerHTML = '<span style="color:#888;font-size:13px">Ovozlarni yuklashda xato</span>';
+    }
 }
 
 // ─── Dubbing start ───────────────────────────────────────────────────────────
@@ -154,6 +202,7 @@ async function startDubbing(overlay) {
                 audio_url:      audioUrl || '',
                 title:          document.title.replace(' - YouTube', ''),
                 quality:        'standard',
+                voice_id:       dubState.selectedVoiceId || undefined,
             }),
         });
 
@@ -166,11 +215,17 @@ async function startDubbing(overlay) {
         dubState.lastChunkIdx = -1;
         overlay.remove();
 
-        // Mute YouTube original audio
+        // Mute YouTube original audio and attach listeners directly
         const video = document.querySelector('video');
         if (video) {
             dubState._origVolume = video.volume;
-            video.volume = 0;
+            video.volume = 0.08;
+            dubState._video = video;
+
+            video.addEventListener('timeupdate', onVideoTimeUpdate);
+            video.addEventListener('pause', onVideoPause);
+            video.addEventListener('seeking', onVideoSeeking);
+            video.addEventListener('play', onVideoPlay);
         }
 
         updateButton(true);
@@ -261,9 +316,12 @@ function playDubAudio(t) {
     const offset = Math.max(0, t - chunk.start_time);
     if (offset >= chunk._audioBuffer.duration) return;
     try {
-        const src = ctx.createBufferSource();
+        const src  = ctx.createBufferSource();
+        const gain = ctx.createGain();
+        gain.gain.value = 1.8;
         src.buffer = chunk._audioBuffer;
-        src.connect(ctx.destination);
+        src.connect(gain);
+        gain.connect(ctx.destination);
         src.start(0, offset);
         src.onended = () => {
             if (dubState.currentIdx === target) { dubState.currentSrc = null; dubState.currentIdx = -1; }
@@ -312,29 +370,17 @@ function updateSubtitle(t) {
     updateSubtitleBar(found);
 }
 
-// ─── Hook into YouTube video element ─────────────────────────────────────────
+// ─── Video event handlers (attached directly to <video> in startDubbing) ──────
 
-document.addEventListener('play', (e) => {
-    if (!dubState.active || e.target.tagName !== 'VIDEO') return;
-    if (dubState.audioCtx?.state === 'suspended') dubState.audioCtx.resume();
-}, true);
-
-document.addEventListener('pause', (e) => {
-    if (!dubState.active || e.target.tagName !== 'VIDEO') return;
-    stopCurrentAudio();
-}, true);
-
-document.addEventListener('seeking', (e) => {
-    if (!dubState.active || e.target.tagName !== 'VIDEO') return;
-    stopCurrentAudio();
-}, true);
-
-document.addEventListener('timeupdate', (e) => {
-    if (!dubState.active || e.target.tagName !== 'VIDEO') return;
-    const t = e.target.currentTime;
+function onVideoTimeUpdate() {
+    if (!dubState.active) return;
+    const t = this.currentTime;
     updateSubtitle(t);
     playDubAudio(t);
-}, true);
+}
+function onVideoPause()   { if (dubState.active) stopCurrentAudio(); }
+function onVideoSeeking() { if (dubState.active) stopCurrentAudio(); }
+function onVideoPlay()    { if (dubState.active && dubState.audioCtx?.state === 'suspended') dubState.audioCtx.resume(); }
 
 // ─── Stop ────────────────────────────────────────────────────────────────────
 
@@ -344,8 +390,14 @@ function stopDubbing() {
     stopPolling();
     stopCurrentAudio();
 
-    const video = document.querySelector('video');
-    if (video && dubState._origVolume != null) video.volume = dubState._origVolume;
+    const video = dubState._video || document.querySelector('video');
+    if (video) {
+        video.removeEventListener('timeupdate', onVideoTimeUpdate);
+        video.removeEventListener('pause',      onVideoPause);
+        video.removeEventListener('seeking',    onVideoSeeking);
+        video.removeEventListener('play',       onVideoPlay);
+        if (dubState._origVolume != null) video.volume = dubState._origVolume;
+    }
 
     if (dubState.sessionId) {
         fetch(`${dubState.apiBase}/api/instant-dub/${dubState.sessionId}/stop`, { method: 'POST' }).catch(() => {});
@@ -359,6 +411,7 @@ function stopDubbing() {
     dubState.chunks       = [];
     dubState.lastChunkIdx = -1;
     dubState._origVolume  = null;
+    dubState._video       = null;
 
     updateButton(false);
     toast("Dubbing to'xtatildi");

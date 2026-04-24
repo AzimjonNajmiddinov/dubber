@@ -5,10 +5,14 @@
   "description": "YouTube videolarini o'zbek tiliga real-vaqtda dubbing qiladi",
   "permissions": ["storage", "scripting"],
   "background": {"service_worker": "background.js"},
+  "icons": {
+    "16":  "icons/icon16.png",
+    "48":  "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
   "host_permissions": [
     "https://www.youtube.com/*",
-    "https://dubbing.uz/*",
-    "http://localhost/*"
+    "https://dubbing.uz/*"
   ],
   "content_scripts": [
     {
@@ -19,7 +23,12 @@
   ],
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Dubber Settings"
+    "default_title": "Dubber Settings",
+    "default_icon": {
+      "16":  "icons/icon16.png",
+      "48":  "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
   },
   "web_accessible_resources": [
     {

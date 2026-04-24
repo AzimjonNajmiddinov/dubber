@@ -40,6 +40,7 @@ Route::prefix('live')->group(function () {
 
 // Flow 1 (Instant Dub) — vaqtincha o'chirildi
  Route::prefix('instant-dub')->group(function () {
+     Route::get('/voices', [InstantDubController::class, 'voices'])->name('api.instant-dub.voices');
      Route::post('/start', [InstantDubController::class, 'start'])->name('api.instant-dub.start');
      Route::get('/{sessionId}/poll', [InstantDubController::class, 'poll'])->name('api.instant-dub.poll');
      Route::post('/{sessionId}/stop', [InstantDubController::class, 'stop'])->name('api.instant-dub.stop');
