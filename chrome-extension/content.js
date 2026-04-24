@@ -147,12 +147,13 @@ async function startDubbing(overlay) {
             method:  'POST',
             headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
             body:    JSON.stringify({
-                video_url: videoUrl,
-                language:  dubState.language,
-                srt:       srt || '',
-                audio_url: audioUrl || '',
-                title:     document.title.replace(' - YouTube', ''),
-                quality:   'standard',
+                video_url:      videoUrl,
+                language:       dubState.language,
+                translate_from: 'en',
+                srt:            srt || '',
+                audio_url:      audioUrl || '',
+                title:          document.title.replace(' - YouTube', ''),
+                quality:        'standard',
             }),
         });
 
