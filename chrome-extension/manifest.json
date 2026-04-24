@@ -3,7 +3,7 @@
   "name": "Dubber - O'zbek Dubbing",
   "version": "1.0",
   "description": "YouTube videolarini o'zbek tiliga real-vaqtda dubbing qiladi",
-  "permissions": ["storage", "scripting", "cookies"],
+  "permissions": ["storage", "scripting"],
   "background": {"service_worker": "background.js"},
   "host_permissions": [
     "https://www.youtube.com/*",

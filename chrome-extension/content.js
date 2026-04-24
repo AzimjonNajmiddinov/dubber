@@ -1,22 +1,26 @@
 /**
  * Dubber Chrome Extension — content script
- * Injects a button into the YouTube player, creates a dubbing session,
- * and opens the existing instant-dub player in a popup window for audio.
+ * Injects a button into the YouTube player and plays dubbed audio
+ * directly in the YouTube tab via WebAudio API (no popup needed).
  */
 
 let dubState = {
-    active:    false,
-    sessionId: null,
-    apiBase:   'https://dubbing.uz',
-    language:  'uz',
-    popup:     null,
+    active:       false,
+    sessionId:    null,
+    apiBase:      'https://dubbing.uz',
+    language:     'uz',
+    audioCtx:     null,
+    chunks:       [],
+    lastChunkIdx: -1,
+    currentSrc:   null,
+    currentIdx:   -1,
+    pollTimer:    null,
+    _origVolume:  null,
 };
 
-// ─── Boot ───────────────────────────────────────────────────────────────────
-
 chrome.storage.sync.get({ apiBase: 'https://dubbing.uz', language: 'uz' }, (s) => {
-    dubState.apiBase   = s.apiBase;
-    dubState.language  = s.language;
+    dubState.apiBase  = s.apiBase;
+    dubState.language = s.language;
 });
 
 const observer = new MutationObserver(() => injectButtonIfNeeded());
@@ -54,6 +58,10 @@ function onButtonClick() {
     if (dubState.active) {
         stopDubbing();
     } else {
+        // Create AudioContext on user gesture
+        if (!dubState.audioCtx) {
+            dubState.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        }
         showOverlay();
     }
 }
@@ -119,7 +127,7 @@ function showOverlay() {
 // ─── Dubbing start ───────────────────────────────────────────────────────────
 
 async function startDubbing(overlay) {
-    const msgEl  = document.getElementById('dubber-msg');
+    const msgEl   = document.getElementById('dubber-msg');
     const startBtn = document.getElementById('dubber-start');
     startBtn.disabled = true;
     startBtn.textContent = 'Yuklanmoqda...';
@@ -128,7 +136,6 @@ async function startDubbing(overlay) {
     try {
         const videoUrl = location.href.split('&list')[0].split('&index')[0];
         const ytData   = await getYouTubeData();
-        // console.log('[Dubber] ytData:', JSON.stringify(ytData)?.slice(0, 120));
         const srt      = ytData?.srt || null;
         const audioUrl = ytData?.audioUrl || null;
 
@@ -140,29 +147,34 @@ async function startDubbing(overlay) {
             method:  'POST',
             headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
             body:    JSON.stringify({
-                video_url:      videoUrl,
-                language:       dubState.language,
-                srt:            srt || '',
-                audio_url:      audioUrl || '',
-                title:          document.title.replace(' - YouTube', ''),
-                quality:        'standard',
+                video_url: videoUrl,
+                language:  dubState.language,
+                srt:       srt || '',
+                audio_url: audioUrl || '',
+                title:     document.title.replace(' - YouTube', ''),
+                quality:   'standard',
             }),
         });
 
         if (!resp.ok) throw new Error(`Server xatosi: ${resp.status}`);
         const { session_id } = await resp.json();
 
-        dubState.sessionId = session_id;
-        dubState.active    = true;
+        dubState.sessionId   = session_id;
+        dubState.active      = true;
+        dubState.chunks      = [];
+        dubState.lastChunkIdx = -1;
         overlay.remove();
 
-        // Open the existing instant-dub player in a popup window
-        openPlayerPopup(session_id);
-
-        // Setup YouTube ↔ popup sync (mutes YouTube original audio)
-        setupVideoSync();
+        // Mute YouTube original audio
+        const video = document.querySelector('video');
+        if (video) {
+            dubState._origVolume = video.volume;
+            video.volume = 0;
+        }
 
         updateButton(true);
+        showSubtitleBar();
+        startPolling();
         toast('Dubbing yuklanmoqda... tayyor bo\'lgach o\'zbek ovozi chiqadi');
 
     } catch (err) {
@@ -172,108 +184,197 @@ async function startDubbing(overlay) {
     }
 }
 
-function openPlayerPopup(sessionId) {
-    const url = `${dubState.apiBase}/instant-dub?session_id=${sessionId}&embedded=1`;
-    const w   = Math.min(500, screen.width - 40);
-    const h   = Math.min(480, screen.height - 100);
-    const l   = screen.width  - w - 20;
-    const t   = Math.floor((screen.height - h) / 2);
+// ─── Polling ─────────────────────────────────────────────────────────────────
 
-    dubState.popup = window.open(
-        url, 'dubber_player',
-        `width=${w},height=${h},left=${l},top=${t},toolbar=0,location=0,menubar=0,status=0`
-    );
-
-    if (!dubState.popup) {
-        toast('Popup bloklandi! Brauzeringizda popup ruxsat bering.');
-    }
+function startPolling() {
+    stopPolling();
+    doPoll();
+    dubState.pollTimer = setInterval(doPoll, 2000);
 }
 
-// ─── Video sync ──────────────────────────────────────────────────────────────
+function stopPolling() {
+    if (dubState.pollTimer) { clearInterval(dubState.pollTimer); dubState.pollTimer = null; }
+}
 
-function setupVideoSync() {
-    const video = document.querySelector('video');
-    if (!video) return;
+async function doPoll() {
+    if (!dubState.sessionId) return;
+    try {
+        const resp = await fetch(`${dubState.apiBase}/api/instant-dub/${dubState.sessionId}/poll?after=${dubState.lastChunkIdx}`);
+        if (!resp.ok) { if (resp.status === 404) stopPolling(); return; }
+        const data = await resp.json();
 
-    // Mute original audio while dubbing
-    dubState._origVolume = video.volume;
-    video.volume = 0;
+        const ready = data.segments_ready || 0;
+        const total = data.total_segments || 0;
+        updateSubtitleBar(`${ready} / ${total} segment tayyor`);
 
-    const send = (msg) => {
-        if (dubState.popup && !dubState.popup.closed) {
-            dubState.popup.postMessage({ source: 'dubber-ext', ...msg },
-                dubState.apiBase.startsWith('https://') ? dubState.apiBase : '*');
+        if (data.chunks && data.chunks.length > 0) {
+            const ctx = dubState.audioCtx;
+            if (ctx && ctx.state === 'suspended') ctx.resume();
+
+            for (const c of data.chunks) {
+                if (c.index > dubState.lastChunkIdx) dubState.lastChunkIdx = c.index;
+                const cd = { start_time: c.start_time, end_time: c.end_time, text: c.text };
+                if (c.audio_base64 && ctx) {
+                    try {
+                        const buf = base64ToArrayBuffer(c.audio_base64);
+                        cd._audioBuffer = await ctx.decodeAudioData(buf);
+                    } catch (e) {}
+                }
+                dubState.chunks[c.index] = cd;
+            }
+
+            // Try to play immediately if video is playing
+            const video = document.querySelector('video');
+            if (video && !video.paused) playDubAudio(video.currentTime);
         }
-    };
 
-    video.addEventListener('seeked',  () => send({ type: 'seek',  time: video.currentTime }));
-    video.addEventListener('pause',   () => send({ type: 'pause' }));
-    video.addEventListener('play',    () => send({ type: 'play'  }));
-
-    // Send initial state — retry a few times while popup loads
-    const sendInitial = () => {
-        send({ type: 'seek', time: video.currentTime });
-        if (!video.paused) send({ type: 'play' });
-    };
-    setTimeout(sendInitial, 500);
-    setTimeout(sendInitial, 1500);
-    setTimeout(sendInitial, 3000);
-
-    // Periodic drift correction (every 3s)
-    dubState._syncInterval = setInterval(() => {
-        if (!dubState.active || !video) return;
-        send({ type: 'seek', time: video.currentTime });
-        if (!video.paused) send({ type: 'play' });
-    }, 3000);
+        if (data.status === 'complete') {
+            stopPolling();
+            updateSubtitleBar(`Tayyor! ${total} segment`);
+            setTimeout(() => updateSubtitleBar(''), 3000);
+        }
+    } catch (e) {}
 }
+
+// ─── Audio playback (driven by video timeupdate) ──────────────────────────────
+
+function playDubAudio(t) {
+    const ctx = dubState.audioCtx;
+    if (!ctx) return;
+    if (ctx.state === 'suspended') ctx.resume();
+
+    let target = -1;
+    for (let i = 0; i < dubState.chunks.length; i++) {
+        const c = dubState.chunks[i];
+        if (!c || !c._audioBuffer) continue;
+        if (t >= c.start_time && t < c.start_time + c._audioBuffer.duration) { target = i; break; }
+    }
+
+    if (target === dubState.currentIdx) return;
+    stopCurrentAudio();
+    dubState.currentIdx = target;
+    if (target < 0) return;
+
+    const chunk = dubState.chunks[target];
+    const offset = Math.max(0, t - chunk.start_time);
+    if (offset >= chunk._audioBuffer.duration) return;
+    try {
+        const src = ctx.createBufferSource();
+        src.buffer = chunk._audioBuffer;
+        src.connect(ctx.destination);
+        src.start(0, offset);
+        src.onended = () => {
+            if (dubState.currentIdx === target) { dubState.currentSrc = null; dubState.currentIdx = -1; }
+        };
+        dubState.currentSrc = src;
+    } catch (e) {}
+}
+
+function stopCurrentAudio() {
+    if (dubState.currentSrc) {
+        try { dubState.currentSrc.stop(); } catch (e) {}
+        dubState.currentSrc = null;
+    }
+    dubState.currentIdx = -1;
+}
+
+// ─── Subtitle display ─────────────────────────────────────────────────────────
+
+function showSubtitleBar() {
+    if (document.getElementById('dubber-sub')) return;
+    const el = document.createElement('div');
+    el.id = 'dubber-sub';
+    el.style.cssText = `
+        position:fixed;bottom:70px;left:50%;transform:translateX(-50%);
+        background:rgba(0,0,0,0.82);color:#fff;padding:6px 18px;border-radius:6px;
+        font-size:16px;font-family:Arial,sans-serif;z-index:9998;
+        pointer-events:none;text-align:center;max-width:80%;line-height:1.4;
+        transition:opacity .2s;min-height:28px;
+    `;
+    document.body.appendChild(el);
+}
+
+function updateSubtitleBar(text) {
+    const el = document.getElementById('dubber-sub');
+    if (el) { el.textContent = text; el.style.opacity = text ? '1' : '0'; }
+}
+
+let _lastSubText = '';
+function updateSubtitle(t) {
+    let found = '';
+    for (const c of dubState.chunks) {
+        if (c && t >= c.start_time && t <= c.end_time) { found = c.text; break; }
+    }
+    if (found === _lastSubText) return;
+    _lastSubText = found;
+    updateSubtitleBar(found);
+}
+
+// ─── Hook into YouTube video element ─────────────────────────────────────────
+
+document.addEventListener('play', (e) => {
+    if (!dubState.active || e.target.tagName !== 'VIDEO') return;
+    if (dubState.audioCtx?.state === 'suspended') dubState.audioCtx.resume();
+}, true);
+
+document.addEventListener('pause', (e) => {
+    if (!dubState.active || e.target.tagName !== 'VIDEO') return;
+    stopCurrentAudio();
+}, true);
+
+document.addEventListener('seeking', (e) => {
+    if (!dubState.active || e.target.tagName !== 'VIDEO') return;
+    stopCurrentAudio();
+}, true);
+
+document.addEventListener('timeupdate', (e) => {
+    if (!dubState.active || e.target.tagName !== 'VIDEO') return;
+    const t = e.target.currentTime;
+    updateSubtitle(t);
+    playDubAudio(t);
+}, true);
 
 // ─── Stop ────────────────────────────────────────────────────────────────────
 
 function stopDubbing() {
     if (!dubState.active) return;
 
-    // Restore original video volume
+    stopPolling();
+    stopCurrentAudio();
+
     const video = document.querySelector('video');
-    if (video && dubState._origVolume != null) {
-        video.volume = dubState._origVolume;
-    }
+    if (video && dubState._origVolume != null) video.volume = dubState._origVolume;
 
     if (dubState.sessionId) {
         fetch(`${dubState.apiBase}/api/instant-dub/${dubState.sessionId}/stop`, { method: 'POST' }).catch(() => {});
     }
 
-    if (dubState.popup && !dubState.popup.closed) dubState.popup.close();
-    clearInterval(dubState._syncInterval);
+    const sub = document.getElementById('dubber-sub');
+    if (sub) sub.remove();
 
-    dubState.active      = false;
-    dubState.sessionId   = null;
-    dubState.popup       = null;
-    dubState._origVolume = null;
+    dubState.active       = false;
+    dubState.sessionId    = null;
+    dubState.chunks       = [];
+    dubState.lastChunkIdx = -1;
+    dubState._origVolume  = null;
 
     updateButton(false);
     toast("Dubbing to'xtatildi");
 }
 
-// ─── YouTube data extraction ───────────────────────────────────────────────
+// ─── YouTube data extraction ──────────────────────────────────────────────────
 
 function getYouTubeData() {
-    // Try background scripting API first (MAIN world access), fallback to DOM parsing
     return new Promise(resolve => {
         let done = false;
         const finish = (val) => { if (!done) { done = true; resolve(val); } };
-
-        // Timeout: if background doesn't respond in 3s, fall back to DOM
         const timer = setTimeout(() => finish(getDomYouTubeData()), 3000);
-
         try {
             const videoUrl = location.href.split('&list')[0].split('&index')[0];
             chrome.runtime.sendMessage({ type: 'getYouTubeData', videoUrl }, data => {
                 clearTimeout(timer);
-                if (chrome.runtime.lastError || !data) {
-                    finish(getDomYouTubeData());
-                } else {
-                    finish(data);
-                }
+                if (chrome.runtime.lastError || !data) finish(getDomYouTubeData());
+                else finish(data);
             });
         } catch {
             clearTimeout(timer);
@@ -283,7 +384,6 @@ function getYouTubeData() {
 }
 
 function getDomYouTubeData() {
-    // Fallback: read ytInitialPlayerResponse from <script> tag textContent
     try {
         for (const s of document.querySelectorAll('script')) {
             const text = s.textContent;
@@ -309,29 +409,6 @@ function getDomYouTubeData() {
     return null;
 }
 
-async function extractCaptionsFromTracks(tracks) {
-    try {
-        if (!tracks || !tracks.length) return null;
-        const track = tracks.find(t => t.languageCode?.startsWith('en')) ||
-                      tracks.find(t => !t.kind || t.kind !== 'asr') ||
-                      tracks[0];
-        console.log('[Dubber] track:', track?.languageCode, track?.kind, 'hasUrl:', !!track?.baseUrl);
-        if (!track?.baseUrl) return null;
-        const url = track.baseUrl + '&fmt=json3';
-        const resp = await fetch(url);
-        console.log('[Dubber] caption fetch status:', resp.status, 'size:', resp.headers.get('content-length'));
-        const text = await resp.text();
-        console.log('[Dubber] caption text preview:', text.slice(0, 100));
-        const data = JSON.parse(text);
-        const srt = json3ToSrt(data);
-        console.log('[Dubber] srt result:', srt ? srt.slice(0, 80) : null);
-        return srt;
-    } catch (e) {
-        console.error('[Dubber] extractCaptionsFromTracks error:', e);
-        return null;
-    }
-}
-
 function json3ToSrt(data) {
     let srt = '', idx = 1;
     for (const ev of data.events || []) {
@@ -352,6 +429,11 @@ function ms2srt(ms) {
 }
 function p(n) { return String(n).padStart(2,'0'); }
 function countSrt(s) { return (s.match(/^\d+$/gm) || []).length; }
+function base64ToArrayBuffer(b64) {
+    const bin = atob(b64), len = bin.length, bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes.buffer;
+}
 
 // ─── UI helpers ───────────────────────────────────────────────────────────────
 
