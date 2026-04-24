@@ -138,9 +138,18 @@ async function loadVoices(overlay) {
 
     try {
         const resp = await fetch(`${dubState.apiBase}/api/instant-dub/voices`);
-        const voices = resp.ok ? await resp.json() : [];
+        const data = resp.ok ? await resp.json() : [];
+        // Handle both array and {voices: [...]} formats; deduplicate by name
+        const raw = Array.isArray(data) ? data : (data.voices || []);
+        const seen = new Set();
+        const voices = raw.filter(v => {
+            const key = v.name || v.voice_id;
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+        });
 
-        if (!voices || voices.length === 0) {
+        if (!voices.length) {
             container.innerHTML = '<span style="color:#888;font-size:13px">Ovozlar topilmadi</span>';
             return;
         }
