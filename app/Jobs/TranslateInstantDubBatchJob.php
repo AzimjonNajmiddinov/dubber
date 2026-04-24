@@ -617,7 +617,21 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         $lockKey = "instant-dub:{$this->sessionId}:voices-lock";
         $sessionJson = Redis::get("instant-dub:{$this->sessionId}");
         $sessionData = $sessionJson ? json_decode($sessionJson, true) : [];
+        $forceVoice = $sessionData['force_voice'] ?? null;
         $driver = $sessionData['tts_driver'] ?? config('dubber.tts.default', 'edge');
+
+        // Flow 3: force_voice set — assign same voice to all speakers
+        if ($forceVoice) {
+            $lock = Cache::lock($lockKey, 5);
+            $lock->block(5, function () use ($voiceKey, $newSpeakers, $forceVoice) {
+                $voiceMap = json_decode(Redis::get($voiceKey) ?? '{}', true) ?: [];
+                foreach (array_keys($newSpeakers) as $tag) {
+                    $voiceMap[$tag] = ['driver' => 'mms', 'mms_voice_id' => $forceVoice];
+                }
+                Redis::setex($voiceKey, 50400, json_encode($voiceMap));
+            });
+            return;
+        }
 
         if ($driver === 'mms') {
             $maleVariants   = $this->mmsPoolVariants('male');
