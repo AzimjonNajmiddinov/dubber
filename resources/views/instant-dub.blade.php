@@ -76,6 +76,10 @@
 
         .lang-row { display: flex; gap: 10px; margin-bottom: 12px; }
         .lang-row .field { flex: 1; }
+
+        .voice-row { margin-bottom: 12px; }
+        .voice-row select option.gender-header { color: #666; font-style: italic; }
+        .voice-loading { font-size: 0.8rem; color: #555; margin-top: 4px; }
     </style>
 </head>
 <body>
@@ -128,6 +132,14 @@
                 </div>
             </div>
 
+            <div class="voice-row">
+                <label>Voice</label>
+                <select id="voiceSelect">
+                    <option value="">Loading voices...</option>
+                </select>
+                <span class="voice-loading" id="voiceLoading"></span>
+            </div>
+
             <span class="toggle-link" id="toggleSrt">Paste SRT manually</span>
             <div class="srt-section" id="srtSection">
                 <textarea id="srtText" rows="10" placeholder="Optional — paste SRT if you have it. Otherwise subtitles are fetched from HLS automatically."></textarea>
@@ -166,6 +178,8 @@
     const videoUrl = document.getElementById('videoUrl');
     const language = document.getElementById('language');
     const translateFrom = document.getElementById('translateFrom');
+    const voiceSelect = document.getElementById('voiceSelect');
+    const voiceLoading = document.getElementById('voiceLoading');
     const srtText = document.getElementById('srtText');
     const btnStart = document.getElementById('btnStart');
     const btnStop = document.getElementById('btnStop');
@@ -190,6 +204,42 @@
     let currentSource = null;
     let decodeSuccessCount = 0;
     let decodeFailCount = 0;
+
+    // Load MMS voices into dropdown
+    (async () => {
+        try {
+            const resp = await fetch('/api/voices');
+            const voices = await resp.json();
+            voiceSelect.innerHTML = '';
+            if (!voices.length) {
+                voiceSelect.innerHTML = '<option value="">No voices available</option>';
+                return;
+            }
+            const groups = { male: [], female: [], child: [] };
+            voices.forEach(v => {
+                const g = v.gender || 'male';
+                (groups[g] || groups.male).push(v);
+            });
+            const labels = { male: 'Male', female: 'Female', child: 'Child' };
+            let first = true;
+            for (const [g, list] of Object.entries(groups)) {
+                if (!list.length) continue;
+                const grp = document.createElement('optgroup');
+                grp.label = labels[g];
+                list.forEach(v => {
+                    const opt = document.createElement('option');
+                    opt.value = v.voice_id;
+                    opt.textContent = v.name || v.voice_id;
+                    if (first) { opt.selected = true; first = false; }
+                    grp.appendChild(opt);
+                });
+                voiceSelect.appendChild(grp);
+            }
+        } catch (e) {
+            voiceSelect.innerHTML = '<option value="">Failed to load voices</option>';
+            voiceLoading.textContent = 'Could not reach voice service';
+        }
+    })();
 
     // Toggle SRT textarea
     toggleSrt.addEventListener('click', () => {
@@ -256,6 +306,7 @@
                 language: language.value,
                 video_url: url,
                 translate_from: translateFrom.value,
+                voice_id: voiceSelect.value || undefined,
             };
 
             // Include SRT only if user pasted it
