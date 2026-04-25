@@ -97,10 +97,13 @@ async function showOverlay() {
                 ">${l.label}</button>
             `).join('')}
         </div>
-        <div style="margin-bottom:8px;font-size:13px;color:#aaa;text-align:left">Ovoz tanlang:</div>
-        <div id="dubber-voices" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;justify-content:center">
-            <span style="color:#888;font-size:13px">Yuklanmoqda...</span>
-        </div>
+        <div style="margin-bottom:6px;font-size:13px;color:#aaa;text-align:left">Ovoz tanlang:</div>
+        <select id="dubber-voices" style="
+            width:100%;padding:8px 10px;background:#252540;border:1px solid #444;
+            color:#fff;border-radius:8px;font-size:13px;margin-bottom:16px;cursor:pointer;
+        ">
+            <option value="">Yuklanmoqda...</option>
+        </select>
         <div style="display:flex;gap:8px;justify-content:center">
             <button id="dubber-start" style="padding:10px 24px;background:#1a73e8;color:white;
                 border:none;border-radius:8px;cursor:pointer;font-size:15px;font-weight:bold;">
@@ -133,13 +136,12 @@ async function showOverlay() {
 }
 
 async function loadVoices(overlay) {
-    const container = document.getElementById('dubber-voices');
-    if (!container) return;
+    const sel = document.getElementById('dubber-voices');
+    if (!sel) return;
 
     try {
         const resp = await fetch(`${dubState.apiBase}/api/instant-dub/voices`);
         const data = resp.ok ? await resp.json() : [];
-        // Handle both array and {voices: [...]} formats; deduplicate by name
         const raw = Array.isArray(data) ? data : (data.voices || []);
         const seen = new Set();
         const voices = raw.filter(v => {
@@ -149,35 +151,39 @@ async function loadVoices(overlay) {
             return true;
         });
 
+        sel.innerHTML = '';
         if (!voices.length) {
-            container.innerHTML = '<span style="color:#888;font-size:13px">Ovozlar topilmadi</span>';
+            sel.innerHTML = '<option value="">Ovozlar topilmadi</option>';
             return;
         }
 
-        container.innerHTML = '';
-        voices.forEach((v, i) => {
-            const btn = document.createElement('button');
-            btn.dataset.voiceId = v.voice_id;
-            const genderIcon = v.gender === 'female' ? '♀' : v.gender === 'male' ? '♂' : '◆';
-            btn.textContent = `${genderIcon} ${v.name || v.voice_id}`;
-            btn.style.cssText = `
-                padding:7px 12px;border-radius:8px;border:2px solid #555;
-                background:transparent;color:white;cursor:pointer;font-size:13px;
-            `;
-            btn.addEventListener('click', () => {
-                dubState.selectedVoiceId = v.voice_id;
-                container.querySelectorAll('button').forEach(b => b.style.borderColor = '#555');
-                btn.style.borderColor = '#1a73e8';
-            });
-            // Auto-select first
-            if (i === 0) {
-                dubState.selectedVoiceId = v.voice_id;
-                btn.style.borderColor = '#1a73e8';
-            }
-            container.appendChild(btn);
+        const groups = {};
+        voices.forEach(v => {
+            const g = v.gender || 'male';
+            if (!groups[g]) groups[g] = [];
+            groups[g].push(v);
         });
+        const labels = { male: 'Erkak', female: 'Ayol', child: 'Bola' };
+        let firstVoiceId = null;
+        for (const [g, list] of Object.entries(groups)) {
+            const grp = document.createElement('optgroup');
+            grp.label = labels[g] || g;
+            list.forEach(v => {
+                const opt = document.createElement('option');
+                opt.value = v.voice_id;
+                opt.textContent = v.name || v.voice_id;
+                if (!firstVoiceId) firstVoiceId = v.voice_id;
+                grp.appendChild(opt);
+            });
+            sel.appendChild(grp);
+        }
+
+        dubState.selectedVoiceId = firstVoiceId;
+        sel.value = firstVoiceId;
+        sel.addEventListener('change', () => { dubState.selectedVoiceId = sel.value; });
+
     } catch (e) {
-        container.innerHTML = '<span style="color:#888;font-size:13px">Ovozlarni yuklashda xato</span>';
+        sel.innerHTML = '<option value="">Yuklashda xato</option>';
     }
 }
 
