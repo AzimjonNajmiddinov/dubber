@@ -15,6 +15,31 @@ class MmsTtsClient
     }
 
     /**
+     * Find the latest registered voice_id by name. Returns null if not found.
+     */
+    public function findVoiceByName(string $name): ?string
+    {
+        try {
+            $resp = Http::timeout(10)->get("{$this->baseUrl}/voices");
+            if (!$resp->successful()) return null;
+            $data = $resp->json();
+            $list = is_array($data) ? $data : ($data['voices'] ?? []);
+            // Pick the most recently created entry with matching name
+            $match = null;
+            foreach ($list as $v) {
+                if (($v['name'] ?? '') === $name) {
+                    if (!$match || ($v['created_at'] ?? '') > ($match['created_at'] ?? '')) {
+                        $match = $v;
+                    }
+                }
+            }
+            return $match ? $match['voice_id'] : null;
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
+    /**
      * Clone a voice from an audio sample.
      *
      * @param  string   $name          Voice name

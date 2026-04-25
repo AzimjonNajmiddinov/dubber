@@ -515,7 +515,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             $voiceId  = \Illuminate\Support\Facades\Redis::get($cacheKey);
             if (!$voiceId) {
                 $name    = pathinfo($voiceFile, PATHINFO_FILENAME);
-                $voiceId = $client->addVoice("pool-{$name}", [$voiceFile]);
+                $voiceId = $client->findVoiceByName("pool-{$name}") ?? $client->addVoice("pool-{$name}", [$voiceFile]);
                 \Illuminate\Support\Facades\Redis::setex($cacheKey, 604800, $voiceId);
             }
 
