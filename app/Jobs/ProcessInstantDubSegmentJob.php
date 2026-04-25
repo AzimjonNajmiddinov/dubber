@@ -321,6 +321,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         $sessionJson = Redis::get($sessionKey);
         if (!$sessionJson) return;
         $session  = json_decode($sessionJson, true);
+        if ($session['disable_prosody'] ?? false) return;
         $bgChunks = $session['bg_chunks'] ?? [];
 
         $bgPath = null; $bgStart = null; $bgEnd = null;

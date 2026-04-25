@@ -324,6 +324,11 @@ class PrepareInstantDubJob implements ShouldQueue
         $voiceKey = "instant-dub:{$this->sessionId}:voices";
         Redis::setex($voiceKey, 50400, json_encode($voiceMap));
 
+        if (count($speakers) === 1) {
+            $session['disable_prosody'] = true;
+            Redis::setex("instant-dub:{$this->sessionId}", 50400, json_encode($session));
+        }
+
         Log::info("[DUB] Voice map built (driver={$driver}): " . implode(', ', array_keys($speakers)), [
             'session' => $this->sessionId,
         ]);
