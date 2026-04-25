@@ -520,8 +520,8 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             }
 
             $name  = pathinfo($voiceFile, PATHINFO_FILENAME);
-            $speed = AdminVoicePoolController::getSpeed($gender, $name);
-            $tau   = AdminVoicePoolController::getTau($gender, $name);
+            $speed = $speakerEntry['speed'] ?? AdminVoicePoolController::getSpeed($gender, $name);
+            $tau   = $speakerEntry['tau']   ?? AdminVoicePoolController::getTau($gender, $name);
         }
 
         $text = TextNormalizer::normalize($this->text, $this->language);
