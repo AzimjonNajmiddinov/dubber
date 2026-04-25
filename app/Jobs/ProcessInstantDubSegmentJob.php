@@ -524,7 +524,10 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             $tau   = AdminVoicePoolController::getTau($gender, $name);
         }
 
-        $text    = TextNormalizer::normalize($this->text, $this->language);
+        $text = TextNormalizer::normalize($this->text, $this->language);
+        // MMS model vocabulary is ASCII+basic-Latin — replace U+02BB/02BC (Uzbek apostrophe)
+        // with plain ASCII apostrophe to avoid torch embedding crash on unknown tokens
+        $text = str_replace(["\u{02BB}", "\u{02BC}", "\u{02B0}"], "'", $text);
         $wavData = $client->synthesize($voiceId, $text, [
             'language' => $this->language,
             'speed'    => $speed,
