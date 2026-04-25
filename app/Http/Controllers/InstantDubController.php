@@ -18,20 +18,8 @@ class InstantDubController extends Controller
 {
     public function voices(): JsonResponse
     {
-        $mmsUrl = config('services.mms_tts.url') ?: env('MMS_TTS_SERVICE_URL');
-
-        if ($mmsUrl) {
-            try {
-                $resp = Http::timeout(5)->get(rtrim($mmsUrl, '/') . '/voices');
-                if ($resp->successful() && is_array($resp->json())) {
-                    return response()->json($resp->json());
-                }
-            } catch (\Throwable) {}
-        }
-
-        // Fallback: read from local voice pool
         $voices = [];
-        foreach (['male', 'female'] as $gender) {
+        foreach (['male', 'female', 'child'] as $gender) {
             $dir   = storage_path("app/voice-pool/{$gender}");
             $files = is_dir($dir) ? glob("{$dir}/*.{wav,mp3,m4a}", GLOB_BRACE) : [];
             foreach ($files as $file) {
