@@ -266,9 +266,11 @@ class PrepareInstantDubJob implements ShouldQueue
         // Flow 3 (Chrome Extension): user picked a specific voice — assign it to ALL speakers.
         // Gender-based cycling (old approach) is DISABLED when force_voice is set.
         if ($forceVoice) {
+            $gender = str_starts_with($forceVoice, 'F') ? 'female'
+                    : (str_starts_with($forceVoice, 'C') ? 'child' : 'male');
             $voiceMap = [];
             foreach (array_keys($speakers) as $tag) {
-                $voiceMap[$tag] = ['driver' => 'mms', 'mms_voice_id' => $forceVoice];
+                $voiceMap[$tag] = ['driver' => 'mms', 'gender' => $gender, 'pool_name' => $forceVoice];
             }
             $voiceKey = "instant-dub:{$this->sessionId}:voices";
             Redis::setex($voiceKey, 50400, json_encode($voiceMap));
