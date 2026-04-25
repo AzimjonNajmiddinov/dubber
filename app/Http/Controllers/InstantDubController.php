@@ -77,8 +77,9 @@ class InstantDubController extends Controller
             }
 
             if ($cached) {
-                // If user picked a specific voice, bypass complete cache — re-TTS with new voice
-                if ($forceVoice && $cached->status === 'complete') {
+                // Always re-TTS with selected voice — translations are cached in DB,
+                // but audio is always regenerated fresh (never serve stale TTS files)
+                if ($cached->status === 'complete') {
                     $cached->update(['status' => 'needs_retts', 'session_id' => $sessionId]);
                     $cached = $cached->fresh();
                 }
@@ -86,41 +87,11 @@ class InstantDubController extends Controller
                 $session = $this->buildSessionFromCache($cached, $sessionId, $videoUrl, $videoBaseUrl, $videoQuery, $title, $forceVoice);
                 Redis::setex("instant-dub:{$sessionId}", 50400, json_encode($session));
 
-                if ($cached->status === 'complete') {
-                    // Populate chunk keys with saved TTS audio — background will be downloaded separately
-                    foreach ($cached->segments as $seg) {
-                        $audioBase64 = null;
-                        if ($seg->tts_path && file_exists($seg->tts_path)) {
-                            $audioBase64 = base64_encode(file_get_contents($seg->tts_path));
-                        }
-                        Redis::setex("instant-dub:{$sessionId}:chunk:{$seg->segment_index}", 50400, json_encode([
-                            'index'          => $seg->segment_index,
-                            'start_time'     => $seg->start_time,
-                            'end_time'       => $seg->end_time,
-                            'slot_end'       => $seg->slot_end,
-                            'text'           => $seg->translated_text,
-                            'source_text'    => $seg->source_text,
-                            'speaker'        => $seg->speaker,
-                            'audio_base64'   => $audioBase64,
-                            'audio_duration' => $seg->tts_duration,
-                            'aac_duration'   => $seg->tts_duration,
-                        ]));
-                    }
-
-                    // Download background audio — DownloadAudioChunkJob will remix all
-                    // segments and set playable=true once done (same flow as live dub)
-                    DownloadOriginalAudioJob::dispatch($sessionId, $videoUrl)->onQueue('default');
-
-                    Log::info("[DUB] Cache hit (complete) for: {$urlWithoutQuery} [{$language}] — background downloading", ['session' => $sessionId]);
-                    return response()->json(['session_id' => $sessionId, 'cached' => true]);
-                }
-
-                // needs_retts: re-TTS with saved translations, skip full translation
                 $cached->update(['status' => 'processing', 'session_id' => $sessionId]);
                 PrepareInstantDubJob::dispatch(
                     $sessionId, $videoUrl, $language, $translateFrom, $srt, $cached->id,
                 )->onQueue('segment-generation');
-                Log::info("[DUB] Cache hit (needs_retts) — re-TTS for: {$urlWithoutQuery} [{$language}]", ['session' => $sessionId]);
+                Log::info("[DUB] Cache hit (re-TTS) for: {$urlWithoutQuery} [{$language}]", ['session' => $sessionId]);
                 return response()->json(['session_id' => $sessionId]);
             }
         }
