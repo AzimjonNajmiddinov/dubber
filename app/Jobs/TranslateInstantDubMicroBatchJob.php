@@ -308,11 +308,13 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
 
         // Flow 3: force_voice set — assign same voice to all speakers
         if ($forceVoice) {
+            $gender = str_starts_with($forceVoice, 'F') ? 'female'
+                    : (str_starts_with($forceVoice, 'C') ? 'child' : 'male');
             $lock = \Illuminate\Support\Facades\Cache::lock($lockKey, 5);
-            $lock->block(5, function () use ($voiceKey, $speakers, $forceVoice) {
+            $lock->block(5, function () use ($voiceKey, $speakers, $forceVoice, $gender) {
                 $voiceMap = json_decode(Redis::get($voiceKey) ?? '{}', true) ?: [];
                 foreach (array_keys($speakers) as $tag) {
-                    $voiceMap[$tag] = ['driver' => 'mms', 'mms_voice_id' => $forceVoice];
+                    $voiceMap[$tag] = ['driver' => 'mms', 'gender' => $gender, 'pool_name' => $forceVoice];
                 }
                 Redis::setex($voiceKey, 50400, json_encode($voiceMap));
             });
