@@ -77,7 +77,13 @@ class InstantDubController extends Controller
             }
 
             if ($cached) {
-                $session = $this->buildSessionFromCache($cached, $sessionId, $videoUrl, $videoBaseUrl, $videoQuery, $title);
+                // If user picked a specific voice, bypass complete cache — re-TTS with new voice
+                if ($forceVoice && $cached->status === 'complete') {
+                    $cached->update(['status' => 'needs_retts', 'session_id' => $sessionId]);
+                    $cached = $cached->fresh();
+                }
+
+                $session = $this->buildSessionFromCache($cached, $sessionId, $videoUrl, $videoBaseUrl, $videoQuery, $title, $forceVoice);
                 Redis::setex("instant-dub:{$sessionId}", 50400, json_encode($session));
 
                 if ($cached->status === 'complete') {
@@ -1083,7 +1089,7 @@ class InstantDubController extends Controller
         return $this->silentAacResponse();
     }
 
-    private function buildSessionFromCache(InstantDub $dub, string $sessionId, string $videoUrl, string $videoBaseUrl, string $videoQuery, string $title): array
+    private function buildSessionFromCache(InstantDub $dub, string $sessionId, string $videoUrl, string $videoBaseUrl, string $videoQuery, string $title, ?string $forceVoice = null): array
     {
         $isComplete = $dub->status === 'complete';
 
@@ -1094,11 +1100,10 @@ class InstantDubController extends Controller
             'video_url'      => $videoUrl,
             'video_base_url' => $videoBaseUrl,
             'video_query'    => $videoQuery,
-            // TTS is done but background not yet downloaded — same as live dub:
-            // playable is set by DownloadAudioChunkJob once background is mixed in
             'status'         => 'processing',
             'playable'       => false,
-            'tts_driver'     => $dub->tts_driver,
+            'tts_driver'     => 'mms',
+            'force_voice'    => $forceVoice,
             'total_segments' => $dub->total_segments,
             'segments_ready' => $isComplete ? $dub->total_segments : 0,
             'cached_dub_id'  => $dub->id,
