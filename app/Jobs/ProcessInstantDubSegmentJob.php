@@ -495,7 +495,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         if (!empty($speakerEntry['mms_voice_id'])) {
             $voiceId = $speakerEntry['mms_voice_id'];
             $speed   = 1.0;
-            $tau     = 0.9;
+            $tau     = 0.7;
         } else {
             $gender = $speakerEntry['gender']
                 ?? (str_starts_with($this->speaker, 'F') ? 'female'
