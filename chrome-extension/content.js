@@ -105,8 +105,8 @@ async function showOverlay() {
             <option value="">Yuklanmoqda...</option>
         </select>
         <div style="display:flex;gap:8px;justify-content:center">
-            <button id="dubber-start" style="padding:10px 24px;background:#1a73e8;color:white;
-                border:none;border-radius:8px;cursor:pointer;font-size:15px;font-weight:bold;">
+            <button id="dubber-start" disabled style="padding:10px 24px;background:#555;color:#aaa;
+                border:none;border-radius:8px;cursor:not-allowed;font-size:15px;font-weight:bold;">
                 Boshlash
             </button>
             <button id="dubber-cancel" style="padding:10px 20px;background:#444;color:white;
@@ -181,6 +181,12 @@ async function loadVoices(overlay) {
         dubState.selectedVoiceId = firstVoiceId;
         sel.value = firstVoiceId;
         sel.addEventListener('change', () => { dubState.selectedVoiceId = sel.value; });
+
+        const startBtn = document.getElementById('dubber-start');
+        if (startBtn) {
+            startBtn.disabled = false;
+            startBtn.style.cssText = 'padding:10px 24px;background:#1a73e8;color:white;border:none;border-radius:8px;cursor:pointer;font-size:15px;font-weight:bold;';
+        }
 
     } catch (e) {
         sel.innerHTML = '<option value="">Yuklashda xato</option>';
