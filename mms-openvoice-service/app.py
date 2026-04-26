@@ -227,6 +227,7 @@ class SynthesizeRequest(BaseModel):
     language: str = "uz"
     speed: float = 1.0
     tau: float = 0.9
+    seed: Optional[int] = None
 
 
 @app.post("/synthesize")
@@ -244,6 +245,11 @@ async def synthesize(request: SynthesizeRequest):
         ref_path = voice_dir / "reference.wav"
         if not se_path.exists():
             raise HTTPException(status_code=404, detail=f"Voice {request.voice_id} not found")
+
+        # Fix seed for deterministic MMS synthesis — same noise pattern = consistent voice timbre
+        if request.seed is not None:
+            torch.manual_seed(request.seed)
+            np.random.seed(request.seed)
 
         # 1. MMS TTS — convert Latin→Cyrillic, then generate Uzbek speech at 16kHz
         cyrillic_text = latin_to_cyrillic(request.text)

@@ -85,6 +85,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                 $speakerEntry['driver']       = 'mms';
                 $speakerEntry['mms_voice_id'] = $session['force_voice_id'];
                 $speakerEntry['tau']          = 1.0;
+                $speakerEntry['seed']         = 42;
                 $driver = 'mms';
             } elseif ($driver === 'mms' && empty($speakerEntry['pool_name']) && !empty($session['force_voice'])) {
                 // Fallback: voice map expired from Redis, reconstruct from session
@@ -94,6 +95,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                 $speakerEntry['gender']    = str_starts_with($fv, 'F') ? 'female'
                     : (str_starts_with($fv, 'C') ? 'child' : 'male');
                 $speakerEntry['tau']       = 1.0;
+                $speakerEntry['seed']      = 42;
             }
 
             if ($driver === 'elevenlabs' && !empty($speakerEntry['voice_id'])) {
@@ -559,6 +561,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             'language' => $this->language,
             'speed'    => $speed,
             'tau'      => $tau,
+            'seed'     => $speakerEntry['seed'] ?? null,
         ]);
 
         $tmpWav = "{$tmpDir}/seg_{$this->index}_mms.wav";

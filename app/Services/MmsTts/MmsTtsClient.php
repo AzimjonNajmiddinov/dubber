@@ -86,6 +86,7 @@ class MmsTtsClient
                 'language' => $options['language'] ?? 'uz',
                 'speed'    => $options['speed']    ?? 1.0,
                 'tau'      => $options['tau']       ?? 0.9,
+                'seed'     => $options['seed']      ?? null,
             ]);
 
         if (!$response->successful()) {
