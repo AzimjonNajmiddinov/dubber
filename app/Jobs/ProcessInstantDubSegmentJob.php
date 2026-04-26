@@ -514,7 +514,9 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             $voiceId = $speakerEntry['mms_voice_id'];
             $speed   = $speakerEntry['speed'] ?? 1.0;
             $tau     = $speakerEntry['tau']   ?? 0.8;
+            Log::info("[MMS] seg#{$this->index} voice_id={$voiceId} tau={$tau}", ['session' => $this->sessionId]);
         } else {
+            Log::warning("[MMS] seg#{$this->index} NO mms_voice_id — using pool_name='" . ($speakerEntry['pool_name'] ?? 'null') . "'", ['session' => $this->sessionId]);
             $gender = $speakerEntry['gender']
                 ?? (str_starts_with($this->speaker, 'F') ? 'female'
                     : (str_starts_with($this->speaker, 'C') ? 'child' : 'male'));
