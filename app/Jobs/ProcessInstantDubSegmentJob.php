@@ -524,9 +524,16 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             $cacheKey = 'voice-pool-id:mms:' . md5($voiceFile);
             $voiceId  = \Illuminate\Support\Facades\Redis::get($cacheKey);
             if (!$voiceId) {
-                $name    = pathinfo($voiceFile, PATHINFO_FILENAME);
-                $voiceId = $client->findVoiceByName("pool-{$name}") ?? $client->addVoice("pool-{$name}", [$voiceFile]);
-                \Illuminate\Support\Facades\Redis::setex($cacheKey, 604800, $voiceId);
+                // Lock prevents parallel workers from creating duplicate MMS voice clones
+                $lock = \Illuminate\Support\Facades\Cache::lock('mms-voice-register:' . md5($voiceFile), 30);
+                $lock->block(30, function () use ($cacheKey, $voiceFile, $client, &$voiceId) {
+                    $voiceId = \Illuminate\Support\Facades\Redis::get($cacheKey);
+                    if (!$voiceId) {
+                        $name    = pathinfo($voiceFile, PATHINFO_FILENAME);
+                        $voiceId = $client->findVoiceByName("pool-{$name}") ?? $client->addVoice("pool-{$name}", [$voiceFile]);
+                        \Illuminate\Support\Facades\Redis::setex($cacheKey, 604800, $voiceId);
+                    }
+                });
             }
 
             $name  = pathinfo($voiceFile, PATHINFO_FILENAME);
