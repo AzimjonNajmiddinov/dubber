@@ -79,14 +79,21 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             $speakerEntry = $voiceMap[$this->speaker] ?? [];
             $driver = $speakerEntry['driver'] ?? ($session['tts_driver'] ?? config('dubber.tts.default', 'edge'));
 
-            // When voice map expired from Redis, speakerEntry may lack pool_name.
-            // Fall back to session force_voice so all speakers stay on the same voice.
-            if ($driver === 'mms' && empty($speakerEntry['pool_name']) && !empty($session['force_voice'])) {
+            // force_voice_id was pre-registered in PrepareInstantDubJob (single worker, no race).
+            // Inject it into speakerEntry so generateWithMms uses it directly — no per-job pool lookup.
+            if (!empty($session['force_voice_id'])) {
+                $speakerEntry['driver']       = 'mms';
+                $speakerEntry['mms_voice_id'] = $session['force_voice_id'];
+                $speakerEntry['tau']          = 0.8;
+                $driver = 'mms';
+            } elseif ($driver === 'mms' && empty($speakerEntry['pool_name']) && !empty($session['force_voice'])) {
+                // Fallback: voice map expired from Redis, reconstruct from session
+                $fv = $session['force_voice'];
                 $speakerEntry['driver']    = 'mms';
-                $speakerEntry['pool_name'] = $session['force_voice'];
-                $speakerEntry['gender']  ??= str_starts_with($this->speaker, 'F') ? 'female'
-                    : (str_starts_with($this->speaker, 'C') ? 'child' : 'male');
-                $speakerEntry['tau']     ??= 0.8;
+                $speakerEntry['pool_name'] = $fv;
+                $speakerEntry['gender']    = str_starts_with($fv, 'F') ? 'female'
+                    : (str_starts_with($fv, 'C') ? 'child' : 'male');
+                $speakerEntry['tau']       = 0.8;
             }
 
             if ($driver === 'elevenlabs' && !empty($speakerEntry['voice_id'])) {
@@ -504,8 +511,8 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         // Force voice: direct MMS service voice ID — skip local pool lookup
         if (!empty($speakerEntry['mms_voice_id'])) {
             $voiceId = $speakerEntry['mms_voice_id'];
-            $speed   = 1.0;
-            $tau     = 0.7;
+            $speed   = $speakerEntry['speed'] ?? 1.0;
+            $tau     = $speakerEntry['tau']   ?? 0.8;
         } else {
             $gender = $speakerEntry['gender']
                 ?? (str_starts_with($this->speaker, 'F') ? 'female'

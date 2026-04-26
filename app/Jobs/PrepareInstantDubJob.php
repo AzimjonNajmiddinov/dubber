@@ -42,6 +42,36 @@ class PrepareInstantDubJob implements ShouldQueue
             $title = json_decode($sessionJson, true)['title'] ?? 'Untitled';
         }
 
+        // Pre-register force_voice with MMS once (single-job context = no race condition).
+        // Stores force_voice_id in session so all segment workers use the same voice ID.
+        $session = $sessionJson ? json_decode($sessionJson, true) : [];
+        $forceVoice = $session['force_voice'] ?? null;
+        if ($forceVoice && empty($session['force_voice_id'])) {
+            $fvGender = str_starts_with($forceVoice, 'F') ? 'female'
+                      : (str_starts_with($forceVoice, 'C') ? 'child' : 'male');
+            $voiceFile = null;
+            foreach (['wav', 'mp3', 'm4a'] as $ext) {
+                $p = storage_path("app/voice-pool/{$fvGender}/{$forceVoice}.{$ext}");
+                if (file_exists($p)) { $voiceFile = $p; break; }
+            }
+            if ($voiceFile) {
+                try {
+                    $client = new \App\Services\MmsTts\MmsTtsClient();
+                    $name   = pathinfo($voiceFile, PATHINFO_FILENAME);
+                    $cacheKey = 'voice-pool-id:mms:' . md5($voiceFile);
+                    $voiceId  = Redis::get($cacheKey);
+                    if (!$voiceId) {
+                        $voiceId = $client->findVoiceByName("pool-{$name}") ?? $client->addVoice("pool-{$name}", [$voiceFile]);
+                        Redis::setex($cacheKey, 604800, $voiceId);
+                    }
+                    $this->updateSession(['force_voice_id' => $voiceId]);
+                    Log::info("[DUB] force_voice '{$forceVoice}' pre-registered: {$voiceId}", ['session' => $this->sessionId]);
+                } catch (\Throwable $e) {
+                    Log::warning("[DUB] force_voice pre-register failed: " . $e->getMessage(), ['session' => $this->sessionId]);
+                }
+            }
+        }
+
         // Fast path: needs_retts — skip translation, re-TTS from saved DB segments
         if ($this->cachedDubId !== null) {
             $this->handleReTts($title);
