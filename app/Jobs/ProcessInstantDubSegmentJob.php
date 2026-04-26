@@ -443,6 +443,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         $sessionJson = Redis::get("instant-dub:{$this->sessionId}");
         if (!$sessionJson) return null;
         $session  = json_decode($sessionJson, true);
+        if ($session['disable_prosody'] ?? false) return null;
         $bgChunks = $session['bg_chunks'] ?? [];
 
         $vocalsPath = null;
