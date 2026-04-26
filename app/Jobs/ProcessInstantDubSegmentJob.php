@@ -82,12 +82,11 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             // When voice map expired from Redis, speakerEntry may lack pool_name.
             // Fall back to session force_voice so all speakers stay on the same voice.
             if ($driver === 'mms' && empty($speakerEntry['pool_name']) && !empty($session['force_voice'])) {
-                $speakerEntry['driver']   = 'mms';
+                $speakerEntry['driver']    = 'mms';
                 $speakerEntry['pool_name'] = $session['force_voice'];
                 $speakerEntry['gender']  ??= str_starts_with($this->speaker, 'F') ? 'female'
                     : (str_starts_with($this->speaker, 'C') ? 'child' : 'male');
-                $speakerEntry['speed']   ??= 1.0;
-                $speakerEntry['tau']     ??= 0.7;
+                $speakerEntry['tau']     ??= 0.8;
             }
 
             if ($driver === 'elevenlabs' && !empty($speakerEntry['voice_id'])) {

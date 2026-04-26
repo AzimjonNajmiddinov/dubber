@@ -628,7 +628,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
             $lock->block(5, function () use ($voiceKey, $newSpeakers, $forceVoice, $gender) {
                 $voiceMap = json_decode(Redis::get($voiceKey) ?? '{}', true) ?: [];
                 foreach (array_keys($newSpeakers) as $tag) {
-                    $voiceMap[$tag] = ['driver' => 'mms', 'gender' => $gender, 'pool_name' => $forceVoice, 'speed' => 1.0, 'tau' => 0.7];
+                    $voiceMap[$tag] = ['driver' => 'mms', 'gender' => $gender, 'pool_name' => $forceVoice, 'tau' => 0.8];
                 }
                 Redis::setex($voiceKey, 50400, json_encode($voiceMap));
             });
