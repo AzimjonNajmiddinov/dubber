@@ -193,6 +193,18 @@ class AdminVoicePoolController extends Controller
         return response()->json(['ok' => true]);
     }
 
+    public function reregister(string $gender, string $name)
+    {
+        if (!in_array($gender, self::GENDERS)) abort(400);
+        $file = storage_path("app/voice-pool/{$gender}/{$name}.wav");
+        if (!file_exists($file)) {
+            return response()->json(['error' => 'Voice not found'], 404);
+        }
+        Redis::del('voice-pool-id:' . md5($file));
+        Redis::del('voice-pool-id:mms:' . md5($file));
+        return response()->json(['ok' => true]);
+    }
+
     public function saveSpeed(Request $request, string $gender, string $name)
     {
         if (!in_array($gender, self::GENDERS)) abort(400);

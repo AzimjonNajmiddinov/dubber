@@ -144,8 +144,9 @@
                             <button type="button" onclick="saveRefText('{{ $voice['gender'] }}','{{ $voice['name'] }}')" class="btn btn-secondary btn-sm">💾</button>
                         </div>
                     </td>
-                    <td style="display:flex;gap:6px;align-items:center">
+                    <td style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
                         <button type="button" class="play-btn" onclick="togglePlay(this,'{{ route('admin.voice-pool.play',[$voice['gender'],$voice['name']]) }}')">▶ Play</button>
+                        <button type="button" class="btn btn-secondary btn-sm" onclick="reregisterVoice('{{ $voice['gender'] }}','{{ $voice['name'] }}',this)" title="Clear cached voice ID so next dub re-clones with new base_src_se">↺ Re-reg</button>
                         <form method="POST" action="{{ route('admin.voice-pool.delete',[$voice['gender'],$voice['name']]) }}" style="display:inline" onsubmit="return confirm('Delete {{ $voice['name'] }}?')">
                             @csrf @method('DELETE')
                             <button type="submit" class="btn btn-danger btn-sm">Delete</button>
@@ -211,6 +212,16 @@
 
 <script>
 let currentAudio = null, currentBtn = null;
+
+async function reregisterVoice(gender, name, btn) {
+    btn.textContent = '⏳'; btn.disabled = true;
+    const res = await fetch(`/admin/voice-pool/${gender}/${name}/reregister`, {
+        method:'POST', headers:{'X-CSRF-TOKEN':document.querySelector('meta[name=csrf-token]').content},
+    });
+    btn.disabled = false;
+    if (res.ok) { btn.textContent = '✅ Done'; setTimeout(() => { btn.textContent = '↺ Re-reg'; }, 2000); }
+    else { btn.textContent = '❌'; setTimeout(() => { btn.textContent = '↺ Re-reg'; }, 2000); }
+}
 
 async function saveRefText(gender, name) {
     const ta = document.getElementById('ref-'+gender+'-'+name);
