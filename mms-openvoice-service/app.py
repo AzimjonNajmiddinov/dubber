@@ -242,12 +242,6 @@ async def synthesize(request: SynthesizeRequest):
             raise HTTPException(status_code=503, detail=f"Models not ready: {e}")
     try:
 
-        voice_dir = VOICES_PATH / request.voice_id
-        se_path = voice_dir / "target_se.pth"
-        ref_path = voice_dir / "reference.wav"
-        if not se_path.exists():
-            raise HTTPException(status_code=404, detail=f"Voice {request.voice_id} not found")
-
         # Fix seed for deterministic MMS synthesis — same noise pattern = consistent voice timbre
         if request.seed is not None:
             torch.manual_seed(request.seed)
@@ -282,20 +276,22 @@ async def synthesize(request: SynthesizeRequest):
                 f"(original: {request.text!r}). Waveform length: {len(waveform_22k)}"
             )
 
-        # Save MMS output temporarily (inside try block so cleanup always runs)
-        src_path = CACHE_PATH / f"src_{uuid.uuid4()}.wav"
-
-        # 3. OpenVoice tone color conversion (fallback to raw MMS if SE extraction fails)
-        from openvoice import se_extractor
-        import shutil as _shutil
-        target_se = torch.load(str(se_path))
-
         out_path = CACHE_PATH / f"{uuid.uuid4()}.wav"
 
-        # tau=0 means no voice cloning — return raw MMS directly
+        # tau=0 → raw MMS, no voice cloning needed (voice_id ignored)
         if request.tau <= 0.0:
             sf.write(str(out_path), waveform_22k, 22050)
         else:
+            # tau > 0 → OpenVoice tone color conversion
+            voice_dir = VOICES_PATH / request.voice_id
+            se_path = voice_dir / "target_se.pth"
+            if not se_path.exists():
+                raise HTTPException(status_code=404, detail=f"Voice {request.voice_id} not found")
+
+            src_path = CACHE_PATH / f"src_{uuid.uuid4()}.wav"
+            from openvoice import se_extractor
+            import shutil as _shutil
+            target_se = torch.load(str(se_path))
             try:
                 sf.write(str(src_path), waveform_22k, 22050)
                 src_se, _ = se_extractor.get_se(str(src_path), _ov_converter, vad=False)
@@ -314,8 +310,7 @@ async def synthesize(request: SynthesizeRequest):
                     _shutil.copy(str(src_path), str(out_path))
                 else:
                     sf.write(str(out_path), waveform_22k, 22050)
-
-        src_path.unlink(missing_ok=True)
+            src_path.unlink(missing_ok=True)
 
         if not out_path.exists() or out_path.stat().st_size < 1000:
             raise HTTPException(status_code=500, detail="Synthesis produced invalid output")
