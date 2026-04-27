@@ -19,6 +19,10 @@ class InstantDub extends Model
      */
     public static function extractContentKey(string $url): string
     {
+        // YouTube: extract video ID from ?v= or youtu.be/
+        if (preg_match('/(?:youtube\.com\/watch[^#]*[?&]v=|youtu\.be\/)([a-zA-Z0-9_-]{11})/', $url, $m)) {
+            return 'yt:' . $m[1];
+        }
         $path = strtok($url, '?');
         // Match the last 32-char hex segment in the URL path (content hash)
         if (preg_match('/\/([a-f0-9]{32})(?:\/|$)/i', $path, $m)) {
