@@ -558,13 +558,13 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         $text = TextNormalizer::normalize($this->text, $this->language);
         $text = str_replace(["\u{02BB}", "\u{02BC}", "\u{02B0}"], "'", $text);
 
+        $session     = json_decode(\Illuminate\Support\Facades\Redis::get("instant-dub:{$this->sessionId}") ?? '{}', true);
+        $forceVoice  = !empty($session['force_voice']);
         $options = [
-            'language'      => $this->language,
-            'speed'         => $speed,
-            'tau'           => $tau,
-            'seed'          => $speakerEntry['seed']          ?? null,
-            'noise_scale'   => $speakerEntry['noise_scale']   ?? 0.667,
-            'noise_scale_w' => $speakerEntry['noise_scale_w'] ?? 0.8,
+            'language' => $this->language,
+            'speed'    => $speed,
+            'tau'      => $tau,
+            'seed'     => $forceVoice ? 42 : ($speakerEntry['seed'] ?? null),
         ];
 
         try {

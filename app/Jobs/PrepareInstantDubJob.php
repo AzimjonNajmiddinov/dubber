@@ -46,6 +46,11 @@ class PrepareInstantDubJob implements ShouldQueue
         // Stores force_voice_id in session so all segment workers use the same voice ID.
         $session = $sessionJson ? json_decode($sessionJson, true) : [];
         $forceVoice = $session['force_voice'] ?? null;
+        // Chrome extension (force_voice) → disable prosody transfer so voice stays clean
+        if ($forceVoice && empty($session['disable_prosody'])) {
+            $this->updateSession(['disable_prosody' => true]);
+        }
+
         if ($forceVoice && empty($session['force_voice_id'])) {
             $fvGender = str_starts_with($forceVoice, 'F') ? 'female'
                       : (str_starts_with($forceVoice, 'C') ? 'child' : 'male');
