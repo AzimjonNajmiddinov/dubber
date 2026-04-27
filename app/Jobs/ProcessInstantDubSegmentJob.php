@@ -111,18 +111,19 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             }
 
             // 2. Adjust tempo so TTS fills the timeslot naturally
+            // Skipped for force_voice (Chrome extension): atempo causes double MP3
+            // encode artifacts. Natural TTS timing is preferred over strict sync.
             $ttsDuration = $this->getAudioDuration($rawMp3);
             $finalMp3 = $rawMp3;
+            $isForceVoice = !empty($session['force_voice']);
 
-            if ($slotDuration > 0.5 && $ttsDuration > 0.1) {
+            if (!$isForceVoice && $slotDuration > 0.5 && $ttsDuration > 0.1) {
                 $ratio = $ttsDuration / $slotDuration;
                 $tempo = null;
 
                 if ($ratio > 1.05) {
-                    // Too long — speed up (cap 1.35x to keep words intelligible)
                     $tempo = min($ratio, 1.35);
                 } elseif ($ratio < 0.9) {
-                    // Too short — slow down to fill ~95% of slot (cap 0.8x to stay natural)
                     $targetDuration = $slotDuration * 0.95;
                     $tempo = max($ttsDuration / $targetDuration, 0.8);
                 }
