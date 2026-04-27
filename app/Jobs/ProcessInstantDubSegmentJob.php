@@ -86,24 +86,18 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                 $fvG    = $fv ? (str_starts_with($fv, 'F') ? 'female' : (str_starts_with($fv, 'C') ? 'child' : 'male')) : ($speakerEntry['gender'] ?? 'male');
                 $speakerEntry['driver']        = 'mms';
                 $speakerEntry['mms_voice_id']  = $session['force_voice_id'];
-                $speakerEntry['tau']           = $speakerEntry['tau'] ?? \App\Http\Controllers\AdminVoicePoolController::getTau($fvG, $fv ?? '');
-                $speakerEntry['speed']         = $speakerEntry['speed'] ?? \App\Http\Controllers\AdminVoicePoolController::getSpeed($fvG, $fv ?? '');
-                $speakerEntry['seed']          = 42;
-                $speakerEntry['noise_scale']   = 0.667;
-                $speakerEntry['noise_scale_w'] = 0.8;
+                $speakerEntry['tau']   = $speakerEntry['tau'] ?? \App\Http\Controllers\AdminVoicePoolController::getTau($fvG, $fv ?? '');
+                $speakerEntry['speed'] = $speakerEntry['speed'] ?? \App\Http\Controllers\AdminVoicePoolController::getSpeed($fvG, $fv ?? '');
                 $driver = 'mms';
             } elseif ($driver === 'mms' && empty($speakerEntry['pool_name']) && !empty($session['force_voice'])) {
                 // Fallback: voice map expired from Redis, reconstruct from session
                 $fv = $session['force_voice'];
                 $fvG = str_starts_with($fv, 'F') ? 'female' : (str_starts_with($fv, 'C') ? 'child' : 'male');
-                $speakerEntry['driver']        = 'mms';
-                $speakerEntry['pool_name']     = $fv;
-                $speakerEntry['gender']        = $fvG;
-                $speakerEntry['tau']           = \App\Http\Controllers\AdminVoicePoolController::getTau($fvG, $fv);
-                $speakerEntry['speed']         = \App\Http\Controllers\AdminVoicePoolController::getSpeed($fvG, $fv);
-                $speakerEntry['seed']          = 42;
-                $speakerEntry['noise_scale']   = 0.667;
-                $speakerEntry['noise_scale_w'] = 0.8;
+                $speakerEntry['driver']    = 'mms';
+                $speakerEntry['pool_name'] = $fv;
+                $speakerEntry['gender']    = $fvG;
+                $speakerEntry['tau']       = \App\Http\Controllers\AdminVoicePoolController::getTau($fvG, $fv);
+                $speakerEntry['speed']     = \App\Http\Controllers\AdminVoicePoolController::getSpeed($fvG, $fv);
             }
 
             if ($driver === 'elevenlabs' && !empty($speakerEntry['voice_id'])) {

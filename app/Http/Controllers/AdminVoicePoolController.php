@@ -284,14 +284,11 @@ class AdminVoicePoolController extends Controller
 
         $tau = (float) ($request->input('tau', 0.9));
         $synthPayload = [
-            'text'          => $request->input('text'),
-            'voice_id'      => $voiceId,
-            'language'      => $request->input('language'),
-            'speed'         => $speed,
-            'tau'           => $tau,
-            'seed'          => 42,
-            'noise_scale'   => 0.667,
-            'noise_scale_w' => 0.8,
+            'text'     => $request->input('text'),
+            'voice_id' => $voiceId,
+            'language' => $request->input('language'),
+            'speed'    => $speed,
+            'tau'      => $tau,
         ];
         $synthResp = Http::timeout(120)->post("{$xttsUrl}/synthesize", $synthPayload);
 
