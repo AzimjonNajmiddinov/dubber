@@ -283,26 +283,25 @@ class AdminVoicePoolController extends Controller
         }
 
         $tau = (float) ($request->input('tau', 0.9));
-        $synthResp = Http::timeout(120)->post("{$xttsUrl}/synthesize", [
-            'text'     => $request->input('text'),
-            'voice_id' => $voiceId,
-            'language' => $request->input('language'),
-            'speed'    => $speed,
-            'tau'      => $tau,
-        ]);
+        $synthPayload = [
+            'text'          => $request->input('text'),
+            'voice_id'      => $voiceId,
+            'language'      => $request->input('language'),
+            'speed'         => $speed,
+            'tau'           => $tau,
+            'seed'          => 42,
+            'noise_scale'   => 0.667,
+            'noise_scale_w' => 0.8,
+        ];
+        $synthResp = Http::timeout(120)->post("{$xttsUrl}/synthesize", $synthPayload);
 
         // Voice lost after pod restart — re-clone and retry once
         if ($synthResp->status() === 404 && str_contains($synthResp->body(), 'not found')) {
             Redis::del($cacheKey);
             if ($err = $cloneIfNeeded()) return $err;
 
-            $synthResp = Http::timeout(120)->post("{$xttsUrl}/synthesize", [
-                'text'     => $request->input('text'),
-                'voice_id' => $voiceId,
-                'language' => $request->input('language'),
-                'speed'    => $speed,
-                'tau'      => $tau,
-            ]);
+            $synthPayload['voice_id'] = $voiceId;
+            $synthResp = Http::timeout(120)->post("{$xttsUrl}/synthesize", $synthPayload);
         }
 
         if (!$synthResp->successful()) {
