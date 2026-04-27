@@ -82,9 +82,12 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             // force_voice_id was pre-registered in PrepareInstantDubJob (single worker, no race).
             // Inject it into speakerEntry so generateWithMms uses it directly — no per-job pool lookup.
             if (!empty($session['force_voice_id'])) {
+                $fv     = $session['force_voice'] ?? null;
+                $fvG    = $fv ? (str_starts_with($fv, 'F') ? 'female' : (str_starts_with($fv, 'C') ? 'child' : 'male')) : ($speakerEntry['gender'] ?? 'male');
                 $speakerEntry['driver']        = 'mms';
                 $speakerEntry['mms_voice_id']  = $session['force_voice_id'];
-                $speakerEntry['tau']           = 1.0;
+                $speakerEntry['tau']           = $speakerEntry['tau'] ?? \App\Http\Controllers\AdminVoicePoolController::getTau($fvG, $fv ?? '');
+                $speakerEntry['speed']         = $speakerEntry['speed'] ?? \App\Http\Controllers\AdminVoicePoolController::getSpeed($fvG, $fv ?? '');
                 $speakerEntry['seed']          = 42;
                 $speakerEntry['noise_scale']   = 0.667;
                 $speakerEntry['noise_scale_w'] = 0.8;
@@ -92,11 +95,12 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             } elseif ($driver === 'mms' && empty($speakerEntry['pool_name']) && !empty($session['force_voice'])) {
                 // Fallback: voice map expired from Redis, reconstruct from session
                 $fv = $session['force_voice'];
+                $fvG = str_starts_with($fv, 'F') ? 'female' : (str_starts_with($fv, 'C') ? 'child' : 'male');
                 $speakerEntry['driver']        = 'mms';
                 $speakerEntry['pool_name']     = $fv;
-                $speakerEntry['gender']        = str_starts_with($fv, 'F') ? 'female'
-                    : (str_starts_with($fv, 'C') ? 'child' : 'male');
-                $speakerEntry['tau']           = 1.0;
+                $speakerEntry['gender']        = $fvG;
+                $speakerEntry['tau']           = \App\Http\Controllers\AdminVoicePoolController::getTau($fvG, $fv);
+                $speakerEntry['speed']         = \App\Http\Controllers\AdminVoicePoolController::getSpeed($fvG, $fv);
                 $speakerEntry['seed']          = 42;
                 $speakerEntry['noise_scale']   = 0.667;
                 $speakerEntry['noise_scale_w'] = 0.8;

@@ -298,9 +298,11 @@ class PrepareInstantDubJob implements ShouldQueue
         if ($forceVoice) {
             $gender = str_starts_with($forceVoice, 'F') ? 'female'
                     : (str_starts_with($forceVoice, 'C') ? 'child' : 'male');
+            $tau   = \App\Http\Controllers\AdminVoicePoolController::getTau($gender, $forceVoice);
+            $speed = \App\Http\Controllers\AdminVoicePoolController::getSpeed($gender, $forceVoice);
             $voiceMap = [];
             foreach (array_keys($speakers) as $tag) {
-                $voiceMap[$tag] = ['driver' => 'mms', 'gender' => $gender, 'pool_name' => $forceVoice, 'tau' => 1.0, 'seed' => 42, 'noise_scale' => 0.667, 'noise_scale_w' => 0.8];
+                $voiceMap[$tag] = ['driver' => 'mms', 'gender' => $gender, 'pool_name' => $forceVoice, 'tau' => $tau, 'speed' => $speed, 'seed' => 42, 'noise_scale' => 0.667, 'noise_scale_w' => 0.8];
             }
             $voiceKey = "instant-dub:{$this->sessionId}:voices";
             Redis::setex($voiceKey, 50400, json_encode($voiceMap));
