@@ -294,7 +294,21 @@ async def synthesize(request: SynthesizeRequest):
             target_se = torch.load(str(se_path))
             try:
                 sf.write(str(src_path), waveform_22k, 22050)
-                src_se, _ = se_extractor.get_se(str(src_path), _ov_converter, vad=False)
+
+                # Short audio (<1s) produces unreliable src_se — pad by repeating
+                # the waveform to at least 1 second before embedding extraction,
+                # then convert the original-length audio.
+                MIN_SE_SAMPLES = 22050  # 1 second
+                if len(waveform_22k) < MIN_SE_SAMPLES:
+                    n = -(-MIN_SE_SAMPLES // len(waveform_22k))
+                    padded = np.tile(waveform_22k, n)[:MIN_SE_SAMPLES].astype(np.float32)
+                    se_path_tmp = CACHE_PATH / f"se_{uuid.uuid4()}.wav"
+                    sf.write(str(se_path_tmp), padded, 22050)
+                    src_se, _ = se_extractor.get_se(str(se_path_tmp), _ov_converter, vad=False)
+                    se_path_tmp.unlink(missing_ok=True)
+                else:
+                    src_se, _ = se_extractor.get_se(str(src_path), _ov_converter, vad=False)
+
                 _ov_converter.convert(
                     audio_src_path=str(src_path),
                     src_se=src_se,
