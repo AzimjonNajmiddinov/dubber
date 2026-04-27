@@ -228,6 +228,8 @@ class SynthesizeRequest(BaseModel):
     speed: float = 1.0
     tau: float = 0.9
     seed: Optional[int] = None
+    noise_scale: float = 0.667
+    noise_scale_w: float = 0.8
 
 
 @app.post("/synthesize")
@@ -256,7 +258,11 @@ async def synthesize(request: SynthesizeRequest):
         logger.info(f"MMS TTS: {request.text!r} → {cyrillic_text!r}")
         inputs = _mms_tokenizer(cyrillic_text, return_tensors="pt")
         with torch.no_grad():
-            waveform = _mms_model(**inputs).waveform.squeeze().cpu().numpy()
+            waveform = _mms_model.generate(
+                **inputs,
+                noise_scale=request.noise_scale,
+                noise_scale_w=request.noise_scale_w,
+            ).waveform.squeeze().cpu().numpy()
 
         mms_sr = _mms_model.config.sampling_rate  # 16000
 

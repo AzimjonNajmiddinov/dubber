@@ -82,20 +82,24 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             // force_voice_id was pre-registered in PrepareInstantDubJob (single worker, no race).
             // Inject it into speakerEntry so generateWithMms uses it directly — no per-job pool lookup.
             if (!empty($session['force_voice_id'])) {
-                $speakerEntry['driver']       = 'mms';
-                $speakerEntry['mms_voice_id'] = $session['force_voice_id'];
-                $speakerEntry['tau']          = 1.0;
-                $speakerEntry['seed']         = 42;
+                $speakerEntry['driver']        = 'mms';
+                $speakerEntry['mms_voice_id']  = $session['force_voice_id'];
+                $speakerEntry['tau']           = 1.0;
+                $speakerEntry['seed']          = 42;
+                $speakerEntry['noise_scale']   = 0.0;
+                $speakerEntry['noise_scale_w'] = 0.5;
                 $driver = 'mms';
             } elseif ($driver === 'mms' && empty($speakerEntry['pool_name']) && !empty($session['force_voice'])) {
                 // Fallback: voice map expired from Redis, reconstruct from session
                 $fv = $session['force_voice'];
-                $speakerEntry['driver']    = 'mms';
-                $speakerEntry['pool_name'] = $fv;
-                $speakerEntry['gender']    = str_starts_with($fv, 'F') ? 'female'
+                $speakerEntry['driver']        = 'mms';
+                $speakerEntry['pool_name']     = $fv;
+                $speakerEntry['gender']        = str_starts_with($fv, 'F') ? 'female'
                     : (str_starts_with($fv, 'C') ? 'child' : 'male');
-                $speakerEntry['tau']       = 1.0;
-                $speakerEntry['seed']      = 42;
+                $speakerEntry['tau']           = 1.0;
+                $speakerEntry['seed']          = 42;
+                $speakerEntry['noise_scale']   = 0.0;
+                $speakerEntry['noise_scale_w'] = 0.5;
             }
 
             if ($driver === 'elevenlabs' && !empty($speakerEntry['voice_id'])) {
@@ -558,10 +562,12 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         // with plain ASCII apostrophe to avoid torch embedding crash on unknown tokens
         $text = str_replace(["\u{02BB}", "\u{02BC}", "\u{02B0}"], "'", $text);
         $wavData = $client->synthesize($voiceId, $text, [
-            'language' => $this->language,
-            'speed'    => $speed,
-            'tau'      => $tau,
-            'seed'     => $speakerEntry['seed'] ?? null,
+            'language'      => $this->language,
+            'speed'         => $speed,
+            'tau'           => $tau,
+            'seed'          => $speakerEntry['seed']          ?? null,
+            'noise_scale'   => $speakerEntry['noise_scale']   ?? 0.667,
+            'noise_scale_w' => $speakerEntry['noise_scale_w'] ?? 0.8,
         ]);
 
         $tmpWav = "{$tmpDir}/seg_{$this->index}_mms.wav";

@@ -83,10 +83,12 @@ class MmsTtsClient
             ->post("{$this->baseUrl}/synthesize", [
                 'voice_id' => $voiceId,
                 'text'     => $text,
-                'language' => $options['language'] ?? 'uz',
-                'speed'    => $options['speed']    ?? 1.0,
-                'tau'      => $options['tau']       ?? 0.9,
-                'seed'     => $options['seed']      ?? null,
+                'language'     => $options['language']     ?? 'uz',
+                'speed'        => $options['speed']        ?? 1.0,
+                'tau'          => $options['tau']           ?? 0.9,
+                'seed'         => $options['seed']          ?? null,
+                'noise_scale'  => $options['noise_scale']  ?? 0.667,
+                'noise_scale_w'=> $options['noise_scale_w'] ?? 0.8,
             ]);
 
         if (!$response->successful()) {
