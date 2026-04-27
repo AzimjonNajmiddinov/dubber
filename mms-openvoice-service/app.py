@@ -257,12 +257,10 @@ async def synthesize(request: SynthesizeRequest):
         cyrillic_text = latin_to_cyrillic(request.text)
         logger.info(f"MMS TTS: {request.text!r} → {cyrillic_text!r}")
         inputs = _mms_tokenizer(cyrillic_text, return_tensors="pt")
+        _mms_model.config.noise_scale = request.noise_scale
+        _mms_model.config.noise_scale_w = request.noise_scale_w
         with torch.no_grad():
-            waveform = _mms_model.generate(
-                **inputs,
-                noise_scale=request.noise_scale,
-                noise_scale_w=request.noise_scale_w,
-            ).waveform.squeeze().cpu().numpy()
+            waveform = _mms_model(**inputs).waveform.squeeze().cpu().numpy()
 
         mms_sr = _mms_model.config.sampling_rate  # 16000
 
