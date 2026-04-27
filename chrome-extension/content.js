@@ -17,6 +17,7 @@ let dubState = {
     currentIdx:      -1,
     pollTimer:       null,
     _origVolume:     null,
+    _waitingToPlay:  false,
 };
 
 chrome.storage.sync.get({ apiBase: 'https://dubbing.uz', language: 'uz' }, (s) => {
@@ -230,17 +231,19 @@ async function startDubbing(overlay) {
         if (!resp.ok) throw new Error(`Server xatosi: ${resp.status}`);
         const { session_id } = await resp.json();
 
-        dubState.sessionId   = session_id;
-        dubState.active      = true;
-        dubState.chunks      = [];
-        dubState.lastChunkIdx = -1;
+        dubState.sessionId      = session_id;
+        dubState.active         = true;
+        dubState.chunks         = [];
+        dubState.lastChunkIdx   = -1;
+        dubState._waitingToPlay = true;
         overlay.remove();
 
-        // Mute YouTube original audio and attach listeners directly
+        // Pause video immediately, resume after 10% segments ready
         const video = document.querySelector('video');
         if (video) {
             dubState._origVolume = video.volume;
             video.volume = 0.08;
+            video.pause();
             dubState._video = video;
 
             video.addEventListener('timeupdate', onVideoTimeUpdate);
@@ -252,7 +255,7 @@ async function startDubbing(overlay) {
         updateButton(true);
         showSubtitleBar();
         startPolling();
-        toast('Dubbing yuklanmoqda... tayyor bo\'lgach o\'zbek ovozi chiqadi');
+        toast("Ovoz yuklanmoqda...");
 
     } catch (err) {
         msgEl.textContent = `Xato: ${err.message}`;
@@ -282,7 +285,6 @@ async function doPoll() {
 
         const ready = data.segments_ready || 0;
         const total = data.total_segments || 0;
-        updateSubtitleBar(`${ready} / ${total} segment tayyor`);
 
         if (data.chunks && data.chunks.length > 0) {
             const ctx = dubState.audioCtx;
@@ -300,16 +302,20 @@ async function doPoll() {
             }
         }
 
-        // Play as soon as playable or any chunk arrived
-        if (data.playable || (data.chunks && data.chunks.length > 0)) {
-            const video = document.querySelector('video');
-            if (video && !video.paused) playDubAudio(video.currentTime);
+        // Auto-play once 10% segments are ready
+        if (data.playable && dubState._waitingToPlay) {
+            dubState._waitingToPlay = false;
+            const video = dubState._video;
+            if (video) video.play().catch(() => {});
+        }
+
+        // Show progress while waiting, subtitle while playing
+        if (dubState._waitingToPlay) {
+            updateSubtitleBar(`Yuklanmoqda... ${ready} / ${total}`);
         }
 
         if (data.status === 'complete') {
             stopPolling();
-            updateSubtitleBar(`Tayyor! ${total} segment`);
-            setTimeout(() => updateSubtitleBar(''), 3000);
         }
     } catch (e) {}
 }
@@ -409,7 +415,10 @@ function onVideoTimeUpdate() {
 }
 function onVideoPause()   { if (dubState.active) stopCurrentAudio(); }
 function onVideoSeeking() { if (dubState.active) stopCurrentAudio(); }
-function onVideoPlay()    { if (dubState.active && dubState.audioCtx?.state === 'suspended') dubState.audioCtx.resume(); }
+function onVideoPlay()    {
+    dubState._waitingToPlay = false;
+    if (dubState.active && dubState.audioCtx?.state === 'suspended') dubState.audioCtx.resume();
+}
 
 // ─── Stop ────────────────────────────────────────────────────────────────────
 
@@ -435,12 +444,13 @@ function stopDubbing() {
     const sub = document.getElementById('dubber-sub');
     if (sub) sub.remove();
 
-    dubState.active       = false;
-    dubState.sessionId    = null;
-    dubState.chunks       = [];
-    dubState.lastChunkIdx = -1;
-    dubState._origVolume  = null;
-    dubState._video       = null;
+    dubState.active         = false;
+    dubState.sessionId      = null;
+    dubState.chunks         = [];
+    dubState.lastChunkIdx   = -1;
+    dubState._origVolume    = null;
+    dubState._video         = null;
+    dubState._waitingToPlay = false;
 
     updateButton(false);
     toast("Dubbing to'xtatildi");

@@ -513,16 +513,15 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
 
     private function generateWithMms(string $outputMp3, string $tmpDir, array $speakerEntry = []): void
     {
-        $client = new MmsTtsClient();
+        $client    = new MmsTtsClient();
+        $voiceFile = null;
+        $cacheKey  = null;
 
-        // Force voice: direct MMS service voice ID — skip local pool lookup
         if (!empty($speakerEntry['mms_voice_id'])) {
             $voiceId = $speakerEntry['mms_voice_id'];
             $speed   = $speakerEntry['speed'] ?? 1.0;
             $tau     = $speakerEntry['tau']   ?? 1.0;
-            Log::info("[MMS] seg#{$this->index} voice_id={$voiceId} tau={$tau}", ['session' => $this->sessionId]);
         } else {
-            Log::warning("[MMS] seg#{$this->index} NO mms_voice_id — using pool_name='" . ($speakerEntry['pool_name'] ?? 'null') . "'", ['session' => $this->sessionId]);
             $gender = $speakerEntry['gender']
                 ?? (str_starts_with($this->speaker, 'F') ? 'female'
                     : (str_starts_with($this->speaker, 'C') ? 'child' : 'male'));
@@ -557,23 +556,33 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             $tau   = $speakerEntry['tau']   ?? AdminVoicePoolController::getTau($gender, $name);
         }
 
+        // MMS model vocabulary is ASCII+basic-Latin — replace Uzbek apostrophe variants
         $text = TextNormalizer::normalize($this->text, $this->language);
-        // MMS model vocabulary is ASCII+basic-Latin — replace U+02BB/02BC (Uzbek apostrophe)
-        // with plain ASCII apostrophe to avoid torch embedding crash on unknown tokens
         $text = str_replace(["\u{02BB}", "\u{02BC}", "\u{02B0}"], "'", $text);
-        $wavData = $client->synthesize($voiceId, $text, [
+
+        $options = [
             'language'      => $this->language,
             'speed'         => $speed,
             'tau'           => $tau,
             'seed'          => $speakerEntry['seed']          ?? null,
             'noise_scale'   => $speakerEntry['noise_scale']   ?? 0.667,
             'noise_scale_w' => $speakerEntry['noise_scale_w'] ?? 0.8,
-        ]);
+        ];
+
+        try {
+            $wavData = $client->synthesize($voiceId, $text, $options);
+        } catch (\RuntimeException $e) {
+            // MMS service lost voice (pod restart) — re-register and retry once
+            if (!str_contains(strtolower($e->getMessage()), 'not found') && !str_contains($e->getMessage(), '404')) {
+                throw $e;
+            }
+            $voiceId = $this->reRegisterMmsVoice($client, $voiceFile, $cacheKey);
+            $wavData = $client->synthesize($voiceId, $text, $options);
+        }
 
         $tmpWav = "{$tmpDir}/seg_{$this->index}_mms.wav";
         file_put_contents($tmpWav, $wavData);
 
-        // Prosody transfer: referens vocals topilsa, F0+energy ko'chirish
         $transferredWav = $this->applyProsodyTransfer($tmpWav, $tmpDir);
         $sourceWav = $transferredWav ?? $tmpWav;
 
@@ -588,6 +597,38 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         if (!$result->successful() || !file_exists($outputMp3) || filesize($outputMp3) < 200) {
             throw new \RuntimeException('MMS WAV→MP3 conversion failed');
         }
+    }
+
+    private function reRegisterMmsVoice(MmsTtsClient $client, ?string $voiceFile, ?string $cacheKey): string
+    {
+        if (!$voiceFile) {
+            $session   = json_decode(\Illuminate\Support\Facades\Redis::get("instant-dub:{$this->sessionId}") ?? '{}', true);
+            $fv        = $session['force_voice'] ?? null;
+            if (!$fv) throw new \RuntimeException("MMS: cannot re-register — no force_voice in session");
+            $gender    = str_starts_with($fv, 'F') ? 'female' : (str_starts_with($fv, 'C') ? 'child' : 'male');
+            $voiceFile = $this->mmsPoolFileByName($gender, $fv);
+            if (!$voiceFile) throw new \RuntimeException("MMS: cannot re-register — voice file not found for '{$fv}'");
+            $cacheKey  = 'voice-pool-id:mms:' . md5($voiceFile);
+        }
+
+        $name    = pathinfo($voiceFile, PATHINFO_FILENAME);
+        \Illuminate\Support\Facades\Redis::del($cacheKey);
+        $voiceId = $client->findVoiceByName("pool-{$name}") ?? $client->addVoice("pool-{$name}", [$voiceFile]);
+        \Illuminate\Support\Facades\Redis::setex($cacheKey, 604800, $voiceId);
+
+        // Update force_voice_id in session if it was stale
+        $sessionKey = "instant-dub:{$this->sessionId}";
+        $freshJson  = \Illuminate\Support\Facades\Redis::get($sessionKey);
+        if ($freshJson) {
+            $fresh = json_decode($freshJson, true);
+            if (!empty($fresh['force_voice_id'])) {
+                $fresh['force_voice_id'] = $voiceId;
+                \Illuminate\Support\Facades\Redis::setex($sessionKey, 50400, json_encode($fresh));
+            }
+        }
+
+        Log::info("[MMS] Re-registered voice after pod restart: {$voiceId}", ['session' => $this->sessionId]);
+        return $voiceId;
     }
 
     private function mmsPoolFileByName(string $gender, string $name): ?string
