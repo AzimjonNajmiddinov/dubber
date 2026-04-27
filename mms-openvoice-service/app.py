@@ -203,6 +203,29 @@ async def clone_voice(
         se_path = voice_dir / "target_se.pth"
         torch.save(target_se, str(se_path))
 
+        # Pre-compute base_src_se using a short neutral sentence —
+        # acoustically similar to typical short dubbing segments (3-7 words).
+        # All segment syntheses reuse this fixed src_se → consistent conversion.
+        try:
+            _ANCHOR_TEXT = "Салом, бу синов матни."  # ~5 words, neutral prosody
+            torch.manual_seed(0)
+            np.random.seed(0)
+            inputs_anchor = _mms_tokenizer(_ANCHOR_TEXT, return_tensors="pt")
+            with torch.no_grad():
+                anchor_wav = _mms_model(**inputs_anchor).waveform.squeeze().cpu().numpy()
+            anchor_sr = _mms_model.config.sampling_rate
+            anchor_22k = torchaudio.functional.resample(
+                torch.from_numpy(anchor_wav).unsqueeze(0), anchor_sr, 22050
+            ).squeeze(0).numpy().astype(np.float32)
+            anchor_path = voice_dir / "anchor_src.wav"
+            sf.write(str(anchor_path), anchor_22k, 22050)
+            base_src_se, _ = se_extractor.get_se(str(anchor_path), _ov_converter, vad=False)
+            torch.save(base_src_se, str(voice_dir / "base_src_se.pth"))
+            anchor_path.unlink(missing_ok=True)
+            logger.info(f"base_src_se extracted for voice {voice_id}")
+        except Exception as e:
+            logger.warning(f"base_src_se extraction failed ({e}), will use per-segment extraction")
+
         from datetime import datetime
         meta = {
             "name": name,
@@ -292,9 +315,13 @@ async def synthesize(request: SynthesizeRequest):
             from openvoice import se_extractor
             import shutil as _shutil
             target_se = torch.load(str(se_path))
+            base_src_se_path = voice_dir / "base_src_se.pth"
             try:
                 sf.write(str(src_path), waveform_22k, 22050)
-                src_se, _ = se_extractor.get_se(str(src_path), _ov_converter, vad=False)
+                if base_src_se_path.exists():
+                    src_se = torch.load(str(base_src_se_path))
+                else:
+                    src_se, _ = se_extractor.get_se(str(src_path), _ov_converter, vad=False)
                 _ov_converter.convert(
                     audio_src_path=str(src_path),
                     src_se=src_se,
