@@ -282,7 +282,7 @@ class AdminVoicePoolController extends Controller
             if ($err = $cloneIfNeeded()) return $err;
         }
 
-        $tau = (float) ($request->input('tau', 0.3));
+        $tau = (float) ($request->input('tau', 0.4));
         $synthPayload = [
             'text'     => $request->input('text'),
             'voice_id' => $voiceId,
@@ -391,9 +391,9 @@ class AdminVoicePoolController extends Controller
         $json = storage_path("app/voice-pool/{$gender}/{$name}.json");
         if (file_exists($json)) {
             $data = json_decode(file_get_contents($json), true);
-            return (float) ($data['tau'] ?? 0.3);
+            return (float) ($data['tau'] ?? 0.4);
         }
-        return 0.3;
+        return 0.4;
     }
 
     private function getAudioDuration(string $path): string
