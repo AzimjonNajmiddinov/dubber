@@ -72,6 +72,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             @mkdir($tmpDir, 0755, true);
 
             $rawMp3 = "{$tmpDir}/seg_{$this->index}.mp3";
+            $rawWav = "{$tmpDir}/seg_{$this->index}.wav";
 
             // Read per-speaker driver from voice map
             $voiceKey = "instant-dub:{$this->sessionId}:voices";
@@ -105,7 +106,9 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             } elseif ($driver === 'aisha') {
                 $this->generateWithAisha($rawMp3, $speakerEntry);
             } elseif ($driver === 'mms') {
-                $this->generateWithMms($rawMp3, $tmpDir, $speakerEntry);
+                // MMS outputs WAV directly — no MP3 encoding to avoid quality loss
+                $this->generateWithMms($rawWav, $tmpDir, $speakerEntry);
+                $rawMp3 = $rawWav;
             } else {
                 $this->generateWithEdgeTts($rawMp3, $tmpDir, $speakerEntry);
             }
@@ -579,22 +582,11 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             $wavData = $client->synthesize($voiceId, $text, $options);
         }
 
-        $tmpWav = "{$tmpDir}/seg_{$this->index}_mms.wav";
-        file_put_contents($tmpWav, $wavData);
+        // Write WAV directly — no encoding artifacts
+        file_put_contents($outputMp3, $wavData);
 
-        $transferredWav = $this->applyProsodyTransfer($tmpWav, $tmpDir);
-        $sourceWav = $transferredWav ?? $tmpWav;
-
-        $result = Process::timeout(15)->run([
-            'ffmpeg', '-y', '-i', $sourceWav,
-            '-codec:a', 'libmp3lame', '-b:a', '128k',
-            $outputMp3,
-        ]);
-        @unlink($tmpWav);
-        if ($transferredWav) @unlink($transferredWav);
-
-        if (!$result->successful() || !file_exists($outputMp3) || filesize($outputMp3) < 200) {
-            throw new \RuntimeException('MMS WAV→MP3 conversion failed');
+        if (!file_exists($outputMp3) || filesize($outputMp3) < 200) {
+            throw new \RuntimeException('MMS synthesis returned empty audio');
         }
     }
 

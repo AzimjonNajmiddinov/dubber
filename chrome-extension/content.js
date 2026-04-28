@@ -336,7 +336,7 @@ function _startChunk(i, t) {
         gain.connect(ctx.destination);
         // Fade in over 30ms to avoid abrupt click/mute at segment start
         gain.gain.setValueAtTime(0, ctx.currentTime);
-        gain.gain.linearRampToValueAtTime(1.8, ctx.currentTime + 0.03);
+        gain.gain.linearRampToValueAtTime(1.0, ctx.currentTime + 0.03);
         src.start(0, offset);
         dubState.currentSrc = src;
         dubState.currentIdx = i;
