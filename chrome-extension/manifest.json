@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "Dubber - O'zbek Dubbing",
-  "version": "1.1",
+  "name": "Dubbing.uz",
+  "version": "1.2",
   "description": "Adds Uzbek audio dubbing to YouTube videos. Click UZ in the player, pick a voice, and hear the video dubbed in Uzbek in real time.",
   "permissions": ["storage", "scripting"],
   "background": {"service_worker": "background.js"},
