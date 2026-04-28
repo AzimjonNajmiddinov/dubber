@@ -322,6 +322,39 @@ async function doPoll() {
 
 // ─── Audio playback ───────────────────────────────────────────────────────────
 
+function _startChunk(i, t) {
+    const ctx = dubState.audioCtx;
+    const chunk = dubState.chunks[i];
+    if (!chunk || !chunk._audioBuffer) return;
+    const offset = Math.max(0, t - chunk.start_time);
+    if (offset >= chunk._audioBuffer.duration) return;
+    try {
+        const src  = ctx.createBufferSource();
+        const gain = ctx.createGain();
+        gain.gain.value = 1.8;
+        src.buffer = chunk._audioBuffer;
+        src.connect(gain);
+        gain.connect(ctx.destination);
+        src.start(0, offset);
+        dubState.currentSrc = src;
+        dubState.currentIdx = i;
+
+        src.onended = () => {
+            if (dubState.currentIdx !== i) return;
+            dubState.currentSrc = null;
+            dubState.currentIdx = -1;
+            if (!dubState.active || !dubState._video || dubState._video.paused) return;
+            // Find the first ready chunk AFTER i — never restart the chunk that just ended
+            const vt = dubState._video.currentTime;
+            for (let j = i + 1; j < dubState.chunks.length; j++) {
+                const c = dubState.chunks[j];
+                if (!c || !c._audioBuffer) continue;
+                if (vt < c.start_time + c._audioBuffer.duration) { _startChunk(j, vt); return; }
+            }
+        };
+    } catch (e) {}
+}
+
 function playDubAudio(t) {
     const ctx = dubState.audioCtx;
     if (!ctx) return;
@@ -337,32 +370,7 @@ function playDubAudio(t) {
     if (target === dubState.currentIdx) return;
     stopCurrentAudio();
     if (target < 0) return;
-
-    const chunk  = dubState.chunks[target];
-    const offset = Math.max(0, t - chunk.start_time);
-    if (offset >= chunk._audioBuffer.duration) return;
-
-    try {
-        const src  = ctx.createBufferSource();
-        const gain = ctx.createGain();
-        gain.gain.value = 1.8;
-        src.buffer = chunk._audioBuffer;
-        src.connect(gain);
-        gain.connect(ctx.destination);
-        src.start(0, offset);
-        dubState.currentSrc = src;
-        dubState.currentIdx = target;
-
-        // On chunk end: immediately try next chunk without waiting for timeupdate
-        src.onended = () => {
-            if (dubState.currentIdx !== target) return;
-            dubState.currentSrc = null;
-            dubState.currentIdx = -1;
-            if (dubState.active && dubState._video && !dubState._video.paused) {
-                playDubAudio(dubState._video.currentTime);
-            }
-        };
-    } catch (e) {}
+    _startChunk(target, t);
 }
 
 function stopCurrentAudio() {
