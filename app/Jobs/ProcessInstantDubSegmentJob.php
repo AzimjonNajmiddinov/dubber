@@ -565,7 +565,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             'language' => $this->language,
             'speed'    => $speed,
             'tau'      => $tau,
-            'seed'     => $forceVoice ? 42 : ($speakerEntry['seed'] ?? null),
+            'seed'     => $speakerEntry['seed'] ?? null,
         ];
 
         try {
