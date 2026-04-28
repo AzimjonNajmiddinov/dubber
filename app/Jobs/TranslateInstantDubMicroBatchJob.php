@@ -90,12 +90,19 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
         ];
         $toLang = $langNames[$this->language] ?? $this->language;
 
+        $sessionData = json_decode(Redis::get("instant-dub:{$this->sessionId}") ?? '{}', true);
+        $forceVoice = !empty($sessionData['force_voice']);
+
         $lines = [];
         foreach ($segments as $i => $seg) {
             $duration = round($seg['end'] - $seg['start'], 1);
-            $maxChars = (int) round($duration * 12);
             $rawText = $seg['raw_text'] ?? $seg['text'];
-            $lines[] = ($i + 1) . '. [' . $duration . 's, max ' . $maxChars . ' chars] ' . $rawText;
+            if ($forceVoice) {
+                $lines[] = ($i + 1) . '. [' . $duration . 's] ' . $rawText;
+            } else {
+                $maxChars = (int) round($duration * 12);
+                $lines[] = ($i + 1) . '. [' . $duration . 's, max ' . $maxChars . ' chars] ' . $rawText;
+            }
         }
 
         $uzbekRules = '';
@@ -103,17 +110,30 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
             $uzbekRules = "\nUZBEK RULES: Use natural spoken Uzbek. Colloquial forms (qilyapman not qilayotirman). Keep names untranslated. Match emotional register. SCRIPT: ONLY Latin alphabet — NEVER use Cyrillic (а,б,в...), no mixed scripts. SPELLING: fe'l negizi unli bilan tugasa, shaxs qo'shimchasi qo'shganda u unli tushib qolmaydi (tani→taniyman, NOT tanyman).\n";
         }
 
-        $systemPrompt = "You are a dubbing voice director writing dialogue for a film in {$toLang}. You watch the scene, understand the story and emotions, then write what the characters would ACTUALLY SAY in {$toLang} — not a translation, but a re-creation.\n"
-            . "\nCRITICAL: Each line has a TIME SLOT [Ns]. Your text must be speakable within that duration. Short slot = concise. Long slot = natural phrasing. Never write more than fits.\n"
-            . "\nSCENE DIALOGUE (context):\n{$fullDialogue}\n"
-            . $uzbekRules
-            . "\nRULES:\n"
-            . "1. Read the scene. Understand WHY each character says what they say.\n"
-            . "2. Write what a {$toLang} speaker would ACTUALLY SAY in that moment — not a word-for-word translation.\n"
-            . "3. Assign speaker tags [M1], [F1] based on gender clues.\n"
-            . "4. Strip annotations [music], [laughing] — write only spoken words.\n"
-            . "5. Punctuation = emotion: ! anger, ... hesitation, — pause, ? question.\n"
-            . "\n" . 'Format: "1. [M1] text"';
+        if ($forceVoice) {
+            $systemPrompt = "You are a professional translator. Translate the following dialogue into {$toLang}.\n"
+                . "\nCRITICAL: Translate EVERYTHING completely. Do NOT shorten, omit, or summarize any words. Timing is shown for context only — never cut content to fit the slot.\n"
+                . "\nSCENE DIALOGUE (context):\n{$fullDialogue}\n"
+                . $uzbekRules
+                . "\nRULES:\n"
+                . "1. Translate every word faithfully — omitting words is not allowed.\n"
+                . "2. Assign speaker tags [M1], [F1] based on gender clues.\n"
+                . "3. Strip annotations [music], [laughing] — write only spoken words.\n"
+                . "4. Punctuation = emotion: ! anger, ... hesitation, — pause, ? question.\n"
+                . "\n" . 'Format: "1. [M1] text"';
+        } else {
+            $systemPrompt = "You are a dubbing voice director writing dialogue for a film in {$toLang}. You watch the scene, understand the story and emotions, then write what the characters would ACTUALLY SAY in {$toLang} — not a translation, but a re-creation.\n"
+                . "\nCRITICAL: Each line has a TIME SLOT [Ns]. Your text must be speakable within that duration. Short slot = concise. Long slot = natural phrasing. Never write more than fits.\n"
+                . "\nSCENE DIALOGUE (context):\n{$fullDialogue}\n"
+                . $uzbekRules
+                . "\nRULES:\n"
+                . "1. Read the scene. Understand WHY each character says what they say.\n"
+                . "2. Write what a {$toLang} speaker would ACTUALLY SAY in that moment — not a word-for-word translation.\n"
+                . "3. Assign speaker tags [M1], [F1] based on gender clues.\n"
+                . "4. Strip annotations [music], [laughing] — write only spoken words.\n"
+                . "5. Punctuation = emotion: ! anger, ... hesitation, — pause, ? question.\n"
+                . "\n" . 'Format: "1. [M1] text"';
+        }
 
         $messages = [
             ['role' => 'system', 'content' => $systemPrompt],

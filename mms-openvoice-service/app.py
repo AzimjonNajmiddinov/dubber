@@ -250,13 +250,43 @@ async def synthesize(request: SynthesizeRequest):
         # 1. MMS TTS — convert Latin→Cyrillic, then generate Uzbek speech at 16kHz
         cyrillic_text = latin_to_cyrillic(request.text)
         logger.info(f"MMS TTS: {request.text!r} → {cyrillic_text!r}")
-        inputs = _mms_tokenizer(cyrillic_text, return_tensors="pt")
+
         _mms_model.config.noise_scale = request.noise_scale
         _mms_model.config.noise_scale_w = request.noise_scale_w
-        with torch.no_grad():
-            waveform = _mms_model(**inputs).waveform.squeeze().cpu().numpy()
-
         mms_sr = _mms_model.config.sampling_rate  # 16000
+
+        # VITS attention skips tokens on long sequences — split at ~350 tokens
+        MAX_TOKENS = 350
+        def _synthesize_chunk(text: str) -> np.ndarray:
+            inp = _mms_tokenizer(text, return_tensors="pt")
+            with torch.no_grad():
+                return _mms_model(**inp).waveform.squeeze().cpu().numpy()
+
+        token_count = len(_mms_tokenizer(cyrillic_text)['input_ids'])
+        if token_count > MAX_TOKENS:
+            # Split at word boundaries keeping chunks under MAX_TOKENS
+            words = cyrillic_text.split()
+            chunks, current = [], ''
+            for word in words:
+                candidate = (current + ' ' + word).strip() if current else word
+                if len(_mms_tokenizer(candidate)['input_ids']) <= MAX_TOKENS:
+                    current = candidate
+                else:
+                    if current:
+                        chunks.append(current)
+                    current = word
+            if current:
+                chunks.append(current)
+            silence = np.zeros(int(0.05 * mms_sr), dtype=np.float32)
+            parts = []
+            for i, chunk in enumerate(chunks):
+                parts.append(_synthesize_chunk(chunk))
+                if i < len(chunks) - 1:
+                    parts.append(silence)
+            waveform = np.concatenate(parts)
+            logger.info(f"MMS split: {len(chunks)} chunks for {token_count} tokens")
+        else:
+            waveform = _synthesize_chunk(cyrillic_text)
 
         # 2. Resample to 22050 Hz for OpenVoice using torchaudio (higher quality)
         waveform_t = torch.from_numpy(waveform).unsqueeze(0)  # [1, T]
