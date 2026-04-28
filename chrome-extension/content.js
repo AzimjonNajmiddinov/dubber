@@ -15,6 +15,7 @@ let dubState = {
     lastChunkIdx:    -1,
     currentSrc:      null,
     currentIdx:      -1,
+    pendingIdx:      -1,   // next chunk scheduled to play at its start_time
     pollTimer:       null,
     _origVolume:     null,
     _waitingToPlay:  false,
@@ -321,12 +322,19 @@ async function doPoll() {
 }
 
 // ─── Audio playback ───────────────────────────────────────────────────────────
+//
+// Algorithm:
+//   - Each segment starts at its exact start_time (never before)
+//   - If previous audio is still playing when next start_time arrives:
+//       wait for it to finish, then immediately play next from beginning
+//   - If previous audio ends before next start_time: schedule next,
+//       timeupdate fires it exactly at start_time from beginning
+//   - On seek: find segment at new time, start with offset (mid-segment resume)
 
-function _startChunk(i, t, offset) {
-    const ctx = dubState.audioCtx;
+function _startChunk(i, offset) {
+    const ctx   = dubState.audioCtx;
     const chunk = dubState.chunks[i];
     if (!chunk || !chunk._audioBuffer) return;
-    if (offset === undefined) offset = Math.max(0, t - chunk.start_time);
     if (offset >= chunk._audioBuffer.duration) return;
     try {
         const src  = ctx.createBufferSource();
@@ -339,45 +347,67 @@ function _startChunk(i, t, offset) {
         src.start(0, offset);
         dubState.currentSrc = src;
         dubState.currentIdx = i;
+        dubState.pendingIdx = -1;
 
         src.onended = () => {
             if (dubState.currentIdx !== i) return;
             dubState.currentSrc = null;
             dubState.currentIdx = -1;
             if (!dubState.active || !dubState._video || dubState._video.paused) return;
-            // Play next segment from the start — don't use time offset.
-            // Previous audio may have run past the next segment's time window,
-            // causing a large offset that would cut words or skip the segment entirely.
-            for (let j = i + 1; j < dubState.chunks.length; j++) {
-                if (dubState.chunks[j] && dubState.chunks[j]._audioBuffer) {
-                    _startChunk(j, 0, 0);
-                    return;
-                }
-            }
+            _afterChunkEnded(i);
         };
     } catch (e) {}
 }
 
-function playDubAudio(t, excludeIdx = -1) {
+// Called when chunk i finishes playing naturally.
+// Find the next loaded chunk and either play it immediately (if its time has passed)
+// or schedule it (timeupdate will fire it at exactly start_time).
+function _afterChunkEnded(i) {
+    let next = -1;
+    for (let j = i + 1; j < dubState.chunks.length; j++) {
+        if (dubState.chunks[j] && dubState.chunks[j]._audioBuffer) { next = j; break; }
+    }
+    if (next < 0) return;
+    const t = dubState._video.currentTime;
+    if (t >= dubState.chunks[next].start_time) {
+        // Already at or past next segment's time — play immediately from beginning
+        _startChunk(next, 0);
+    } else {
+        // Next segment's time hasn't come yet — schedule it
+        dubState.pendingIdx = next;
+    }
+}
+
+// Called from timeupdate (fires ~4x/sec while video plays).
+function playDubAudio(t) {
     const ctx = dubState.audioCtx;
     if (!ctx) return;
     if (ctx.state === 'suspended') ctx.resume();
 
-    // Don't interrupt a playing segment — let it finish, onended will trigger next
-    if (dubState.currentSrc) return;
-
-    let target = -1;
-    for (let i = 0; i < dubState.chunks.length; i++) {
-        if (i === excludeIdx) continue;
-        const c = dubState.chunks[i];
-        if (!c || !c._audioBuffer) continue;
-        if (t >= c.start_time && t < c.start_time + c._audioBuffer.duration) { target = i; break; }
+    // Fire scheduled chunk at its exact start_time, from beginning
+    if (dubState.pendingIdx >= 0) {
+        const p = dubState.chunks[dubState.pendingIdx];
+        if (p && p._audioBuffer && t >= p.start_time) {
+            const idx = dubState.pendingIdx;
+            dubState.pendingIdx = -1;
+            _startChunk(idx, 0);
+            return;
+        }
     }
 
-    if (target === dubState.currentIdx) return;
-    stopCurrentAudio();
-    if (target < 0) return;
-    _startChunk(target, t);
+    // Something is playing — don't interrupt it
+    if (dubState.currentSrc) return;
+
+    // Time-based lookup for seek/resume: find segment whose slot covers t
+    let target = -1;
+    for (let i = 0; i < dubState.chunks.length; i++) {
+        const c = dubState.chunks[i];
+        if (!c || !c._audioBuffer) continue;
+        const slotEnd = c.end_time ?? (c.start_time + c._audioBuffer.duration);
+        if (t >= c.start_time && t < slotEnd) { target = i; break; }
+    }
+    if (target < 0 || target === dubState.currentIdx) return;
+    _startChunk(target, Math.max(0, t - dubState.chunks[target].start_time));
 }
 
 function stopCurrentAudio() {
@@ -386,6 +416,7 @@ function stopCurrentAudio() {
         dubState.currentSrc = null;
     }
     dubState.currentIdx = -1;
+    dubState.pendingIdx = -1;
 }
 
 // ─── Subtitle display ─────────────────────────────────────────────────────────
