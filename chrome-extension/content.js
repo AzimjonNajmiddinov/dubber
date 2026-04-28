@@ -357,6 +357,9 @@ function playDubAudio(t, excludeIdx = -1) {
     if (!ctx) return;
     if (ctx.state === 'suspended') ctx.resume();
 
+    // Don't interrupt a playing segment — let it finish, onended will trigger next
+    if (dubState.currentSrc) return;
+
     let target = -1;
     for (let i = 0; i < dubState.chunks.length; i++) {
         if (i === excludeIdx) continue;

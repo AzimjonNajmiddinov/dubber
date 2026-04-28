@@ -155,24 +155,22 @@ if [ "$TTS_VENV_OK" = false ]; then
         torch==2.8.0 torchaudio==2.8.0 \
         --index-url https://download.pytorch.org/whl/cu126
 
-    echo "    Installing MMS+OpenVoice deps..."
+    echo "    Installing MMS+OpenVoice deps (system Python, for port 8005)..."
+    # MMS+OpenVoice uses system Python + PYTHONPATH=/workspace/openvoice-v2
+    # Install OpenVoice pure-Python deps into system Python
+    pip3 install -q inflect unidecode wavmark pydub \
+        eng_to_ipa pypinyin cn2an jieba langid \
+        whisper-timestamped --prefer-binary 2>/dev/null || true
+
+    echo "    Installing Demucs deps in tts-venv..."
     $TTS_VENV/bin/pip install -q \
         "transformers>=4.48,<4.50" uvicorn fastapi python-multipart soundfile scipy \
-        pyworld librosa "av" "inflect==7.0.0" "unidecode==1.3.7" wavmark pydub \
-        "eng_to_ipa==0.0.2" "cn2an==0.5.22" "jieba==0.42.1" "langid==1.1.6" pypinyin \
-        ctranslate2 "faster-whisper==0.9.0" openai-whisper dtw-python \
+        pyworld librosa "av" ctranslate2 "faster-whisper==0.9.0" openai-whisper \
         --prefer-binary
-
-    echo "    Installing OpenVoice..."
-    if [ -d /workspace/openvoice-v2 ]; then
-        $TTS_VENV/bin/pip install -q -e /workspace/openvoice-v2 --no-deps
-    else
-        $TTS_VENV/bin/pip install -q myshell-openvoice --no-deps
-    fi
 
     echo "    Installing Demucs..."
     $TTS_VENV/bin/pip install -q --no-deps demucs
-    $TTS_VENV/bin/pip install -q dora-search lameenc julius diffq einops openunmix treetable
+    $TTS_VENV/bin/pip install -q dora-search lameenc julius diffq einops openunmix treetable dtw-python
 
     if $TTS_VENV/bin/python -c "import transformers, torch, torchaudio, demucs; print(f'TTS venv OK - torch {torch.__version__}')" 2>/dev/null; then
         echo "  TTS venv created successfully"
@@ -255,10 +253,10 @@ echo "  Starting Demucs on port 8000..."
 cd /workspace/dubber/demucs-service
 nohup $PYTHON -m uvicorn app_runpod:app --host 0.0.0.0 --port 8000 > /tmp/demucs.log 2>&1 &
 
-# Start MMS+OpenVoice on port 8005
+# Start MMS+OpenVoice on port 8005 (system Python + openvoice-v2 source)
 echo "  Starting MMS+OpenVoice on port 8005..."
 cd /workspace/dubber/mms-openvoice-service
-nohup $PYTHON -m uvicorn app:app --host 0.0.0.0 --port 8005 > /tmp/mms.log 2>&1 &
+nohup env PYTHONPATH=/workspace/openvoice-v2 uvicorn app:app --host 0.0.0.0 --port 8005 > /tmp/mms.log 2>&1 &
 
 # Start WhisperX on port 8002 (system Python — whisperx installed there)
 echo "  Starting WhisperX on port 8002..."
