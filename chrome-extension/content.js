@@ -346,24 +346,20 @@ function _startChunk(i, t) {
             dubState.currentSrc = null;
             dubState.currentIdx = -1;
             if (!dubState.active || !dubState._video || dubState._video.paused) return;
-            // Find the first ready chunk AFTER i — never restart the chunk that just ended
-            const vt = dubState._video.currentTime;
-            for (let j = i + 1; j < dubState.chunks.length; j++) {
-                const c = dubState.chunks[j];
-                if (!c || !c._audioBuffer) continue;
-                if (vt < c.start_time + c._audioBuffer.duration) { _startChunk(j, vt); return; }
-            }
+            // Time-based lookup, but skip the chunk that just ended to avoid restart
+            playDubAudio(dubState._video.currentTime, i);
         };
     } catch (e) {}
 }
 
-function playDubAudio(t) {
+function playDubAudio(t, excludeIdx = -1) {
     const ctx = dubState.audioCtx;
     if (!ctx) return;
     if (ctx.state === 'suspended') ctx.resume();
 
     let target = -1;
     for (let i = 0; i < dubState.chunks.length; i++) {
+        if (i === excludeIdx) continue;
         const c = dubState.chunks[i];
         if (!c || !c._audioBuffer) continue;
         if (t >= c.start_time && t < c.start_time + c._audioBuffer.duration) { target = i; break; }
