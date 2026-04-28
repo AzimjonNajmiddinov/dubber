@@ -227,7 +227,7 @@ class SynthesizeRequest(BaseModel):
     voice_id: str
     language: str = "uz"
     speed: float = 1.0
-    tau: float = 0.9
+    tau: float = 0.3
     seed: Optional[int] = None
     noise_scale: float = 0.667
     noise_scale_w: float = 0.4
