@@ -295,19 +295,30 @@ async def synthesize(request: SynthesizeRequest):
             try:
                 sf.write(str(src_path), waveform_22k, 22050)
 
-                # Short audio (<1s) produces unreliable src_se — pad by repeating
-                # the waveform to at least 1 second before embedding extraction,
-                # then convert the original-length audio.
-                MIN_SE_SAMPLES = 22050  # 1 second
-                if len(waveform_22k) < MIN_SE_SAMPLES:
-                    n = -(-MIN_SE_SAMPLES // len(waveform_22k))
-                    padded = np.tile(waveform_22k, n)[:MIN_SE_SAMPLES].astype(np.float32)
-                    se_path_tmp = CACHE_PATH / f"se_{uuid.uuid4()}.wav"
-                    sf.write(str(se_path_tmp), padded, 22050)
-                    src_se, _ = se_extractor.get_se(str(se_path_tmp), _ov_converter, vad=False)
-                    se_path_tmp.unlink(missing_ok=True)
+                # Reuse src_se from first synthesis for this voice — consistent timbre
+                # across all segments. Race window on first few parallel segments is safe:
+                # worst case they each compute their own, and one wins the save.
+                cached_src_se_path = voice_dir / "cached_src_se.pth"
+                if cached_src_se_path.exists():
+                    src_se = torch.load(str(cached_src_se_path))
                 else:
-                    src_se, _ = se_extractor.get_se(str(src_path), _ov_converter, vad=False)
+                    # Short audio (<1s) produces unreliable src_se — pad by repeating
+                    # the waveform to at least 1 second before embedding extraction,
+                    # then convert the original-length audio.
+                    MIN_SE_SAMPLES = 22050  # 1 second
+                    if len(waveform_22k) < MIN_SE_SAMPLES:
+                        n = -(-MIN_SE_SAMPLES // len(waveform_22k))
+                        padded = np.tile(waveform_22k, n)[:MIN_SE_SAMPLES].astype(np.float32)
+                        se_path_tmp = CACHE_PATH / f"se_{uuid.uuid4()}.wav"
+                        sf.write(str(se_path_tmp), padded, 22050)
+                        src_se, _ = se_extractor.get_se(str(se_path_tmp), _ov_converter, vad=False)
+                        se_path_tmp.unlink(missing_ok=True)
+                    else:
+                        src_se, _ = se_extractor.get_se(str(src_path), _ov_converter, vad=False)
+                    try:
+                        torch.save(src_se, str(cached_src_se_path))
+                    except Exception:
+                        pass  # race condition — safe to ignore
 
                 _ov_converter.convert(
                     audio_src_path=str(src_path),

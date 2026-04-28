@@ -172,7 +172,7 @@ class InstantDubController extends Controller
 
         $chunks = [];
         foreach ($chunkValues as $chunkJson) {
-            if (!$chunkJson) break;
+            if (!$chunkJson) continue;
             $chunks[] = json_decode($chunkJson, true);
         }
 
