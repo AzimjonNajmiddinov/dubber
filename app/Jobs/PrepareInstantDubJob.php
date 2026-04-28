@@ -614,13 +614,17 @@ class PrepareInstantDubJob implements ShouldQueue
             $tmpDir = sys_get_temp_dir() . '/yt_subs_' . $this->sessionId;
             @mkdir($tmpDir, 0755, true);
 
-            // Try manual subs first, then auto-generated
-            foreach (['--write-subs', '--write-auto-subs'] as $subFlag) {
+            // Try manual subs first (any language), then auto-generated (en/ru/uz only)
+            $attempts = [
+                ['--write-subs',      'all'],
+                ['--write-auto-subs', 'en,ru,uz'],
+            ];
+            foreach ($attempts as [$subFlag, $subLangs]) {
                 $result = \Illuminate\Support\Facades\Process::timeout(60)->run([
                     'yt-dlp',
                     $subFlag,
                     '--skip-download',
-                    '--sub-langs', 'en,ru,uz',
+                    '--sub-langs', $subLangs,
                     '--sub-format', 'vtt',
                     '--convert-subs', 'srt',
                     '-o', $tmpDir . '/sub',
