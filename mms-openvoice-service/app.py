@@ -196,9 +196,10 @@ async def clone_voice(
         sf.write(str(ref_path), data, 22050)
 
         # Extract tone color embedding from reference audio
+        # vad=True: only speech segments used → cleaner embedding
         from openvoice import se_extractor
         target_se, _ = se_extractor.get_se(
-            str(ref_path), _ov_converter, vad=False
+            str(ref_path), _ov_converter, vad=True
         )
         se_path = voice_dir / "target_se.pth"
         torch.save(target_se, str(se_path))
@@ -229,7 +230,7 @@ class SynthesizeRequest(BaseModel):
     tau: float = 0.9
     seed: Optional[int] = None
     noise_scale: float = 0.667
-    noise_scale_w: float = 0.8
+    noise_scale_w: float = 0.4
 
 
 @app.post("/synthesize")
