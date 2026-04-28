@@ -196,10 +196,10 @@ async def clone_voice(
         sf.write(str(ref_path), data, 22050)
 
         # Extract tone color embedding from reference audio
-        # vad=True: only speech segments used → cleaner embedding
+        # vad=False: reference audio already cleaned by Demucs (vocals only)
         from openvoice import se_extractor
         target_se, _ = se_extractor.get_se(
-            str(ref_path), _ov_converter, vad=True
+            str(ref_path), _ov_converter, vad=False
         )
         se_path = voice_dir / "target_se.pth"
         torch.save(target_se, str(se_path))
