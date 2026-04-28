@@ -30,6 +30,12 @@ const observer = new MutationObserver(() => injectButtonIfNeeded());
 observer.observe(document.body, { childList: true, subtree: true });
 injectButtonIfNeeded();
 
+// YouTube SPA navigation — stop session when user navigates to a different video
+document.addEventListener('yt-navigate-finish', () => {
+    if (dubState.active) stopDubbing();
+    injectButtonIfNeeded();
+});
+
 // ─── Button injection ────────────────────────────────────────────────────────
 
 function injectButtonIfNeeded() {
@@ -248,9 +254,10 @@ async function startDubbing(overlay) {
             dubState._video = video;
 
             video.addEventListener('timeupdate', onVideoTimeUpdate);
-            video.addEventListener('pause', onVideoPause);
-            video.addEventListener('seeking', onVideoSeeking);
-            video.addEventListener('play', onVideoPlay);
+            video.addEventListener('pause',      onVideoPause);
+            video.addEventListener('seeking',    onVideoSeeking);
+            video.addEventListener('play',       onVideoPlay);
+            video.addEventListener('ended',      onVideoEnded);
         }
 
         updateButton(true);
@@ -461,6 +468,7 @@ function onVideoTimeUpdate() {
 }
 function onVideoPause()   { if (dubState.active) stopCurrentAudio(); }
 function onVideoSeeking() { if (dubState.active) stopCurrentAudio(); }
+function onVideoEnded()   { if (dubState.active) stopDubbing(); }
 function onVideoPlay()    {
     dubState._waitingToPlay = false;
     if (dubState.active && dubState.audioCtx?.state === 'suspended') dubState.audioCtx.resume();
@@ -480,6 +488,7 @@ function stopDubbing() {
         video.removeEventListener('pause',      onVideoPause);
         video.removeEventListener('seeking',    onVideoSeeking);
         video.removeEventListener('play',       onVideoPlay);
+        video.removeEventListener('ended',      onVideoEnded);
         if (dubState._origVolume != null) video.volume = dubState._origVolume;
     }
 
