@@ -322,11 +322,11 @@ async function doPoll() {
 
 // ─── Audio playback ───────────────────────────────────────────────────────────
 
-function _startChunk(i, t) {
+function _startChunk(i, t, offset) {
     const ctx = dubState.audioCtx;
     const chunk = dubState.chunks[i];
     if (!chunk || !chunk._audioBuffer) return;
-    const offset = Math.max(0, t - chunk.start_time);
+    if (offset === undefined) offset = Math.max(0, t - chunk.start_time);
     if (offset >= chunk._audioBuffer.duration) return;
     try {
         const src  = ctx.createBufferSource();
@@ -334,7 +334,6 @@ function _startChunk(i, t) {
         src.buffer = chunk._audioBuffer;
         src.connect(gain);
         gain.connect(ctx.destination);
-        // Fade in over 30ms to avoid abrupt click/mute at segment start
         gain.gain.setValueAtTime(0, ctx.currentTime);
         gain.gain.linearRampToValueAtTime(1.0, ctx.currentTime + 0.03);
         src.start(0, offset);
@@ -346,8 +345,15 @@ function _startChunk(i, t) {
             dubState.currentSrc = null;
             dubState.currentIdx = -1;
             if (!dubState.active || !dubState._video || dubState._video.paused) return;
-            // Time-based lookup, but skip the chunk that just ended to avoid restart
-            playDubAudio(dubState._video.currentTime, i);
+            // Play next segment from the start — don't use time offset.
+            // Previous audio may have run past the next segment's time window,
+            // causing a large offset that would cut words or skip the segment entirely.
+            for (let j = i + 1; j < dubState.chunks.length; j++) {
+                if (dubState.chunks[j] && dubState.chunks[j]._audioBuffer) {
+                    _startChunk(j, 0, 0);
+                    return;
+                }
+            }
         };
     } catch (e) {}
 }
