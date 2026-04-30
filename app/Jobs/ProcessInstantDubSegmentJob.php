@@ -562,6 +562,12 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         $text = TextNormalizer::normalize($this->text, $this->language);
         $text = str_replace(["\u{02BB}", "\u{02BC}", "\u{02B0}"], "'", $text);
 
+        // Strip any character outside MMS vocabulary to prevent FloatTensor embedding crash.
+        // MMS uz accepts: ASCII printable + Uzbek-specific ' (apostrophe) only.
+        // Unknown characters make the tokenizer return float indices → pytorch crash.
+        $text = preg_replace('/[^\x20-\x7E\'\x{02BB}]/u', ' ', $text);
+        $text = preg_replace('/\s{2,}/', ' ', trim($text));
+
         $session     = json_decode(\Illuminate\Support\Facades\Redis::get("instant-dub:{$this->sessionId}") ?? '{}', true);
         $forceVoice  = !empty($session['force_voice']);
         $options = [
