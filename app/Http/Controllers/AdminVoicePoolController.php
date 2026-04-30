@@ -28,6 +28,7 @@ class AdminVoicePoolController extends Controller
                     'duration' => $this->getAudioDuration($file),
                     'speed'    => $this->getSpeed($gender, $name),
                     'tau'      => self::getTau($gender, $name),
+                    'seed'     => self::getSeed($gender, $name),
                     'ref_text' => $ref_text,
                 ];
             }
@@ -211,6 +212,7 @@ class AdminVoicePoolController extends Controller
         $request->validate([
             'speed' => 'required|numeric|min:0.5|max:2.0',
             'tau'   => 'nullable|numeric|min:0.0|max:1.0',
+            'seed'  => 'nullable|integer|min:0|max:99999',
         ]);
 
         $file = storage_path("app/voice-pool/{$gender}/{$name}.wav");
@@ -223,6 +225,10 @@ class AdminVoicePoolController extends Controller
         $data['speed'] = (float) $request->input('speed');
         if ($request->has('tau')) {
             $data['tau'] = (float) $request->input('tau');
+        }
+        if ($request->has('seed')) {
+            $val = $request->input('seed');
+            $data['seed'] = ($val === null || $val === '') ? null : (int) $val;
         }
         file_put_contents($json, json_encode($data, JSON_PRETTY_PRINT));
 
@@ -238,6 +244,7 @@ class AdminVoicePoolController extends Controller
             'language'   => 'required|string|max:10',
             'speed'      => 'nullable|numeric|min:0.5|max:2.0',
             'tau'        => 'nullable|numeric|min:0.0|max:1.0',
+            'seed'       => 'nullable|integer|min:0|max:99999',
             'tts_engine' => 'nullable|in:f5tts,mms',
         ]);
 
@@ -282,7 +289,8 @@ class AdminVoicePoolController extends Controller
             if ($err = $cloneIfNeeded()) return $err;
         }
 
-        $tau = (float) ($request->input('tau', 0.4));
+        $tau  = (float) ($request->input('tau', 0.4));
+        $seed = $request->input('seed') !== null && $request->input('seed') !== '' ? (int) $request->input('seed') : null;
         $synthPayload = [
             'text'     => $request->input('text'),
             'voice_id' => $voiceId,
@@ -290,6 +298,7 @@ class AdminVoicePoolController extends Controller
             'speed'    => $speed,
             'tau'      => $tau,
         ];
+        if ($seed !== null) $synthPayload['seed'] = $seed;
         $synthResp = Http::timeout(120)->post("{$xttsUrl}/synthesize", $synthPayload);
 
         // Voice lost after pod restart — re-clone and retry once
@@ -394,6 +403,16 @@ class AdminVoicePoolController extends Controller
             return (float) ($data['tau'] ?? 0.4);
         }
         return 0.4;
+    }
+
+    public static function getSeed(string $gender, string $name): ?int
+    {
+        $json = storage_path("app/voice-pool/{$gender}/{$name}.json");
+        if (file_exists($json)) {
+            $data = json_decode(file_get_contents($json), true);
+            return isset($data['seed']) && $data['seed'] !== null ? (int) $data['seed'] : null;
+        }
+        return null;
     }
 
     private function getAudioDuration(string $path): string
