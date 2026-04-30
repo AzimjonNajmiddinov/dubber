@@ -14,6 +14,11 @@ class TextNormalizer
     {
         $lang = strtolower($language);
 
+        // Expand Uzbek dates/ordinals BEFORE abbreviation expansion
+        if (in_array($lang, ['uz', 'uzbek'])) {
+            $text = self::expandUzbekDates($text);
+        }
+
         // Expand units/abbreviations FIRST (while numbers are still digits)
         $text = self::expandAbbreviations($text, $lang);
 
@@ -26,6 +31,9 @@ class TextNormalizer
         if (!in_array($lang, ['ru', 'russian'])) {
             $text = self::transliterateCyrillicToLatin($text);
         }
+
+        // Strip *emphasis* markers added by the translator (not renderable by TTS engines)
+        $text = preg_replace('/\*([^*]+)\*/', '$1', $text);
 
         // Normalize Uzbek apostrophes LAST — after abbreviation/number expansion
         // which may introduce ASCII apostrophes (e.g. "to'rt", "Qo'shma")
@@ -404,6 +412,52 @@ class TextNormalizer
         }
 
         return implode(' ', array_filter($words));
+    }
+
+    /**
+     * Expand Uzbek date patterns to spoken form.
+     *
+     * "19-sentabr"  → "o'n to'qqizinchi sentabr"
+     * "2021-yil"    → "ikki ming yigirma bir yil"
+     * "2021-yil 19-sentabr" → "ikki ming yigirma bir yil o'n to'qqizinchi sentabr"
+     */
+    private static function expandUzbekDates(string $text): string
+    {
+        $months = [
+            'yanvar', 'fevral', 'mart', 'aprel', 'may', 'iyun',
+            'iyul', 'avgust', 'sentabr', 'oktyabr', 'noyabr', 'dekabr',
+        ];
+        $monthPattern = implode('|', $months);
+
+        // "19-sentabr" → "o'n to'qqizinchi sentabr"
+        $text = preg_replace_callback(
+            '/\b(\d{1,2})-(' . $monthPattern . ')\b/ui',
+            fn($m) => self::uzbekOrdinal((int) $m[1]) . ' ' . mb_strtolower($m[2]),
+            $text
+        );
+
+        // "2021-yil" or "21-yil" → "ikki ming yigirma bir yil"
+        $text = preg_replace_callback(
+            '/\b(\d{1,4})-yil\b/ui',
+            fn($m) => self::integerToUzbek((int) $m[1]) . ' yil',
+            $text
+        );
+
+        return $text;
+    }
+
+    /**
+     * Convert integer to Uzbek ordinal (birinchi, ikkinchi, ...).
+     */
+    private static function uzbekOrdinal(int $n): string
+    {
+        $cardinal = self::integerToUzbek($n);
+        // Last character: vowels take "-nchi", consonants take "-inchi"
+        $lastChar = mb_substr($cardinal, -1);
+        $vowels = ['a', 'e', 'i', 'o', 'u'];
+        return in_array($lastChar, $vowels, true)
+            ? $cardinal . 'nchi'
+            : $cardinal . 'inchi';
     }
 
     /**

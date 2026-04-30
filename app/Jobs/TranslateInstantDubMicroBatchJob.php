@@ -61,6 +61,8 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
             $text = trim($seg['text']);
             $text = trim(preg_replace('/\[[^\]]*\]\s*/', '', $text));
             $text = str_replace('`', '\'', $text);
+            // Strip *emphasis* markers — kept as metadata by translator but not speakable
+            $text = preg_replace('/\*([^*]+)\*/', '$1', $text);
             if ($text === '') continue;
 
             $slotEnd = isset($translated[$i + 1])
@@ -107,7 +109,7 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
 
         $uzbekRules = '';
         if ($this->language === 'uz') {
-            $uzbekRules = "\nUZBEK RULES: Use natural spoken Uzbek. Colloquial forms (qilyapman not qilayotirman). Keep names untranslated. Match emotional register. SCRIPT: ONLY Latin alphabet — NEVER use Cyrillic (а,б,в...), no mixed scripts. SPELLING: fe'l negizi unli bilan tugasa, shaxs qo'shimchasi qo'shganda u unli tushib qolmaydi (tani→taniyman, NOT tanyman).\n";
+            $uzbekRules = "\nUZBEK RULES: Use natural spoken Uzbek. Colloquial forms (qilyapman not qilayotirman). Keep names untranslated. Match emotional register. SCRIPT: ONLY Latin alphabet — NEVER use Cyrillic (а,б,в...), no mixed scripts. SPELLING: fe'l negizi unli bilan tugasa, shaxs qo'shimchasi qo'shganda u unli tushib qolmaydi (tani→taniyman, NOT tanyman).\nDATES & NUMBERS: Expand all dates and numbers to spoken Uzbek words (e.g. '2021-yil' → 'ikki ming yigirma bir yil', '19-sentabr' → 'o'n to'qqizinchi sentabr', '500' → 'besh yuz').\nEMPHASIS: Wrap words that carry the main stress/emphasis of the sentence in *asterisks* (e.g. *muhim* so'z). Mirror the emphasis pattern of the original.\n";
         }
 
         if ($forceVoice) {
@@ -120,6 +122,7 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
                 . "2. Assign speaker tags [M1], [F1] based on gender clues.\n"
                 . "3. Strip annotations [music], [laughing] — write only spoken words.\n"
                 . "4. Punctuation = emotion: ! anger, ... hesitation, — pause, ? question.\n"
+                . "5. Text inside quotation marks \" \" or « » is a name, title, or label — do NOT translate it. Keep it verbatim.\n"
                 . "\n" . 'Format: "1. [M1] text"';
         } else {
             $systemPrompt = "You are a dubbing voice director writing dialogue for a film in {$toLang}. You watch the scene, understand the story and emotions, then write what the characters would ACTUALLY SAY in {$toLang} — not a translation, but a re-creation.\n"
@@ -132,6 +135,7 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
                 . "3. Assign speaker tags [M1], [F1] based on gender clues.\n"
                 . "4. Strip annotations [music], [laughing] — write only spoken words.\n"
                 . "5. Punctuation = emotion: ! anger, ... hesitation, — pause, ? question.\n"
+                . "6. Text inside quotation marks \" \" or « » is a name, title, or label — do NOT translate it. Keep it verbatim.\n"
                 . "\n" . 'Format: "1. [M1] text"';
         }
 

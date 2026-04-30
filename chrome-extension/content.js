@@ -216,9 +216,15 @@ async function startDubbing(overlay) {
         const srt      = ytData?.srt || null;
         const audioUrl = ytData?.audioUrl || null;
 
+        // Detect source language: background.js may return it, else DOM parse
+        const domData      = ytData?.detectedLanguage ? ytData : getDomYouTubeData();
+        const translateFrom = (domData?.detectedLanguage || 'en').slice(0, 2);
+
+        const langLabel = { en: 'English', ru: 'Русский', ko: '한국어', ja: '日本語', de: 'Deutsch', fr: 'Français', zh: '中文', ar: 'العربية', tr: 'Türkçe' };
+        const srcLabel = langLabel[translateFrom] || translateFrom.toUpperCase();
         msgEl.textContent = srt
-            ? `${countSrt(srt)} subtitle topildi. Serverga yuborilmoqda...`
-            : 'Subtitle topilmadi. Serverga yuborilmoqda...';
+            ? `${countSrt(srt)} subtitle topildi (${srcLabel}). Serverga yuborilmoqda...`
+            : `Subtitle topilmadi (${srcLabel}). Serverga yuborilmoqda...`;
 
         const resp = await fetch(`${dubState.apiBase}/api/instant-dub/start`, {
             method:  'POST',
@@ -226,7 +232,7 @@ async function startDubbing(overlay) {
             body:    JSON.stringify({
                 video_url:      videoUrl,
                 language:       dubState.language,
-                translate_from: 'en',
+                translate_from: translateFrom,
                 srt:            srt || '',
                 audio_url:      audioUrl || '',
                 title:          document.title.replace(' - YouTube', ''),
@@ -300,7 +306,7 @@ async function doPoll() {
 
             for (const c of data.chunks) {
                 if (c.index > dubState.lastChunkIdx) dubState.lastChunkIdx = c.index;
-                const cd = { start_time: c.start_time, end_time: c.end_time, text: c.text };
+                const cd = { start_time: c.start_time, end_time: c.end_time, text: c.text, source_text: c.source_text || '' };
                 if (c.audio_base64 && ctx) {
                     try {
                         cd._audioBuffer = await ctx.decodeAudioData(base64ToArrayBuffer(c.audio_base64));
@@ -356,12 +362,19 @@ function _startChunk(i, offset) {
         dubState.currentIdx = i;
         dubState.pendingIdx = -1;
 
+        // Duck original audio during speech
+        if (dubState._video) dubState._video.volume = 0.08;
+
         src.onended = () => {
             if (dubState.currentIdx !== i) return;
             dubState.currentSrc = null;
             dubState.currentIdx = -1;
             if (!dubState.active || !dubState._video || dubState._video.paused) return;
             _afterChunkEnded(i);
+            // Restore volume if no next chunk started immediately
+            if (!dubState.currentSrc && dubState._video) {
+                dubState._video.volume = dubState._origVolume ?? 1;
+            }
         };
     } catch (e) {}
 }
@@ -370,6 +383,11 @@ function _startChunk(i, offset) {
 // Find the next loaded chunk and either play it immediately (if its time has passed)
 // or schedule it (timeupdate will fire it at exactly start_time).
 function _afterChunkEnded(i) {
+    // Free AudioBuffer for chunks well behind the playhead (saves RAM on long videos)
+    if (i >= 3 && dubState.chunks[i - 3]) {
+        dubState.chunks[i - 3]._audioBuffer = null;
+    }
+
     let next = -1;
     for (let j = i + 1; j < dubState.chunks.length; j++) {
         if (dubState.chunks[j] && dubState.chunks[j]._audioBuffer) { next = j; break; }
@@ -397,8 +415,12 @@ function playDubAudio(t) {
         if (p && p._audioBuffer && t >= p.start_time) {
             const idx = dubState.pendingIdx;
             dubState.pendingIdx = -1;
-            _startChunk(idx, 0);
+            _startChunk(idx, 0); // _startChunk ducks volume internally
             return;
+        }
+        // Approaching pending chunk — pre-duck slightly
+        if (p && p.start_time - t < 0.5 && dubState._video) {
+            dubState._video.volume = Math.max(0.08, dubState._video.volume - 0.05);
         }
     }
 
@@ -426,6 +448,30 @@ function stopCurrentAudio() {
     dubState.pendingIdx = -1;
 }
 
+// After seek: find chunk at time t and start/schedule it immediately
+function scheduleNearestChunk(t) {
+    // 1. Currently active segment?
+    for (let i = 0; i < dubState.chunks.length; i++) {
+        const c = dubState.chunks[i];
+        if (!c || !c._audioBuffer) continue;
+        const slotEnd = c.end_time ?? (c.start_time + c._audioBuffer.duration);
+        if (t >= c.start_time && t < slotEnd) {
+            _startChunk(i, t - c.start_time);
+            return;
+        }
+    }
+    // 2. Next upcoming segment
+    let nextIdx = -1, nextTime = Infinity;
+    for (let i = 0; i < dubState.chunks.length; i++) {
+        const c = dubState.chunks[i];
+        if (!c || !c._audioBuffer) continue;
+        if (c.start_time > t && c.start_time < nextTime) {
+            nextIdx = i; nextTime = c.start_time;
+        }
+    }
+    if (nextIdx >= 0) dubState.pendingIdx = nextIdx;
+}
+
 // ─── Subtitle display ─────────────────────────────────────────────────────────
 
 function showSubtitleBar() {
@@ -434,28 +480,41 @@ function showSubtitleBar() {
     el.id = 'dubber-sub';
     el.style.cssText = `
         position:fixed;bottom:70px;left:50%;transform:translateX(-50%);
-        background:rgba(0,0,0,0.82);color:#fff;padding:6px 18px;border-radius:6px;
+        background:rgba(0,0,0,0.82);color:#fff;padding:8px 20px;border-radius:6px;
         font-size:16px;font-family:Arial,sans-serif;z-index:9998;
-        pointer-events:none;text-align:center;max-width:80%;line-height:1.4;
+        pointer-events:none;text-align:center;max-width:85%;line-height:1.5;
         transition:opacity .2s;min-height:28px;
     `;
     document.body.appendChild(el);
 }
 
-function updateSubtitleBar(text) {
+function updateSubtitleBar(html) {
     const el = document.getElementById('dubber-sub');
-    if (el) { el.textContent = text; el.style.opacity = text ? '1' : '0'; }
+    if (!el) return;
+    el.innerHTML = html;
+    el.style.opacity = html ? '1' : '0';
 }
 
 let _lastSubText = '';
 function updateSubtitle(t) {
-    let found = '';
+    let found = null;
     for (const c of dubState.chunks) {
-        if (c && t >= c.start_time && t <= c.end_time) { found = c.text; break; }
+        if (c && t >= c.start_time && t <= c.end_time) { found = c; break; }
     }
-    if (found === _lastSubText) return;
-    _lastSubText = found;
-    updateSubtitleBar(found);
+    const text = found?.text || '';
+    if (text === _lastSubText) return;
+    _lastSubText = text;
+
+    if (!found || !text) { updateSubtitleBar(''); return; }
+
+    const src = found.source_text
+        ? `<div style="font-size:12px;color:#bbb;margin-bottom:2px">${escHtml(found.source_text)}</div>`
+        : '';
+    updateSubtitleBar(src + `<div>${escHtml(text)}</div>`);
+}
+
+function escHtml(s) {
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
 // ─── Video event handlers (attached directly to <video> in startDubbing) ──────
@@ -466,8 +525,17 @@ function onVideoTimeUpdate() {
     updateSubtitle(t);
     playDubAudio(t);
 }
-function onVideoPause()   { if (dubState.active) stopCurrentAudio(); }
-function onVideoSeeking() { if (dubState.active) stopCurrentAudio(); }
+function onVideoPause() {
+    if (!dubState.active) return;
+    stopCurrentAudio();
+    if (dubState._video) dubState._video.volume = dubState._origVolume ?? 1;
+}
+function onVideoSeeking() {
+    if (!dubState.active) return;
+    stopCurrentAudio();
+    if (dubState._video) dubState._video.volume = dubState._origVolume ?? 1;
+    scheduleNearestChunk(this.currentTime);
+}
 function onVideoEnded()   { if (dubState.active) stopDubbing(); }
 function onVideoPlay()    {
     dubState._waitingToPlay = false;
@@ -550,8 +618,12 @@ function getDomYouTubeData() {
             }
             try {
                 const tracks = JSON.parse(text.slice(arrStart, i + 1));
-                if (Array.isArray(tracks) && tracks.length > 0)
-                    return { captionTracks: tracks, audioUrl: null };
+                if (!Array.isArray(tracks) || !tracks.length) continue;
+                // Prefer manual captions over auto-generated (kind === 'asr')
+                const manual = tracks.find(t => !t.kind || t.kind !== 'asr');
+                const best   = manual || tracks[0];
+                const detectedLanguage = (best?.languageCode || 'en').slice(0, 2);
+                return { captionTracks: tracks, audioUrl: null, detectedLanguage };
             } catch {}
         }
     } catch {}
