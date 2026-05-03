@@ -114,13 +114,13 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             }
 
             // 2. Adjust tempo so TTS fills the timeslot naturally
-            // Skipped for force_voice (Chrome extension): atempo causes double MP3
-            // encode artifacts. Natural TTS timing is preferred over strict sync.
+            // Skipped for MMS (WAV→MP3 encode artifacts) and force_voice sessions.
             $ttsDuration = $this->getAudioDuration($rawMp3);
             $finalMp3 = $rawMp3;
             $isForceVoice = !empty($session['force_voice']);
+            $isMms = ($driver === 'mms');
 
-            if (!$isForceVoice && $slotDuration > 0.5 && $ttsDuration > 0.1) {
+            if (!$isForceVoice && !$isMms && $slotDuration > 0.5 && $ttsDuration > 0.1) {
                 $ratio = $ttsDuration / $slotDuration;
                 $tempo = null;
 
@@ -519,10 +519,18 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         $voiceFile = null;
         $cacheKey  = null;
 
+        $seed = null;
         if (!empty($speakerEntry['mms_voice_id'])) {
             $voiceId = $speakerEntry['mms_voice_id'];
             $speed   = $speakerEntry['speed'] ?? 1.0;
             $tau     = $speakerEntry['tau']   ?? 0.4;
+            // Look up seed from pool JSON if not already in voice map
+            if (!isset($speakerEntry['seed']) && !empty($speakerEntry['pool_name'])) {
+                $g = $speakerEntry['gender'] ?? 'male';
+                $seed = AdminVoicePoolController::getSeed($g, $speakerEntry['pool_name']);
+            } else {
+                $seed = $speakerEntry['seed'] ?? null;
+            }
         } else {
             $gender = $speakerEntry['gender']
                 ?? (str_starts_with($this->speaker, 'F') ? 'female'
@@ -556,6 +564,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             $name  = pathinfo($voiceFile, PATHINFO_FILENAME);
             $speed = $speakerEntry['speed'] ?? AdminVoicePoolController::getSpeed($gender, $name);
             $tau   = $speakerEntry['tau']   ?? AdminVoicePoolController::getTau($gender, $name);
+            $seed  = $speakerEntry['seed']  ?? AdminVoicePoolController::getSeed($gender, $name);
         }
 
         // MMS model vocabulary is ASCII+basic-Latin — replace Uzbek apostrophe variants
@@ -568,13 +577,11 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         $text = preg_replace('/[^\x20-\x7E\'\x{02BB}]/u', ' ', $text);
         $text = preg_replace('/\s{2,}/', ' ', trim($text));
 
-        $session     = json_decode(\Illuminate\Support\Facades\Redis::get("instant-dub:{$this->sessionId}") ?? '{}', true);
-        $forceVoice  = !empty($session['force_voice']);
         $options = [
             'language' => $this->language,
             'speed'    => $speed,
             'tau'      => $tau,
-            'seed'     => $speakerEntry['seed'] ?? null,
+            'seed'     => $seed,
         ];
 
         try {
