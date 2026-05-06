@@ -253,6 +253,13 @@ echo "  Starting Demucs on port 8000..."
 cd /workspace/dubber/demucs-service
 nohup $PYTHON -m uvicorn app_runpod:app --host 0.0.0.0 --port 8000 > /tmp/demucs.log 2>&1 &
 
+# Ensure OpenVoice v2 source is present (needed for PYTHONPATH)
+if [ ! -d /workspace/openvoice-v2 ]; then
+    echo "  Cloning OpenVoice v2..."
+    git clone https://github.com/myshell-ai/OpenVoice /workspace/openvoice-v2
+    pip3 install -q -r /workspace/openvoice-v2/requirements.txt 2>/dev/null || true
+fi
+
 # Start MMS+OpenVoice on port 8005 (system Python + openvoice-v2 source)
 echo "  Starting MMS+OpenVoice on port 8005..."
 cd /workspace/dubber/mms-openvoice-service
