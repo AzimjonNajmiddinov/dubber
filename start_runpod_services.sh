@@ -199,10 +199,14 @@ if [ ! -f "$PYTHON" ]; then
     exit 1
 fi
 
-# Ensure uvicorn is in tts-venv (may be missing if pip install was interrupted)
-if ! $PYTHON -c "import uvicorn" 2>/dev/null; then
-    echo "  uvicorn missing from tts-venv — installing..."
-    $TTS_VENV/bin/pip install -q uvicorn fastapi python-multipart
+# Ensure critical packages are in tts-venv (may be missing if pip install was interrupted)
+MISSING=""
+for pkg in uvicorn fastapi pyworld librosa; do
+    $PYTHON -c "import $pkg" 2>/dev/null || MISSING="$MISSING $pkg"
+done
+if [ -n "$MISSING" ]; then
+    echo "  Missing from tts-venv:$MISSING — installing..."
+    $TTS_VENV/bin/pip install -q uvicorn fastapi python-multipart pyworld librosa
 fi
 
 # System Python for WhisperX (whisperx lives here, not in tts-venv)
