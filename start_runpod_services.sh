@@ -199,6 +199,12 @@ if [ ! -f "$PYTHON" ]; then
     exit 1
 fi
 
+# Ensure uvicorn is in tts-venv (may be missing if pip install was interrupted)
+if ! $PYTHON -c "import uvicorn" 2>/dev/null; then
+    echo "  uvicorn missing from tts-venv — installing..."
+    $TTS_VENV/bin/pip install -q uvicorn fastapi python-multipart
+fi
+
 # System Python for WhisperX (whisperx lives here, not in tts-venv)
 WHISPERX_PYTHON=$(command -v python3 || command -v python)
 # Auto-install whisperx if missing (fast — torch already cached, ~200MB)
