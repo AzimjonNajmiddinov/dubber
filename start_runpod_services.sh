@@ -163,19 +163,28 @@ if [ "$TTS_VENV_OK" = false ]; then
         whisper-timestamped --prefer-binary 2>/dev/null || true
 
     echo "    Installing Demucs deps in tts-venv..."
-    $TTS_VENV/bin/pip install -q \
+    $TTS_VENV/bin/pip install \
         "transformers>=4.48,<4.50" uvicorn fastapi python-multipart soundfile scipy \
         pyworld librosa "av" ctranslate2 "faster-whisper==0.9.0" openai-whisper \
         --prefer-binary
 
     echo "    Installing Demucs..."
-    $TTS_VENV/bin/pip install -q --no-deps demucs
-    $TTS_VENV/bin/pip install -q dora-search lameenc julius diffq einops openunmix treetable dtw-python
+    $TTS_VENV/bin/pip install --no-deps demucs
+    $TTS_VENV/bin/pip install dora-search lameenc julius diffq einops openunmix treetable dtw-python
 
-    if $TTS_VENV/bin/python -c "import transformers, torch, torchaudio, demucs; print(f'TTS venv OK - torch {torch.__version__}')" 2>/dev/null; then
-        echo "  TTS venv created successfully"
+    # Verify all critical packages installed correctly
+    VENV_OK=true
+    for pkg in transformers torch torchaudio demucs uvicorn soundfile pyworld librosa scipy; do
+        if ! $TTS_VENV/bin/python -c "import $pkg" 2>/dev/null; then
+            echo "  ERROR: $pkg missing from tts-venv after install!"
+            VENV_OK=false
+        fi
+    done
+    if [ "$VENV_OK" = true ]; then
+        TORCH_VER=$($TTS_VENV/bin/python -c "import torch; print(torch.__version__)" 2>/dev/null)
+        echo "  TTS venv created successfully (torch $TORCH_VER)"
     else
-        echo "  ERROR: TTS venv creation failed! Check manually."
+        echo "  WARNING: Some packages missing — services may fail!"
     fi
 fi
 
