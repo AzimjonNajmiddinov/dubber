@@ -95,10 +95,11 @@ OPENVOICE_CKPT = Path("/workspace/openvoice-v2/checkpoints_v2/converter")
 _mms_model     = None
 _mms_tokenizer = None
 _ov_converter  = None
+_base_src_se   = None  # fixed src_se from a reference MMS sentence — used by synthesize-with-ref
 
 
 def load_models():
-    global _mms_model, _mms_tokenizer, _ov_converter
+    global _mms_model, _mms_tokenizer, _ov_converter, _base_src_se
 
     logger.info("Loading MMS TTS (facebook/mms-tts-uzb)...")
     from transformers import VitsModel, AutoTokenizer
@@ -115,6 +116,30 @@ def load_models():
     )
     _ov_converter.load_ckpt(str(OPENVOICE_CKPT / "checkpoint.pth"))
     logger.info("OpenVoice v2 loaded")
+
+    # Pre-compute a fixed base src_se from a neutral MMS sentence.
+    # synthesize-with-ref uses this as src_se for all segments so the
+    # OpenVoice correction is always consistent (no per-segment drift).
+    try:
+        logger.info("Pre-computing base src_se...")
+        from openvoice import se_extractor
+        torch.manual_seed(42)
+        np.random.seed(42)
+        ref_text = "Салом, мен сизга ёрдам бераман."  # neutral Uzbek sentence
+        inp = _mms_tokenizer(ref_text, return_tensors="pt")
+        with torch.no_grad():
+            base_wav = _mms_model(**inp).waveform.squeeze().cpu().numpy()
+        base_wav_22k = torchaudio.functional.resample(
+            torch.from_numpy(base_wav).unsqueeze(0),
+            _mms_model.config.sampling_rate, 22050
+        ).squeeze(0).numpy().astype(np.float32)
+        base_path = CACHE_PATH / "base_src.wav"
+        sf.write(str(base_path), base_wav_22k, 22050)
+        _base_src_se, _ = se_extractor.get_se(str(base_path), _ov_converter, vad=False)
+        base_path.unlink(missing_ok=True)
+        logger.info("Base src_se computed OK")
+    except Exception as e:
+        logger.warning(f"Base src_se failed (will compute per-segment): {e}")
 
 
 @app.on_event("startup")
@@ -490,8 +515,11 @@ async def synthesize_with_ref(
                 except Exception:
                     target_se, _ = se_extractor.get_se(str(ref_path), _ov_converter, vad=False)
 
-                # Extract src_se from MMS output
-                if len(waveform_22k) < MIN_SAMPLES:
+                # Use fixed base src_se so all segments get identical correction baseline.
+                # If base not ready, fall back to per-segment computation.
+                if _base_src_se is not None:
+                    src_se = _base_src_se
+                elif len(waveform_22k) < MIN_SAMPLES:
                     n = -(-MIN_SAMPLES // len(waveform_22k))
                     padded = np.tile(waveform_22k, n)[:MIN_SAMPLES].astype(np.float32)
                     se_tmp = CACHE_PATH / f"se_{uuid.uuid4()}.wav"

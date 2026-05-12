@@ -445,7 +445,7 @@ class InstantDubController extends Controller
         foreach ($lines as $line) {
             $trimmed = trim($line);
 
-            // Inject dub audio track BEFORE existing audio tracks so iOS picks it first
+            // Inject our dubbed audio track once, before any existing audio tracks
             if (!$dubInjected && str_starts_with($trimmed, '#EXT-X-MEDIA') && str_contains($trimmed, 'TYPE=AUDIO')) {
                 $output[] = "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"{$groupId}\",NAME=\"{$dubName}\",LANGUAGE=\"{$lang}\",URI=\"dub-audio.m3u8\",DEFAULT=YES,AUTOSELECT=YES";
                 $dubInjected = true;
@@ -453,9 +453,6 @@ class InstantDubController extends Controller
 
             // Inject before STREAM-INF if no existing audio tracks
             if (!$dubInjected && str_starts_with($trimmed, '#EXT-X-STREAM-INF')) {
-                if (!$existingAudioGroup) {
-                    $output[] = "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"{$groupId}\",NAME=\"Original\",DEFAULT=NO,AUTOSELECT=NO";
-                }
                 $output[] = "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"{$groupId}\",NAME=\"{$dubName}\",LANGUAGE=\"{$lang}\",URI=\"dub-audio.m3u8\",DEFAULT=YES,AUTOSELECT=YES";
                 $output[] = "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"{$subsGroupId}\",NAME=\"{$subName}\",LANGUAGE=\"{$lang}\",URI=\"dub-subtitles.m3u8\",DEFAULT=YES,AUTOSELECT=YES,FORCED=NO";
                 $dubInjected = true;
@@ -466,10 +463,11 @@ class InstantDubController extends Controller
                 $output[] = "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"{$subsGroupId}\",NAME=\"{$subName}\",LANGUAGE=\"{$lang}\",URI=\"dub-subtitles.m3u8\",DEFAULT=YES,AUTOSELECT=YES,FORCED=NO";
             }
 
-            // Set existing audio and subtitle tracks to DEFAULT=NO/AUTOSELECT=NO (ours takes priority)
-            if (str_starts_with($trimmed, '#EXT-X-MEDIA') && !str_contains($trimmed, 'dub-audio') && !str_contains($trimmed, 'dub-subtitles')) {
-                $line = preg_replace('/DEFAULT=YES/', 'DEFAULT=NO', $line);
-                $line = preg_replace('/AUTOSELECT=YES/', 'AUTOSELECT=NO', $line);
+            // Skip all original audio tracks — keep only our dubbed track in the audio group.
+            // iOS AVPlayer auto-selects based on device language; if a Russian track exists,
+            // it overrides DEFAULT=YES on our Uzbek track. Removing originals prevents switching.
+            if (str_starts_with($trimmed, '#EXT-X-MEDIA') && str_contains($trimmed, 'TYPE=AUDIO') && !str_contains($trimmed, 'dub-audio')) {
+                continue;
             }
 
             // Ensure STREAM-INF lines reference audio + subtitle groups
@@ -576,7 +574,7 @@ class InstantDubController extends Controller
                 $aacFile = "{$aacDir}/bg-{$bgIdx}.aac";
                 if (!file_exists($aacFile) || filesize($aacFile) <= 10) break;
                 $cs  = (float) ($bgChunk['start'] ?? 0);
-                $ce  = (float) ($bgChunk['end'] ?? 0);
+                $ce  = (float) ($bgChunk['end']   ?? 0);
                 $dur = round($this->frameAlignedDuration($cs, $ce), 6);
                 $entries[] = ['uri' => "dub-segment/bg-{$bgIdx}.aac", 'duration' => $dur];
                 $readyCount++;
