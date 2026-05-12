@@ -114,7 +114,7 @@ def _separate(wav: torch.Tensor, sr: int, model_name: str = "htdemucs") -> tuple
     wav_batch = wav.unsqueeze(0)  # (1, 2, samples)
 
     with torch.no_grad():
-        sources = apply_model(_model, wav_batch, device=_device, progress=False)
+        sources = apply_model(_model, wav_batch, device=_device, progress=False, overlap=0.5)
     # sources: (1, num_stems, 2, samples)
     sources = sources[0].cpu()  # (num_stems, 2, samples)
 

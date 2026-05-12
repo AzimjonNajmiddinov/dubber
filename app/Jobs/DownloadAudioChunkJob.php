@@ -272,21 +272,19 @@ class DownloadAudioChunkJob implements ShouldQueue
             }
         }
 
-        // Demucs bor: no_vocals 100% + original lowpass(<150Hz) 30% — fon energiyasi saqlanadi, ovoz eshitilmaydi
+        // Demucs bor: no_vocals 100%
         // Demucs yo'q: original 20% (fallback)
         if ($useNoVocals) {
             $cmd = [
                 'ffmpeg', '-y',
                 '-f', 'lavfi', '-t', (string) $chunkDur, '-i', 'anullsrc=r=44100:cl=mono',
                 '-t', (string) $chunkDur, '-i', $noVocalsPath,
-                '-t', (string) $chunkDur, '-i', $bgAudioPath,
             ];
             $filters   = [
                 '[1:a]volume=1.0,aresample=44100[nv]',
-                '[2:a]lowpass=f=150,volume=0.3,aresample=44100[bg_lf]',
             ];
-            $mixInputs = ['[0:a]', '[nv]', '[bg_lf]'];
-            $inputIdx  = 3;
+            $mixInputs = ['[0:a]', '[nv]'];
+            $inputIdx  = 2;
         } else {
             $cmd = [
                 'ffmpeg', '-y',
