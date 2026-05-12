@@ -223,29 +223,40 @@ class DownloadAudioChunkJob implements ShouldQueue
         $chunkDur = round($this->frameAlignedDuration($this->startTime, $this->endTime), 6);
         $outFile  = "{$aacDir}/bg-{$this->chunkIndex}.aac";
 
-        // no_vocals mavjud bo'lsa 100% da, bo'lmasa original 20% da
+        // no_vocals mavjud bo'lsa session dan ham tekshirib olish
         $useNoVocals = $noVocalsPath && file_exists($noVocalsPath) && filesize($noVocalsPath) > 1000;
-        $bgFile      = $useNoVocals ? $noVocalsPath : $bgAudioPath;
-        $bgVolume    = $useNoVocals ? '1.0' : '0.2';
-
-        // no_vocals yo'q bo'lsa session dan olishga urinish
         if (!$useNoVocals) {
             $freshJson = Redis::get($sessionKey);
             $fresh = $freshJson ? json_decode($freshJson, true) : [];
             $nvPath = $fresh['bg_chunks'][$this->chunkIndex]['no_vocals_path'] ?? null;
             if ($nvPath && file_exists($nvPath) && filesize($nvPath) > 1000) {
-                $bgFile   = $nvPath;
-                $bgVolume = '1.0';
-                $useNoVocals = true;
+                $noVocalsPath = $nvPath;
+                $useNoVocals  = true;
             }
         }
 
-        $cmd      = [
-            'ffmpeg', '-y',
-            '-f', 'lavfi', '-t', (string) $chunkDur, '-i', 'anullsrc=r=44100:cl=mono',
-            '-t', (string) $chunkDur, '-i', $bgFile,
-        ];
-        $filters   = ["[1:a]volume={$bgVolume},aresample=44100[bg]"];
+        // Demucs bor: no_vocals 85% + original 12% (energiyani saqlab qolish uchun)
+        // Demucs yo'q: original 20% (fallback)
+        if ($useNoVocals) {
+            $cmd = [
+                'ffmpeg', '-y',
+                '-f', 'lavfi', '-t', (string) $chunkDur, '-i', 'anullsrc=r=44100:cl=mono',
+                '-t', (string) $chunkDur, '-i', $noVocalsPath,
+                '-t', (string) $chunkDur, '-i', $bgAudioPath,
+            ];
+            $filters   = [
+                '[1:a]volume=0.85,aresample=44100[nv]',
+                '[2:a]volume=0.12,aresample=44100[orig]',
+                '[nv][orig]amix=inputs=2:duration=first:normalize=0[bg]',
+            ];
+        } else {
+            $cmd = [
+                'ffmpeg', '-y',
+                '-f', 'lavfi', '-t', (string) $chunkDur, '-i', 'anullsrc=r=44100:cl=mono',
+                '-t', (string) $chunkDur, '-i', $bgAudioPath,
+            ];
+            $filters = ['[1:a]volume=0.2,aresample=44100[bg]'];
+        }
         $mixInputs = ['[0:a]', '[bg]'];
         $inputIdx  = 2;
         $tmpFiles  = [];
