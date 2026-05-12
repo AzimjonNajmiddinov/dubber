@@ -143,9 +143,6 @@ class DownloadAudioChunkJob implements ShouldQueue
                 session['status'] = 'complete'
                 session['playable'] = true
                 redis.call('SETEX', KEYS[1], 50400, cjson.encode(session))
-            elseif not session['playable'] and hasBg and ready >= math.min(math.ceil(total * 0.1), 30) then
-                session['playable'] = true
-                redis.call('SETEX', KEYS[1], 50400, cjson.encode(session))
             end
             return ready
         LUA;
