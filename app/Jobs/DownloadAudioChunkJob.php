@@ -272,21 +272,19 @@ class DownloadAudioChunkJob implements ShouldQueue
             }
         }
 
-        // Demucs bor: no_vocals 85% + original 12% barcha TTS bilan bitta amixda
+        // Demucs bor: no_vocals 100% (original aralashtirilmaydi)
         // Demucs yo'q: original 20% (fallback)
         if ($useNoVocals) {
             $cmd = [
                 'ffmpeg', '-y',
                 '-f', 'lavfi', '-t', (string) $chunkDur, '-i', 'anullsrc=r=44100:cl=mono',
                 '-t', (string) $chunkDur, '-i', $noVocalsPath,
-                '-t', (string) $chunkDur, '-i', $bgAudioPath,
             ];
             $filters   = [
-                '[1:a]volume=0.85,aresample=44100[nv]',
-                '[2:a]volume=0.12,aresample=44100[orig]',
+                '[1:a]volume=1.0,aresample=44100[nv]',
             ];
-            $mixInputs = ['[0:a]', '[nv]', '[orig]'];
-            $inputIdx  = 3;
+            $mixInputs = ['[0:a]', '[nv]'];
+            $inputIdx  = 2;
         } else {
             $cmd = [
                 'ffmpeg', '-y',
