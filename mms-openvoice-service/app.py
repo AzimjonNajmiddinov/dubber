@@ -389,6 +389,150 @@ async def synthesize(request: SynthesizeRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/synthesize-with-ref")
+async def synthesize_with_ref(
+    text: str = Form(...),
+    ref_audio: UploadFile = File(...),
+    language: str = Form("uz"),
+    speed: float = Form(1.0),
+    tau: float = Form(0.4),
+    seed: Optional[int] = Form(None),
+    noise_scale: float = Form(0.667),
+    noise_scale_w: float = Form(0.4),
+):
+    """MMS TTS → OpenVoice tone color from inline ref_audio (no pre-registered voice needed).
+    ref_audio: original actor's voice clip (any language, any format).
+    """
+    if _ov_converter is None or _mms_model is None:
+        try:
+            load_models()
+        except Exception as e:
+            raise HTTPException(status_code=503, detail=f"Models not ready: {e}")
+    try:
+        if seed is not None:
+            torch.manual_seed(seed)
+            np.random.seed(seed)
+
+        # 1. MMS TTS
+        cyrillic_text = latin_to_cyrillic(text)
+        logger.info(f"MMS TTS (with-ref): {text!r} → {cyrillic_text!r}")
+
+        _mms_model.config.noise_scale = noise_scale
+        _mms_model.config.noise_scale_w = noise_scale_w
+        mms_sr = _mms_model.config.sampling_rate
+
+        MAX_TOKENS = 350
+        def _synth(t):
+            inp = _mms_tokenizer(t, return_tensors="pt")
+            with torch.no_grad():
+                return _mms_model(**inp).waveform.squeeze().cpu().numpy()
+
+        token_count = len(_mms_tokenizer(cyrillic_text)['input_ids'])
+        if token_count > MAX_TOKENS:
+            words = cyrillic_text.split()
+            chunks, current = [], ''
+            for word in words:
+                candidate = (current + ' ' + word).strip() if current else word
+                if len(_mms_tokenizer(candidate)['input_ids']) <= MAX_TOKENS:
+                    current = candidate
+                else:
+                    if current: chunks.append(current)
+                    current = word
+            if current: chunks.append(current)
+            silence = np.zeros(int(0.05 * mms_sr), dtype=np.float32)
+            parts = []
+            for i, chunk in enumerate(chunks):
+                parts.append(_synth(chunk))
+                if i < len(chunks) - 1: parts.append(silence)
+            waveform = np.concatenate(parts)
+        else:
+            waveform = _synth(cyrillic_text)
+
+        if len(waveform) < 1600:
+            raise ValueError(f"MMS produced empty audio for: {cyrillic_text!r}")
+
+        # 2. Resample + speed
+        waveform_t = torch.from_numpy(waveform).unsqueeze(0)
+        waveform_22k = torchaudio.functional.resample(waveform_t, mms_sr, 22050).squeeze(0)
+        if speed != 1.0:
+            waveform_22k = torchaudio.functional.resample(
+                waveform_22k.unsqueeze(0), int(22050 * speed), 22050
+            ).squeeze(0)
+        waveform_22k = waveform_22k.numpy().astype(np.float32)
+
+        out_path = CACHE_PATH / f"{uuid.uuid4()}.wav"
+
+        if tau <= 0.0:
+            sf.write(str(out_path), waveform_22k, 22050)
+        else:
+            from openvoice import se_extractor
+            import shutil as _shutil
+
+            ref_bytes = await ref_audio.read()
+            ref_data = _to_mono_22k(ref_bytes)
+
+            # Pad short ref clips to at least 1s for reliable embedding extraction
+            MIN_SAMPLES = 22050
+            if len(ref_data) < MIN_SAMPLES:
+                n = -(-MIN_SAMPLES // len(ref_data))
+                ref_data = np.tile(ref_data, n)[:MIN_SAMPLES].astype(np.float32)
+
+            ref_path = CACHE_PATH / f"ref_{uuid.uuid4()}.wav"
+            sf.write(str(ref_path), ref_data, 22050)
+
+            src_path = CACHE_PATH / f"src_{uuid.uuid4()}.wav"
+            sf.write(str(src_path), waveform_22k, 22050)
+
+            try:
+                # Extract target_se from reference (vad=True filters background noise)
+                try:
+                    target_se, _ = se_extractor.get_se(str(ref_path), _ov_converter, vad=True)
+                except Exception:
+                    target_se, _ = se_extractor.get_se(str(ref_path), _ov_converter, vad=False)
+
+                # Extract src_se from MMS output
+                if len(waveform_22k) < MIN_SAMPLES:
+                    n = -(-MIN_SAMPLES // len(waveform_22k))
+                    padded = np.tile(waveform_22k, n)[:MIN_SAMPLES].astype(np.float32)
+                    se_tmp = CACHE_PATH / f"se_{uuid.uuid4()}.wav"
+                    sf.write(str(se_tmp), padded, 22050)
+                    src_se, _ = se_extractor.get_se(str(se_tmp), _ov_converter, vad=False)
+                    se_tmp.unlink(missing_ok=True)
+                else:
+                    src_se, _ = se_extractor.get_se(str(src_path), _ov_converter, vad=False)
+
+                _ov_converter.convert(
+                    audio_src_path=str(src_path),
+                    src_se=src_se,
+                    tgt_se=target_se,
+                    output_path=str(out_path),
+                    tau=tau,
+                )
+                if not out_path.exists() or out_path.stat().st_size < 1000:
+                    raise RuntimeError("OpenVoice output invalid")
+            except Exception as e:
+                logger.warning(f"OpenVoice with-ref failed ({e}), using raw MMS")
+                _shutil.copy(str(src_path), str(out_path))
+            finally:
+                ref_path.unlink(missing_ok=True)
+                src_path.unlink(missing_ok=True)
+
+        import asyncio
+        response = FileResponse(str(out_path), media_type="audio/wav", filename=out_path.name)
+        async def _cleanup():
+            await asyncio.sleep(60)
+            out_path.unlink(missing_ok=True)
+        asyncio.create_task(_cleanup())
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        logger.error(f"synthesize-with-ref failed: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.delete("/voices/{voice_id}")
 async def delete_voice(voice_id: str):
     import shutil

@@ -584,15 +584,22 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             'seed'     => $seed,
         ];
 
-        try {
-            $wavData = $client->synthesize($voiceId, $text, $options);
-        } catch (\RuntimeException $e) {
-            // MMS service lost voice (pod restart) — re-register and retry once
-            if (!str_contains(strtolower($e->getMessage()), 'not found') && !str_contains($e->getMessage(), '404')) {
-                throw $e;
+        // Try to use original actor's voice as reference for this segment
+        $refAudioBytes = $this->extractSegmentRefAudio();
+
+        if ($refAudioBytes !== null) {
+            $wavData = $client->synthesizeWithRef($text, $refAudioBytes, $options);
+        } else {
+            try {
+                $wavData = $client->synthesize($voiceId, $text, $options);
+            } catch (\RuntimeException $e) {
+                // MMS service lost voice (pod restart) — re-register and retry once
+                if (!str_contains(strtolower($e->getMessage()), 'not found') && !str_contains($e->getMessage(), '404')) {
+                    throw $e;
+                }
+                $voiceId = $this->reRegisterMmsVoice($client, $voiceFile, $cacheKey);
+                $wavData = $client->synthesize($voiceId, $text, $options);
             }
-            $voiceId = $this->reRegisterMmsVoice($client, $voiceFile, $cacheKey);
-            $wavData = $client->synthesize($voiceId, $text, $options);
         }
 
         // Write WAV directly — no encoding artifacts
@@ -601,6 +608,53 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         if (!file_exists($outputMp3) || filesize($outputMp3) < 200) {
             throw new \RuntimeException('MMS synthesis returned empty audio');
         }
+    }
+
+    /**
+     * Extract segment audio from original bg_chunk as voice reference.
+     * Returns WAV bytes, or null if bg_chunk not ready or segment too short.
+     */
+    private function extractSegmentRefAudio(): ?string
+    {
+        $duration = $this->endTime - $this->startTime;
+        if ($duration < 1.0) {
+            return null; // too short for reliable embedding
+        }
+
+        $session  = json_decode(\Illuminate\Support\Facades\Redis::get("instant-dub:{$this->sessionId}") ?? '{}', true);
+        $bgChunks = $session['bg_chunks'] ?? [];
+
+        foreach ($bgChunks as $bgChunk) {
+            $cs   = (float) ($bgChunk['start'] ?? 0);
+            $ce   = (float) ($bgChunk['end']   ?? 0);
+            $path = $bgChunk['path'] ?? null;
+
+            if (!$path || !file_exists($path)) continue;
+            if ($this->startTime < $cs || $this->startTime >= $ce) continue;
+
+            $segOffset = round($this->startTime - $cs, 3);
+            $segDur    = round(min($duration, $ce - $this->startTime), 3);
+
+            $tmpWav = "/tmp/ref_{$this->sessionId}_{$this->index}.wav";
+            $result = \Illuminate\Support\Facades\Process::timeout(10)->run([
+                'ffmpeg', '-y',
+                '-ss', (string) $segOffset,
+                '-t',  (string) $segDur,
+                '-i',  $path,
+                '-af', 'highpass=f=150,lowpass=f=4000',
+                '-ar', '22050', '-ac', '1',
+                $tmpWav,
+            ]);
+
+            if ($result->successful() && file_exists($tmpWav) && filesize($tmpWav) > 2000) {
+                $bytes = file_get_contents($tmpWav);
+                @unlink($tmpWav);
+                return $bytes;
+            }
+            return null;
+        }
+
+        return null;
     }
 
     private function reRegisterMmsVoice(MmsTtsClient $client, ?string $voiceFile, ?string $cacheKey): string

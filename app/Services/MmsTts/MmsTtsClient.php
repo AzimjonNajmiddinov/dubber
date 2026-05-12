@@ -99,6 +99,39 @@ class MmsTtsClient
     }
 
     /**
+     * Synthesize with inline reference audio (original actor's voice clip).
+     * No pre-registered voice needed — ref_audio is used directly for tone color.
+     * Returns raw WAV bytes.
+     */
+    public function synthesizeWithRef(string $text, string $refAudioBytes, array $options = []): string
+    {
+        $tmpRef = tempnam('/tmp', 'mms_ref_') . '.wav';
+        file_put_contents($tmpRef, $refAudioBytes);
+
+        try {
+            $response = Http::timeout(120)
+                ->attach('ref_audio', file_get_contents($tmpRef), 'ref.wav')
+                ->post("{$this->baseUrl}/synthesize-with-ref", [
+                    'text'          => $text,
+                    'language'      => $options['language']      ?? 'uz',
+                    'speed'         => $options['speed']         ?? 1.0,
+                    'tau'           => $options['tau']           ?? 0.9,
+                    'seed'          => $options['seed']          ?? null,
+                    'noise_scale'   => $options['noise_scale']   ?? 0.667,
+                    'noise_scale_w' => $options['noise_scale_w'] ?? 0.8,
+                ]);
+
+            if (!$response->successful()) {
+                throw new \RuntimeException("MMS synthesize-with-ref failed: " . $response->body());
+            }
+
+            return $response->body();
+        } finally {
+            @unlink($tmpRef);
+        }
+    }
+
+    /**
      * Delete a cloned voice from the MMS TTS service.
      */
     public function deleteVoice(string $voiceId): void
