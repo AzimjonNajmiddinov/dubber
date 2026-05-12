@@ -1,76 +1,135 @@
 """
 Demucs GPU service for RunPod.
 Accepts audio file uploads, runs GPU-accelerated stem separation, returns stems.
+Uses demucs Python API directly (no subprocess) to avoid PyTorch in-place op issues.
 """
-import os
-import sys
-import shutil
-import subprocess
-import tempfile
 import hashlib
+import shutil
+import tempfile
 import time
-from pathlib import Path
-from typing import Optional
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
+import numpy as np
+import soundfile as sf
 import torch
+import torchaudio
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 
-# Cache for avoiding re-processing
 _cache_dir = Path("/tmp/demucs_cache")
 _cache_dir.mkdir(exist_ok=True)
+
+_model = None
+_device = "cuda" if torch.cuda.is_available() else "cpu"
+
+
+def _load_model(name: str = "htdemucs"):
+    from demucs.pretrained import get_model
+    m = get_model(name)
+    m.to(_device)
+    m.eval()
+    return m
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: verify GPU and demucs
+    global _model
     print("=== Demucs GPU Service Starting ===")
     if torch.cuda.is_available():
         print(f"GPU: {torch.cuda.get_device_name(0)}")
         print(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
     else:
         print("WARNING: No GPU detected, will use CPU (slow)")
-
-    # Pre-load demucs model
     try:
-        import demucs.pretrained
         print("Loading htdemucs model...")
-        _ = demucs.pretrained.get_model("htdemucs")
+        _model = _load_model("htdemucs")
         print("Model loaded successfully")
     except Exception as e:
         print(f"Model pre-load failed (will load on first request): {e}")
-
     yield
-
-    # Shutdown: cleanup
     shutil.rmtree(_cache_dir, ignore_errors=True)
 
 
 app = FastAPI(title="Demucs GPU Service", lifespan=lifespan)
 
 
-def get_file_hash(file_path: Path) -> str:
-    """Get MD5 hash of file for caching."""
+def _get_file_hash(file_path: Path) -> str:
     h = hashlib.md5()
-    with open(file_path, 'rb') as f:
-        for chunk in iter(lambda: f.read(8192), b''):
+    with open(file_path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
             h.update(chunk)
     return h.hexdigest()
 
 
+def _load_audio_to_tensor(audio_path: Path) -> tuple[torch.Tensor, int]:
+    """Load any audio format to stereo float32 tensor using PyAV + soundfile fallback."""
+    suffix = audio_path.suffix.lower()
+    if suffix in (".wav", ".flac"):
+        wav, sr = torchaudio.load(str(audio_path))
+    else:
+        try:
+            import av
+            container = av.open(str(audio_path))
+            stream = container.streams.audio[0]
+            sr = stream.rate
+            chunks = []
+            for frame in container.decode(stream):
+                chunks.append(frame.to_ndarray())
+            container.close()
+            data = np.ascontiguousarray(
+                np.concatenate(chunks, axis=1).T.astype(np.float32) / 32768.0
+            )
+            wav = torch.from_numpy(data.T)  # (channels, samples)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Audio load failed: {e}")
+    # Ensure stereo
+    if wav.shape[0] == 1:
+        wav = wav.repeat(2, 1)
+    elif wav.shape[0] > 2:
+        wav = wav[:2]
+    return wav, sr
+
+
+def _separate(wav: torch.Tensor, sr: int, model_name: str = "htdemucs") -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Run demucs separation. Returns (vocals, no_vocals) tensors, shape (2, samples).
+    """
+    global _model
+    from demucs.apply import apply_model
+
+    if _model is None:
+        _model = _load_model(model_name)
+
+    target_sr = _model.samplerate
+    if sr != target_sr:
+        wav = torchaudio.functional.resample(wav, sr, target_sr)
+
+    wav = wav.to(_device)
+    wav_batch = wav.unsqueeze(0)  # (1, 2, samples)
+
+    with torch.no_grad():
+        sources = apply_model(_model, wav_batch, device=_device, progress=False)
+    # sources: (1, num_stems, 2, samples)
+    sources = sources[0].cpu()  # (num_stems, 2, samples)
+
+    source_names = _model.sources  # e.g. ['drums', 'bass', 'other', 'vocals']
+    vocals_idx = source_names.index("vocals")
+    vocals = sources[vocals_idx]                      # (2, samples)
+    no_vocals = sources.sum(0) - vocals               # (2, samples)
+
+    return vocals, no_vocals
+
+
 @app.get("/health")
 def health():
-    """Health check endpoint."""
-    gpu_available = torch.cuda.is_available()
-    gpu_name = torch.cuda.get_device_name(0) if gpu_available else None
-
     return {
         "ok": True,
         "service": "demucs",
-        "gpu": gpu_available,
-        "gpu_name": gpu_name,
+        "gpu": torch.cuda.is_available(),
+        "gpu_name": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
         "torch_version": torch.__version__,
+        "model_loaded": _model is not None,
         "cache_size": len(list(_cache_dir.iterdir())) if _cache_dir.exists() else 0,
     }
 
@@ -81,142 +140,43 @@ async def separate(
     model: str = Form("htdemucs"),
     two_stems: str = Form("vocals"),
 ):
-    """
-    Separate audio into stems using Demucs GPU.
-
-    Args:
-        audio: Audio file (WAV, MP3, FLAC, etc.)
-        model: Demucs model to use (default: htdemucs)
-        two_stems: Which stems to separate (default: vocals)
-
-    Returns:
-        JSON with download URLs for stems
-    """
-    # Create temp directory for this request
     work_dir = Path(tempfile.mkdtemp(prefix="demucs_"))
-
     try:
-        # Save uploaded file
         input_path = work_dir / f"input{Path(audio.filename or 'audio.wav').suffix}"
-        with open(input_path, 'wb') as f:
-            content = await audio.read()
-            f.write(content)
+        with open(input_path, "wb") as f:
+            f.write(await audio.read())
 
         if input_path.stat().st_size < 1000:
             raise HTTPException(status_code=400, detail="Audio file too small")
 
-        # Convert to WAV if not already (torchaudio soundfile backend doesn't support AAC)
-        if input_path.suffix.lower() != '.wav':
-            wav_path = work_dir / "input.wav"
-            try:
-                import av
-                import numpy as np
-                import soundfile as sf
-                container = av.open(str(input_path))
-                stream = container.streams.audio[0]
-                chunks = []
-                for frame in container.decode(stream):
-                    chunks.append(frame.to_ndarray())
-                container.close()
-                audio_data = np.concatenate(chunks, axis=1).T.astype(np.float32) / 32768.0
-                sf.write(str(wav_path), audio_data, stream.rate)
-            except ImportError:
-                # PyAV not available, fall back to ffmpeg binary
-                conv = subprocess.run(
-                    ['ffmpeg', '-y', '-i', str(input_path), '-ar', '44100', '-ac', '2', str(wav_path)],
-                    capture_output=True, text=True, timeout=60,
-                )
-                if conv.returncode != 0 or not wav_path.exists():
-                    raise HTTPException(status_code=400, detail=f"Audio conversion failed: {conv.stderr[-500:]}")
-            except Exception as e:
-                raise HTTPException(status_code=400, detail=f"Audio conversion failed: {e}")
-            if not wav_path.exists():
-                raise HTTPException(status_code=400, detail="Audio conversion produced no output")
-            input_path = wav_path
-
-        # Check cache
-        file_hash = get_file_hash(input_path)
+        file_hash = _get_file_hash(input_path)
         cache_key = f"{file_hash}_{model}_{two_stems}"
         cached_dir = _cache_dir / cache_key
 
-        if cached_dir.exists():
-            no_vocals = cached_dir / "no_vocals.wav"
-            if no_vocals.exists():
-                return {
-                    "ok": True,
-                    "cached": True,
-                    "job_id": cache_key,
-                    "no_vocals_url": f"/download/{cache_key}/no_vocals.wav",
-                    "vocals_url": f"/download/{cache_key}/vocals.wav" if (cached_dir / "vocals.wav").exists() else None,
-                }
-
-        # Output directory
-        output_dir = work_dir / "output"
-        output_dir.mkdir()
-
-        # Run demucs with GPU
-        cmd = [
-            sys.executable, "-m", "demucs.separate",
-            "-n", model,
-            f"--two-stems={two_stems}",
-            "-o", str(output_dir),
-            "--device", "cuda" if torch.cuda.is_available() else "cpu",
-            str(input_path),
-        ]
+        if cached_dir.exists() and (cached_dir / "no_vocals.wav").exists():
+            return {
+                "ok": True,
+                "cached": True,
+                "job_id": cache_key,
+                "no_vocals_url": f"/download/{cache_key}/no_vocals.wav",
+                "vocals_url": f"/download/{cache_key}/vocals.wav" if (cached_dir / "vocals.wav").exists() else None,
+            }
 
         start_time = time.time()
 
-        env = os.environ.copy()
-        env["PYTHONWARNINGS"] = "ignore"
-
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=600,  # 10 minute timeout
-                env=env,
-            )
-        except subprocess.TimeoutExpired:
-            raise HTTPException(status_code=504, detail="Separation timed out")
+        wav, sr = _load_audio_to_tensor(input_path)
+        vocals, no_vocals = _separate(wav, sr, model)
 
         elapsed = time.time() - start_time
 
-        # Find output files
-        model_dir = output_dir / model / input_path.stem
-
-        no_vocals_src = None
-        vocals_src = None
-
-        for ext in (".wav", ".flac"):
-            nv = model_dir / f"no_vocals{ext}"
-            v = model_dir / f"vocals{ext}"
-            if nv.exists():
-                no_vocals_src = nv
-            if v.exists():
-                vocals_src = v
-
-        # Fail only if output is missing (non-zero returncode alone may be warnings)
-        if result.returncode != 0 and not no_vocals_src:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Demucs failed: {result.stderr[-1000:]}"
-            )
-
-        if not no_vocals_src:
-            raise HTTPException(status_code=500, detail="no_vocals not generated")
-
-        # Copy to cache directory
         cached_dir.mkdir(parents=True, exist_ok=True)
 
-        no_vocals_dst = cached_dir / "no_vocals.wav"
-        shutil.copy2(no_vocals_src, no_vocals_dst)
+        def _save(tensor: torch.Tensor, path: Path):
+            data = tensor.numpy().T  # (samples, channels)
+            sf.write(str(path), data, _model.samplerate)
 
-        vocals_url = None
-        if vocals_src:
-            vocals_dst = cached_dir / "vocals.wav"
-            shutil.copy2(vocals_src, vocals_dst)
-            vocals_url = f"/download/{cache_key}/vocals.wav"
+        _save(no_vocals, cached_dir / "no_vocals.wav")
+        _save(vocals, cached_dir / "vocals.wav")
 
         return {
             "ok": True,
@@ -224,36 +184,25 @@ async def separate(
             "job_id": cache_key,
             "elapsed_seconds": round(elapsed, 2),
             "no_vocals_url": f"/download/{cache_key}/no_vocals.wav",
-            "vocals_url": vocals_url,
+            "vocals_url": f"/download/{cache_key}/vocals.wav",
         }
 
     finally:
-        # Cleanup work directory
         shutil.rmtree(work_dir, ignore_errors=True)
 
 
 @app.get("/download/{job_id}/{filename}")
 def download(job_id: str, filename: str):
-    """Download a separated stem file."""
-    # Validate filename
     if filename not in ("no_vocals.wav", "vocals.wav"):
         raise HTTPException(status_code=400, detail="Invalid filename")
-
     file_path = _cache_dir / job_id / filename
-
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="File not found")
-
-    return FileResponse(
-        path=file_path,
-        media_type="audio/wav",
-        filename=filename,
-    )
+    return FileResponse(path=file_path, media_type="audio/wav", filename=filename)
 
 
 @app.delete("/cache/{job_id}")
 def delete_cache(job_id: str):
-    """Delete cached stems for a job."""
     cached_dir = _cache_dir / job_id
     if cached_dir.exists():
         shutil.rmtree(cached_dir, ignore_errors=True)
@@ -263,18 +212,12 @@ def delete_cache(job_id: str):
 
 @app.post("/cleanup-cache")
 def cleanup_cache(max_age_hours: int = 2):
-    """Remove cache entries older than max_age_hours."""
     now = time.time()
-    max_age_seconds = max_age_hours * 3600
     deleted = 0
-
     for entry in _cache_dir.iterdir():
-        if entry.is_dir():
-            age = now - entry.stat().st_mtime
-            if age > max_age_seconds:
-                shutil.rmtree(entry, ignore_errors=True)
-                deleted += 1
-
+        if entry.is_dir() and now - entry.stat().st_mtime > max_age_hours * 3600:
+            shutil.rmtree(entry, ignore_errors=True)
+            deleted += 1
     return {"ok": True, "deleted_entries": deleted}
 
 
