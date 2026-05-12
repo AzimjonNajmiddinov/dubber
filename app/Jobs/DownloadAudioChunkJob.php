@@ -306,15 +306,14 @@ class DownloadAudioChunkJob implements ShouldQueue
                 'session' => $this->sessionId,
             ]);
 
-            // playable = true: bg-0 + bg-1 + bg-2 uchta chunk diskda bo'lganda qo'yamiz.
-            // Bu iOS playerga 96s bufer beradi, TTS segmentlari bg-2 ga yetib kelishga vaqt qoladi.
+            // playable = true: bg-0..bg-4 (5 ta chunk = 160s) diskda bo'lganda qo'yamiz.
+            // Bu iOS playerga yetarli bufer beradi, TTS segmentlari yetib kelishga vaqt qoladi.
             $aacDir0 = storage_path("app/instant-dub/{$this->sessionId}/aac");
-            $bg0 = "{$aacDir0}/bg-0.aac";
-            $bg1 = "{$aacDir0}/bg-1.aac";
-            $bg2 = "{$aacDir0}/bg-2.aac";
-            $threeReady = file_exists($bg0) && filesize($bg0) > 10
-                       && file_exists($bg1) && filesize($bg1) > 10
-                       && file_exists($bg2) && filesize($bg2) > 10;
+            $threeReady = true;
+            for ($bi = 0; $bi <= 4; $bi++) {
+                $f = "{$aacDir0}/bg-{$bi}.aac";
+                if (!file_exists($f) || filesize($f) <= 10) { $threeReady = false; break; }
+            }
             if ($threeReady) {
                 $lua = <<<'LUA'
                     local data = redis.call('GET', KEYS[1])
