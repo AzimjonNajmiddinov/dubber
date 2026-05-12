@@ -289,7 +289,7 @@ class DownloadAudioChunkJob implements ShouldQueue
         }
 
         $filter = implode(';', $filters) . ';' . implode('', $mixInputs)
-            . "amix=inputs={$inputIdx}:duration=first:normalize=0";
+            . "amix=inputs=" . count($mixInputs) . ":duration=first:normalize=0";
 
         $cmd = array_merge($cmd, [
             '-filter_complex', $filter,
