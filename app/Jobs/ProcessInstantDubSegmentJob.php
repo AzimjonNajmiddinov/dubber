@@ -632,38 +632,43 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         foreach ($bgChunks as $bgChunk) {
             $cs   = (float) ($bgChunk['start'] ?? 0);
             $ce   = (float) ($bgChunk['end']   ?? 0);
-            $path = $bgChunk['path'] ?? null;
 
-            if (!$path || !file_exists($path)) {
-                Log::info("[DUB] Segment #{$this->index} ref chunk {$cs}-{$ce} missing: {$path}", ['session' => $this->sessionId]);
+            if ($this->startTime < $cs || $this->startTime >= $ce) continue;
+
+            // vocals_path (Demucs) mavjud bo'lsa — toza ref, yo'q bo'lsa original
+            $vocalsPath = $bgChunk['vocals_path'] ?? null;
+            $rawPath    = $bgChunk['path'] ?? null;
+            $useVocals  = $vocalsPath && file_exists($vocalsPath) && filesize($vocalsPath) > 1000;
+            $refPath    = $useVocals ? $vocalsPath : $rawPath;
+
+            if (!$refPath || !file_exists($refPath)) {
                 continue;
             }
-            if ($this->startTime < $cs || $this->startTime >= $ce) continue;
 
             $segOffset = round($this->startTime - $cs, 3);
             $segDur    = round(min($duration, $ce - $this->startTime), 3);
 
-            Log::info("[DUB] Segment #{$this->index} ref cutting chunk {$cs}-{$ce} offset={$segOffset} dur={$segDur}", ['session' => $this->sessionId]);
+            Log::info("[DUB] Segment #{$this->index} ref cutting " . ($useVocals ? 'vocals' : 'raw') . " {$cs}-{$ce} offset={$segOffset} dur={$segDur}", ['session' => $this->sessionId]);
 
             $tmpWav = "/tmp/ref_{$this->sessionId}_{$this->index}.wav";
-            $result = \Illuminate\Support\Facades\Process::timeout(10)->run([
-                'ffmpeg', '-y',
-                '-ss', (string) $segOffset,
-                '-t',  (string) $segDur,
-                '-i',  $path,
-                '-af', 'highpass=f=150,lowpass=f=4000',
-                '-ar', '22050', '-ac', '1',
-                $tmpWav,
-            ]);
+
+            // vocals allaqachon toza — filter kerak emas; raw da esa frequency filter
+            $ffmpegArgs = ['ffmpeg', '-y', '-ss', (string) $segOffset, '-t', (string) $segDur, '-i', $refPath];
+            if (!$useVocals) {
+                $ffmpegArgs = array_merge($ffmpegArgs, ['-af', 'highpass=f=150,lowpass=f=4000']);
+            }
+            $ffmpegArgs = array_merge($ffmpegArgs, ['-ar', '22050', '-ac', '1', $tmpWav]);
+
+            $result = \Illuminate\Support\Facades\Process::timeout(10)->run($ffmpegArgs);
 
             if ($result->successful() && file_exists($tmpWav) && filesize($tmpWav) > 2000) {
                 $bytes = file_get_contents($tmpWav);
                 @unlink($tmpWav);
-                Log::info("[DUB] Segment #{$this->index} ref extracted ok bytes=" . strlen($bytes), ['session' => $this->sessionId]);
+                Log::info("[DUB] Segment #{$this->index} ref ok bytes=" . strlen($bytes) . " (" . ($useVocals ? 'vocals' : 'raw') . ")", ['session' => $this->sessionId]);
                 return $bytes;
             }
 
-            Log::warning("[DUB] Segment #{$this->index} ref ffmpeg failed or empty: " . $result->errorOutput(), ['session' => $this->sessionId]);
+            Log::warning("[DUB] Segment #{$this->index} ref ffmpeg failed: " . $result->errorOutput(), ['session' => $this->sessionId]);
             return null;
         }
 
