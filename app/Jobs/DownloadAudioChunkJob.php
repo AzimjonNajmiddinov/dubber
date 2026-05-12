@@ -187,15 +187,37 @@ class DownloadAudioChunkJob implements ShouldQueue
             $noVocalsUrl = $demucsUrl . ($data['no_vocals_url'] ?? '');
             $vocalsUrl   = $demucsUrl . ($data['vocals_url']   ?? '');
 
-            // no_vocals yuklab olish
+            // no_vocals yuklab olish va AAC ga siqish (WAV 5.4MB → AAC ~400KB)
             $nvResp = Http::timeout(60)->get($noVocalsUrl);
             if (!$nvResp->successful()) return [null, null];
-            file_put_contents($noVocalsOut, $nvResp->body());
+            $tmpWav = $noVocalsOut . '.tmp.wav';
+            file_put_contents($tmpWav, $nvResp->body());
+            $aacOut = preg_replace('/\.wav$/', '.aac', $noVocalsOut);
+            $conv = Process::timeout(30)->run([
+                'ffmpeg', '-y', '-i', $tmpWav,
+                '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '96k', '-f', 'adts', $aacOut,
+            ]);
+            @unlink($tmpWav);
+            if ($conv->successful() && file_exists($aacOut) && filesize($aacOut) > 1000) {
+                $noVocalsOut = $aacOut;
+            } else {
+                // fallback: WAV saqlash
+                file_put_contents($noVocalsOut, $nvResp->body());
+            }
 
-            // vocals yuklab olish
+            // vocals yuklab olish va AAC ga siqish
             $vResp = Http::timeout(60)->get($vocalsUrl);
             if ($vResp->successful()) {
-                file_put_contents($vocalsOut, $vResp->body());
+                $tmpVWav = $vocalsOut . '.tmp.wav';
+                file_put_contents($tmpVWav, $vResp->body());
+                $vAacOut = preg_replace('/\.wav$/', '.aac', $vocalsOut);
+                $vConv = Process::timeout(30)->run([
+                    'ffmpeg', '-y', '-i', $tmpVWav,
+                    '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '96k', '-f', 'adts', $vAacOut,
+                ]);
+                @unlink($tmpVWav);
+                $vocalsOut = ($vConv->successful() && file_exists($vAacOut) && filesize($vAacOut) > 1000)
+                    ? $vAacOut : null;
             } else {
                 $vocalsOut = null;
             }
