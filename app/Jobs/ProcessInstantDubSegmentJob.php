@@ -831,8 +831,6 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             if session['segments_ready'] >= total then
                 session['status'] = 'complete'
                 session['playable'] = true
-            elseif not session['playable'] and session['segments_ready'] >= math.min(math.ceil(total * 0.1), 30) then
-                session['playable'] = true
             end
             redis.call('SETEX', KEYS[1], 50400, cjson.encode(session))
             return session['segments_ready']

@@ -221,6 +221,22 @@ class DownloadAudioChunkJob implements ShouldQueue
             Log::info("[DUB] bg-{$this->chunkIndex}.aac ready (" . round($this->startTime) . "-" . round($this->endTime) . "s, tts=" . ($inputIdx - 2) . ")", [
                 'session' => $this->sessionId,
             ]);
+
+            // bg-0.aac tayyor bo'ldi = player endi xavfsiz load qila oladi.
+            // playable = true ni faqat shu payt qo'yamiz (segment soni emas, disk fayl asosida).
+            if ($this->chunkIndex === 0 && file_exists($outFile) && filesize($outFile) > 10) {
+                $lua = <<<'LUA'
+                    local data = redis.call('GET', KEYS[1])
+                    if not data then return 0 end
+                    local session = cjson.decode(data)
+                    if not session['playable'] then
+                        session['playable'] = true
+                        redis.call('SETEX', KEYS[1], 50400, cjson.encode(session))
+                    end
+                    return 1
+                LUA;
+                \Illuminate\Support\Facades\Redis::eval($lua, 1, "instant-dub:{$this->sessionId}");
+            }
         } else {
             Log::warning("[DUB] bg-{$this->chunkIndex}.aac failed", [
                 'session' => $this->sessionId,
