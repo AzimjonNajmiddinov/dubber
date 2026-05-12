@@ -233,6 +233,21 @@ class DownloadAudioChunkJob implements ShouldQueue
 
     public function generateBgChunkAac(string $bgAudioPath, ?string $noVocalsPath = null): void
     {
+        // Race condition oldini olish: bir vaqtda faqat bitta process bg-N.aac ga yozsin
+        $lock = \Illuminate\Support\Facades\Cache::lock(
+            "bg-gen:{$this->sessionId}:{$this->chunkIndex}", 30
+        );
+        if (!$lock->get()) return; // Boshqa process yozayapti — skip qil
+
+        try {
+        $this->generateBgChunkAacInner($bgAudioPath, $noVocalsPath);
+        } finally {
+            $lock->release();
+        }
+    }
+
+    private function generateBgChunkAacInner(string $bgAudioPath, ?string $noVocalsPath = null): void
+    {
         $sessionKey = "instant-dub:{$this->sessionId}";
         $sessionJson = Redis::get($sessionKey);
         if (!$sessionJson) return;
