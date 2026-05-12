@@ -588,8 +588,10 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         $refAudioBytes = $this->extractSegmentRefAudio();
 
         if ($refAudioBytes !== null) {
+            Log::info("[DUB] Segment #{$this->index} synthesizeWithRef (ref bytes=" . strlen($refAudioBytes) . ")", ['session' => $this->sessionId]);
             $wavData = $client->synthesizeWithRef($text, $refAudioBytes, $options);
         } else {
+            Log::info("[DUB] Segment #{$this->index} no ref audio — using pool voice", ['session' => $this->sessionId]);
             try {
                 $wavData = $client->synthesize($voiceId, $text, $options);
             } catch (\RuntimeException $e) {
@@ -618,22 +620,30 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
     {
         $duration = $this->endTime - $this->startTime;
         if ($duration < 1.0) {
-            return null; // too short for reliable embedding
+            Log::info("[DUB] Segment #{$this->index} ref skip: too short ({$duration}s)", ['session' => $this->sessionId]);
+            return null;
         }
 
         $session  = json_decode(\Illuminate\Support\Facades\Redis::get("instant-dub:{$this->sessionId}") ?? '{}', true);
         $bgChunks = $session['bg_chunks'] ?? [];
+
+        Log::info("[DUB] Segment #{$this->index} ref search: start={$this->startTime} end={$this->endTime} chunks=" . count($bgChunks), ['session' => $this->sessionId]);
 
         foreach ($bgChunks as $bgChunk) {
             $cs   = (float) ($bgChunk['start'] ?? 0);
             $ce   = (float) ($bgChunk['end']   ?? 0);
             $path = $bgChunk['path'] ?? null;
 
-            if (!$path || !file_exists($path)) continue;
+            if (!$path || !file_exists($path)) {
+                Log::info("[DUB] Segment #{$this->index} ref chunk {$cs}-{$ce} missing: {$path}", ['session' => $this->sessionId]);
+                continue;
+            }
             if ($this->startTime < $cs || $this->startTime >= $ce) continue;
 
             $segOffset = round($this->startTime - $cs, 3);
             $segDur    = round(min($duration, $ce - $this->startTime), 3);
+
+            Log::info("[DUB] Segment #{$this->index} ref cutting chunk {$cs}-{$ce} offset={$segOffset} dur={$segDur}", ['session' => $this->sessionId]);
 
             $tmpWav = "/tmp/ref_{$this->sessionId}_{$this->index}.wav";
             $result = \Illuminate\Support\Facades\Process::timeout(10)->run([
@@ -649,11 +659,15 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             if ($result->successful() && file_exists($tmpWav) && filesize($tmpWav) > 2000) {
                 $bytes = file_get_contents($tmpWav);
                 @unlink($tmpWav);
+                Log::info("[DUB] Segment #{$this->index} ref extracted ok bytes=" . strlen($bytes), ['session' => $this->sessionId]);
                 return $bytes;
             }
+
+            Log::warning("[DUB] Segment #{$this->index} ref ffmpeg failed or empty: " . $result->errorOutput(), ['session' => $this->sessionId]);
             return null;
         }
 
+        Log::info("[DUB] Segment #{$this->index} ref: no matching chunk found", ['session' => $this->sessionId]);
         return null;
     }
 
