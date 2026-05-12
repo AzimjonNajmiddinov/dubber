@@ -74,12 +74,17 @@ def _load_audio_to_tensor(audio_path: Path) -> tuple[torch.Tensor, int]:
             stream = container.streams.audio[0]
             sr = stream.rate
             chunks = []
+            fmt = None
             for frame in container.decode(stream):
+                fmt = frame.format.name
                 chunks.append(frame.to_ndarray())
             container.close()
-            data = np.ascontiguousarray(
-                np.concatenate(chunks, axis=1).T.astype(np.float32) / 32768.0
-            )
+            raw = np.concatenate(chunks, axis=1).T  # (samples, channels)
+            # fltp/flt = already float [-1,1]; s16p/s16 = int16, divide by 32768
+            if fmt and fmt.startswith('s16'):
+                data = np.ascontiguousarray(raw.astype(np.float32) / 32768.0)
+            else:
+                data = np.ascontiguousarray(raw.astype(np.float32))
             wav = torch.from_numpy(data.T)  # (channels, samples)
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Audio load failed: {e}")
