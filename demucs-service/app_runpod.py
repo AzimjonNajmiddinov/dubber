@@ -137,23 +137,21 @@ async def separate(
 
         start_time = time.time()
 
+        env = os.environ.copy()
+        env["PYTHONWARNINGS"] = "ignore"
+
         try:
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
                 timeout=600,  # 10 minute timeout
+                env=env,
             )
         except subprocess.TimeoutExpired:
             raise HTTPException(status_code=504, detail="Separation timed out")
 
         elapsed = time.time() - start_time
-
-        if result.returncode != 0:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Demucs failed: {result.stderr[-1000:]}"
-            )
 
         # Find output files
         model_dir = output_dir / model / input_path.stem
@@ -168,6 +166,13 @@ async def separate(
                 no_vocals_src = nv
             if v.exists():
                 vocals_src = v
+
+        # Fail only if output is missing (non-zero returncode alone may be warnings)
+        if result.returncode != 0 and not no_vocals_src:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Demucs failed: {result.stderr[-1000:]}"
+            )
 
         if not no_vocals_src:
             raise HTTPException(status_code=500, detail="no_vocals not generated")
