@@ -108,12 +108,22 @@ async def separate(
         # Convert to WAV if not already (torchaudio soundfile backend doesn't support AAC)
         if input_path.suffix.lower() != '.wav':
             wav_path = work_dir / "input.wav"
-            conv = subprocess.run(
-                ['ffmpeg', '-y', '-i', str(input_path), '-ar', '44100', '-ac', '2', str(wav_path)],
-                capture_output=True, text=True, timeout=60,
-            )
-            if conv.returncode != 0 or not wav_path.exists():
-                raise HTTPException(status_code=400, detail=f"Audio conversion failed: {conv.stderr[-500:]}")
+            try:
+                import av
+                import numpy as np
+                import soundfile as sf
+                container = av.open(str(input_path))
+                stream = container.streams.audio[0]
+                chunks = []
+                for frame in container.decode(stream):
+                    chunks.append(frame.to_ndarray())
+                container.close()
+                audio_data = np.concatenate(chunks, axis=1).T.astype(np.float32) / 32768.0
+                sf.write(str(wav_path), audio_data, stream.rate)
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Audio conversion failed: {e}")
+            if not wav_path.exists():
+                raise HTTPException(status_code=400, detail="Audio conversion produced no output")
             input_path = wav_path
 
         # Check cache
