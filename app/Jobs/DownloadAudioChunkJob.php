@@ -258,7 +258,7 @@ class DownloadAudioChunkJob implements ShouldQueue
             $filters = ['[1:a]volume=0.2,aresample=44100[bg]'];
         }
         $mixInputs = ['[0:a]', '[bg]'];
-        $inputIdx  = 2;
+        $inputIdx  = $useNoVocals ? 3 : 2; // no_vocals case: inputs 0,1,2 band; TTS dan 3
         $tmpFiles  = [];
 
         for ($i = 0; $i < $total; $i++) {
