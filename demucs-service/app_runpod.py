@@ -120,6 +120,14 @@ async def separate(
                 container.close()
                 audio_data = np.concatenate(chunks, axis=1).T.astype(np.float32) / 32768.0
                 sf.write(str(wav_path), audio_data, stream.rate)
+            except ImportError:
+                # PyAV not available, fall back to ffmpeg binary
+                conv = subprocess.run(
+                    ['ffmpeg', '-y', '-i', str(input_path), '-ar', '44100', '-ac', '2', str(wav_path)],
+                    capture_output=True, text=True, timeout=60,
+                )
+                if conv.returncode != 0 or not wav_path.exists():
+                    raise HTTPException(status_code=400, detail=f"Audio conversion failed: {conv.stderr[-500:]}")
             except Exception as e:
                 raise HTTPException(status_code=400, detail=f"Audio conversion failed: {e}")
             if not wav_path.exists():
