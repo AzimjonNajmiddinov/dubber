@@ -235,7 +235,7 @@ class DownloadAudioChunkJob implements ShouldQueue
             }
         }
 
-        // Demucs bor: no_vocals 85% + original 12% (energiyani saqlab qolish uchun)
+        // Demucs bor: no_vocals 85% + original 12% barcha TTS bilan bitta amixda
         // Demucs yo'q: original 20% (fallback)
         if ($useNoVocals) {
             $cmd = [
@@ -247,18 +247,19 @@ class DownloadAudioChunkJob implements ShouldQueue
             $filters   = [
                 '[1:a]volume=0.85,aresample=44100[nv]',
                 '[2:a]volume=0.12,aresample=44100[orig]',
-                '[nv][orig]amix=inputs=2:duration=first:normalize=0[bg]',
             ];
+            $mixInputs = ['[0:a]', '[nv]', '[orig]'];
+            $inputIdx  = 3;
         } else {
             $cmd = [
                 'ffmpeg', '-y',
                 '-f', 'lavfi', '-t', (string) $chunkDur, '-i', 'anullsrc=r=44100:cl=mono',
                 '-t', (string) $chunkDur, '-i', $bgAudioPath,
             ];
-            $filters = ['[1:a]volume=0.2,aresample=44100[bg]'];
+            $filters   = ['[1:a]volume=0.2,aresample=44100[bg]'];
+            $mixInputs = ['[0:a]', '[bg]'];
+            $inputIdx  = 2;
         }
-        $mixInputs = ['[0:a]', '[bg]'];
-        $inputIdx  = $useNoVocals ? 3 : 2; // no_vocals case: inputs 0,1,2 band; TTS dan 3
         $tmpFiles  = [];
 
         for ($i = 0; $i < $total; $i++) {
