@@ -102,36 +102,28 @@ class DownloadAudioChunkJob implements ShouldQueue
             return;
         }
 
-        // Demucs: vocals + no_vocals ajratish
-        $workDir = storage_path("app/instant-dub/{$this->sessionId}");
-        $vocalsPath   = "{$workDir}/vocals_{$this->chunkIndex}.wav";
-        $noVocalsPath = "{$workDir}/no_vocals_{$this->chunkIndex}.wav";
-        [$vocalsPath, $noVocalsPath] = $this->runDemucs($chunkFile, $vocalsPath, $noVocalsPath);
-
-        // bg_chunks ga path + vocals + no_vocals saqlash
+        // bg_chunks ga path saqlash
         $lock = \Illuminate\Support\Facades\Cache::lock("instant-dub:{$this->sessionId}:bg-lock", 10);
-        $lock->block(10, function () use ($sessionKey, $chunkFile, $vocalsPath, $noVocalsPath) {
+        $lock->block(10, function () use ($sessionKey, $chunkFile) {
             $sessionJson = Redis::get($sessionKey);
             if (!$sessionJson) return;
             $s = json_decode($sessionJson, true);
             $s['original_audio_path'] = $chunkFile;
             $bgChunks = $s['bg_chunks'] ?? [];
             $bgChunks[$this->chunkIndex] = [
-                'path'          => $chunkFile,
-                'vocals_path'   => $vocalsPath,
-                'no_vocals_path'=> $noVocalsPath,
-                'start'         => $this->startTime,
-                'end'           => $this->endTime,
+                'path'  => $chunkFile,
+                'start' => $this->startTime,
+                'end'   => $this->endTime,
             ];
             $s['bg_chunks'] = $bgChunks;
             Redis::setex($sessionKey, 50400, json_encode($s));
         });
 
-        Log::info("[DUB] Audio chunk {$this->chunkIndex} ready (" . round($this->startTime) . "-" . round($this->endTime) . "s, " . round(filesize($chunkFile) / 1024) . " KB, demucs=" . ($noVocalsPath ? 'ok' : 'skip') . ")", [
+        Log::info("[DUB] Audio chunk {$this->chunkIndex} ready (" . round($this->startTime) . "-" . round($this->endTime) . "s, " . round(filesize($chunkFile) / 1024) . " KB)", [
             'session' => $this->sessionId,
         ]);
 
-        $this->generateBgChunkAac($chunkFile, $noVocalsPath);
+        $this->generateBgChunkAac($chunkFile);
         $this->applyEnergyTransferToOverlappingSegments($chunkFile);
 
         // Check if all TTS segments are ready + bg is now available → set complete/playable
@@ -158,80 +150,7 @@ class DownloadAudioChunkJob implements ShouldQueue
         Redis::eval($lua, 1, "instant-dub:{$this->sessionId}");
     }
 
-    /**
-     * Demucs orqali vocals + no_vocals ajratish.
-     * Muvaffaqiyatsiz bo'lsa [null, null] qaytaradi (fallback: original audio).
-     */
-    private function runDemucs(string $chunkFile, string $vocalsOut, string $noVocalsOut): array
-    {
-        $demucsUrl = rtrim(config('services.demucs.url', env('DEMUCS_SERVICE_URL', '')), '/');
-        if (!$demucsUrl) return [null, null];
-
-        try {
-            $chunkDur = $this->endTime - $this->startTime;
-            $timeout  = max(60, (int) ceil($chunkDur * 3) + 30);
-
-            $response = Http::timeout($timeout)
-                ->attach('audio', file_get_contents($chunkFile), basename($chunkFile))
-                ->post("{$demucsUrl}/separate", [
-                    'model'      => 'htdemucs',
-                    'two_stems'  => 'vocals',
-                ]);
-
-            if (!$response->successful()) {
-                Log::warning("[DUB] Demucs chunk {$this->chunkIndex} failed: " . $response->body(), ['session' => $this->sessionId]);
-                return [null, null];
-            }
-
-            $data = $response->json();
-            $noVocalsUrl = $demucsUrl . ($data['no_vocals_url'] ?? '');
-            $vocalsUrl   = $demucsUrl . ($data['vocals_url']   ?? '');
-
-            // no_vocals yuklab olish va AAC ga siqish (WAV 5.4MB → AAC ~400KB)
-            $nvResp = Http::timeout(60)->get($noVocalsUrl);
-            if (!$nvResp->successful()) return [null, null];
-            $tmpWav = $noVocalsOut . '.tmp.wav';
-            file_put_contents($tmpWav, $nvResp->body());
-            $aacOut = preg_replace('/\.wav$/', '.aac', $noVocalsOut);
-            $conv = Process::timeout(30)->run([
-                'ffmpeg', '-y', '-i', $tmpWav,
-                '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '96k', '-f', 'adts', $aacOut,
-            ]);
-            @unlink($tmpWav);
-            if ($conv->successful() && file_exists($aacOut) && filesize($aacOut) > 1000) {
-                $noVocalsOut = $aacOut;
-            } else {
-                // fallback: WAV saqlash
-                file_put_contents($noVocalsOut, $nvResp->body());
-            }
-
-            // vocals yuklab olish va AAC ga siqish
-            $vResp = Http::timeout(60)->get($vocalsUrl);
-            if ($vResp->successful()) {
-                $tmpVWav = $vocalsOut . '.tmp.wav';
-                file_put_contents($tmpVWav, $vResp->body());
-                $vAacOut = preg_replace('/\.wav$/', '.aac', $vocalsOut);
-                $vConv = Process::timeout(30)->run([
-                    'ffmpeg', '-y', '-i', $tmpVWav,
-                    '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '96k', '-f', 'adts', $vAacOut,
-                ]);
-                @unlink($tmpVWav);
-                $vocalsOut = ($vConv->successful() && file_exists($vAacOut) && filesize($vAacOut) > 1000)
-                    ? $vAacOut : null;
-            } else {
-                $vocalsOut = null;
-            }
-
-            Log::info("[DUB] Demucs chunk {$this->chunkIndex} ok (vocals=" . ($vocalsOut ? 'yes' : 'no') . ")", ['session' => $this->sessionId]);
-            return [$vocalsOut, $noVocalsOut];
-
-        } catch (\Throwable $e) {
-            Log::warning("[DUB] Demucs chunk {$this->chunkIndex} exception: " . $e->getMessage(), ['session' => $this->sessionId]);
-            return [null, null];
-        }
-    }
-
-    public function generateBgChunkAac(string $bgAudioPath, ?string $noVocalsPath = null): void
+    public function generateBgChunkAac(string $bgAudioPath): void
     {
         // Race condition oldini olish: bir vaqtda faqat bitta process bg-N.aac ga yozsin
         $lock = \Illuminate\Support\Facades\Cache::lock(
@@ -240,13 +159,13 @@ class DownloadAudioChunkJob implements ShouldQueue
         if (!$lock->get()) return; // Boshqa process yozayapti — skip qil
 
         try {
-        $this->generateBgChunkAacInner($bgAudioPath, $noVocalsPath);
+            $this->generateBgChunkAacInner($bgAudioPath);
         } finally {
             $lock->release();
         }
     }
 
-    private function generateBgChunkAacInner(string $bgAudioPath, ?string $noVocalsPath = null): void
+    private function generateBgChunkAacInner(string $bgAudioPath): void
     {
         $sessionKey = "instant-dub:{$this->sessionId}";
         $sessionJson = Redis::get($sessionKey);
@@ -260,41 +179,19 @@ class DownloadAudioChunkJob implements ShouldQueue
         $chunkDur = round($this->frameAlignedDuration($this->startTime, $this->endTime), 6);
         $outFile  = "{$aacDir}/bg-{$this->chunkIndex}.aac";
 
-        // no_vocals mavjud bo'lsa session dan ham tekshirib olish
-        $useNoVocals = $noVocalsPath && file_exists($noVocalsPath) && filesize($noVocalsPath) > 1000;
-        if (!$useNoVocals) {
-            $freshJson = Redis::get($sessionKey);
-            $fresh = $freshJson ? json_decode($freshJson, true) : [];
-            $nvPath = $fresh['bg_chunks'][$this->chunkIndex]['no_vocals_path'] ?? null;
-            if ($nvPath && file_exists($nvPath) && filesize($nvPath) > 1000) {
-                $noVocalsPath = $nvPath;
-                $useNoVocals  = true;
-            }
-        }
-
-        // Demucs bor: no_vocals 100%
-        // Demucs yo'q: original 20% (fallback)
-        if ($useNoVocals) {
-            $cmd = [
-                'ffmpeg', '-y',
-                '-f', 'lavfi', '-t', (string) $chunkDur, '-i', 'anullsrc=r=44100:cl=mono',
-                '-t', (string) $chunkDur, '-i', $noVocalsPath,
-            ];
-            $filters   = [
-                '[1:a]volume=1.0,aresample=44100[nv]',
-            ];
-            $mixInputs = ['[0:a]', '[nv]'];
-            $inputIdx  = 2;
-        } else {
-            $cmd = [
-                'ffmpeg', '-y',
-                '-f', 'lavfi', '-t', (string) $chunkDur, '-i', 'anullsrc=r=44100:cl=mono',
-                '-t', (string) $chunkDur, '-i', $bgAudioPath,
-            ];
-            $filters   = ['[1:a]volume=0.2,aresample=44100[bg]'];
-            $mixInputs = ['[0:a]', '[bg]'];
-            $inputIdx  = 2;
-        }
+        // Stereo center cancellation: pan=stereo|c0=c0-0.7*c1|c1=c1-0.7*c0
+        // Filmda ovozlar center-da (L≈R), musiqa/effektlar stereo (L≠R).
+        // 70% koeffitsient: center 70% pasayadi, stereo effektlar saqlanadi.
+        $cmd = [
+            'ffmpeg', '-y',
+            '-f', 'lavfi', '-t', (string) $chunkDur, '-i', 'anullsrc=r=44100:cl=stereo',
+            '-t', (string) $chunkDur, '-i', $bgAudioPath,
+        ];
+        $filters   = [
+            '[1:a]pan=stereo|c0=c0-0.7*c1|c1=c1-0.7*c0,volume=1.5,aresample=44100[bg]',
+        ];
+        $mixInputs = ['[0:a]', '[bg]'];
+        $inputIdx  = 2;
         $tmpFiles  = [];
 
         for ($i = 0; $i < $total; $i++) {
