@@ -105,6 +105,17 @@ async def separate(
         if input_path.stat().st_size < 1000:
             raise HTTPException(status_code=400, detail="Audio file too small")
 
+        # Convert to WAV if not already (torchaudio soundfile backend doesn't support AAC)
+        if input_path.suffix.lower() != '.wav':
+            wav_path = work_dir / "input.wav"
+            conv = subprocess.run(
+                ['ffmpeg', '-y', '-i', str(input_path), '-ar', '44100', '-ac', '2', str(wav_path)],
+                capture_output=True, text=True, timeout=60,
+            )
+            if conv.returncode != 0 or not wav_path.exists():
+                raise HTTPException(status_code=400, detail=f"Audio conversion failed: {conv.stderr[-500:]}")
+            input_path = wav_path
+
         # Check cache
         file_hash = get_file_hash(input_path)
         cache_key = f"{file_hash}_{model}_{two_stems}"
