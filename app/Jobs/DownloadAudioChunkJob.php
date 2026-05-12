@@ -216,7 +216,7 @@ class DownloadAudioChunkJob implements ShouldQueue
             $cmd[] = (string) round($ttsSeek, 3);
             $cmd[] = '-i';
             $cmd[] = $tmpMp3;
-            $filters[]   = "[{$inputIdx}:a]adelay={$ttsDelayMs}|{$ttsDelayMs},aresample=44100[tts{$inputIdx}]";
+            $filters[]   = "[{$inputIdx}:a]adelay={$ttsDelayMs}|{$ttsDelayMs},volume=2.5,aresample=44100[tts{$inputIdx}]";
             $mixInputs[] = "[tts{$inputIdx}]";
             $inputIdx++;
         }
