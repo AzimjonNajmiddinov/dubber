@@ -455,7 +455,7 @@ class InstantDubController extends Controller
 
             // Inject dub audio track BEFORE existing audio tracks so iOS picks it first
             if (!$dubInjected && str_starts_with($trimmed, '#EXT-X-MEDIA') && str_contains($trimmed, 'TYPE=AUDIO')) {
-                $output[] = "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"{$groupId}\",NAME=\"{$dubName}\",LANGUAGE=\"{$lang}\",URI=\"dub-audio.m3u8\",DEFAULT=YES,AUTOSELECT=YES";
+                $output[] = "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"{$groupId}\",NAME=\"{$dubName}\",LANGUAGE=\"{$lang}\",URI=\"dub-audio.m3u8\",DEFAULT=YES,AUTOSELECT=YES,CHANNELS=\"1\"";
                 $dubInjected = true;
             }
 
@@ -464,7 +464,7 @@ class InstantDubController extends Controller
                 if (!$existingAudioGroup) {
                     $output[] = "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"{$groupId}\",NAME=\"Original\",DEFAULT=NO,AUTOSELECT=NO";
                 }
-                $output[] = "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"{$groupId}\",NAME=\"{$dubName}\",LANGUAGE=\"{$lang}\",URI=\"dub-audio.m3u8\",DEFAULT=YES,AUTOSELECT=YES";
+                $output[] = "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"{$groupId}\",NAME=\"{$dubName}\",LANGUAGE=\"{$lang}\",URI=\"dub-audio.m3u8\",DEFAULT=YES,AUTOSELECT=YES,CHANNELS=\"1\"";
                 $output[] = "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"{$subsGroupId}\",NAME=\"{$subName}\",LANGUAGE=\"{$lang}\",URI=\"dub-subtitles.m3u8\",DEFAULT=YES,AUTOSELECT=YES,FORCED=NO";
                 $dubInjected = true;
             }
@@ -586,13 +586,9 @@ class InstantDubController extends Controller
         }
         $availableBg = $readyCount;
 
-        // If nothing is ready yet, serve a short silence placeholder so the
-        // EVENT playlist stays syntactically valid while we wait.
-        if (empty($entries) && !$allDone) {
-            $entries[] = ['uri' => 'dub-segment/bg-0.aac', 'duration' => 5.0];
-        }
-
-        $allBgDone = $totalBg > 0 && $readyCount >= $totalBg;
+        // allBgDone: no bg audio expected (totalBg=0) → treat as done once TTS completes;
+        // otherwise done when all bg chunks are on disk.
+        $allBgDone = ($totalBg === 0 && $allDone) || ($totalBg > 0 && $readyCount >= $totalBg);
 
         // Calculate TARGETDURATION
         $maxDur = 10;

@@ -751,12 +751,29 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         }
     }
 
+    private function generateBackgroundOnlyAac(array $session): void
+    {
+        $chunkKey = "instant-dub:{$this->sessionId}:chunk:{$this->index}";
+        Redis::setex($chunkKey, 50400, json_encode([
+            'index'          => $this->index,
+            'start_time'     => $this->startTime,
+            'end_time'       => $this->endTime,
+            'slot_end'       => $this->slotEnd,
+            'text'           => '',
+            'speaker'        => $this->speaker,
+            'audio_base64'   => null,
+            'audio_duration' => 0,
+        ]));
+    }
+
     private function incrementReady(): void
     {
         $sessionKey = "instant-dub:{$this->sessionId}";
 
-        // Atomic increment + completion check via Lua script
-        // Avoids race condition where concurrent jobs read same counter
+        // Atomic increment + completion check via Lua.
+        // playable=true is only set here when total_bg_chunks=0 (no bg audio expected).
+        // When bg audio is present, GenerateBgChunkJob.checkPlayable() sets playable=true
+        // once bg-0+bg-1 are on disk — prevents iOS from loading audio before files exist.
         $lua = <<<'LUA'
             local data = redis.call('GET', KEYS[1])
             if not data then return 0 end
@@ -766,7 +783,10 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             local total = session['total_segments'] or 999999
             if session['segments_ready'] >= total then
                 session['status'] = 'complete'
-                session['playable'] = true
+                local totalBg = session['total_bg_chunks']
+                if not totalBg or totalBg == 0 then
+                    session['playable'] = true
+                end
             end
             redis.call('SETEX', KEYS[1], 50400, cjson.encode(session))
             return session['segments_ready']

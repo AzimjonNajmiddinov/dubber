@@ -67,34 +67,35 @@ class DownloadOriginalAudioJob implements ShouldQueue
 
         // Group TS segments into 30-second chunks — balances first-chunk latency
         // (~8s) with queue size (~240 jobs for 2h film instead of ~1400).
+        $CHUNK_SIZE = 30.0;
+        $pendingChunks = [];
         $chunkIndex  = 0;
         $chunkStart  = 0.0;
         $chunkEnd    = 0.0;
-        $CHUNK_SIZE  = 30.0;
 
         foreach ($segments as $seg) {
             $chunkEnd += (float) $seg['duration'];
             if ($chunkEnd - $chunkStart >= $CHUNK_SIZE) {
-                DownloadAudioChunkJob::dispatch(
-                    $this->sessionId, $chunkIndex, $chunkStart, $chunkEnd,
-                )->onQueue('default');
+                $pendingChunks[] = [$chunkIndex, $chunkStart, $chunkEnd];
                 $chunkStart = $chunkEnd;
                 $chunkIndex++;
             }
         }
         if ($chunkEnd > $chunkStart) {
-            DownloadAudioChunkJob::dispatch(
-                $this->sessionId, $chunkIndex, $chunkStart, $chunkEnd,
-            )->onQueue('default');
+            $pendingChunks[] = [$chunkIndex, $chunkStart, $chunkEnd];
             $chunkIndex++;
         }
 
-        // Store total so the playlist knows when all bg chunks are available
+        // Write total BEFORE dispatching so hlsAudioPlaylist sees it immediately
         $sJson = Redis::get($sessionKey);
         if ($sJson) {
             $s = json_decode($sJson, true);
             $s['total_bg_chunks'] = $chunkIndex;
             Redis::setex($sessionKey, 50400, json_encode($s));
+        }
+
+        foreach ($pendingChunks as [$idx, $start, $end]) {
+            DownloadAudioChunkJob::dispatch($this->sessionId, $idx, $start, $end)->onQueue('default');
         }
 
         Log::info("[DUB] Audio download dispatched ({$chunkIndex} chunks, {$totalDuration}s total)", [
@@ -214,23 +215,27 @@ class DownloadOriginalAudioJob implements ShouldQueue
             Redis::setex($sessionKey, 50400, json_encode($s));
         }
 
-        $CHUNK_SIZE = 30.0;
-        $chunkIndex = 0;
-        $chunkStart = 0.0;
+        $CHUNK_SIZE    = 30.0;
+        $pendingChunks = [];
+        $chunkIndex    = 0;
+        $chunkStart    = 0.0;
         while ($chunkStart < $totalDuration) {
             $chunkEnd = min($chunkStart + $CHUNK_SIZE, $totalDuration);
-            DownloadAudioChunkJob::dispatch(
-                $this->sessionId, $chunkIndex, $chunkStart, $chunkEnd, $audioPath,
-            )->onQueue('default');
+            $pendingChunks[] = [$chunkIndex, $chunkStart, $chunkEnd];
             $chunkStart = $chunkEnd;
             $chunkIndex++;
         }
 
+        // Write total BEFORE dispatching so hlsAudioPlaylist sees it immediately
         $sessionJson = Redis::get($sessionKey);
         if ($sessionJson) {
             $s = json_decode($sessionJson, true);
             $s['total_bg_chunks'] = $chunkIndex;
             Redis::setex($sessionKey, 50400, json_encode($s));
+        }
+
+        foreach ($pendingChunks as [$idx, $start, $end]) {
+            DownloadAudioChunkJob::dispatch($this->sessionId, $idx, $start, $end, $audioPath)->onQueue('default');
         }
 
         Log::info("[DUB] Audio dispatched ({$chunkIndex} chunks, {$totalDuration}s)", [
