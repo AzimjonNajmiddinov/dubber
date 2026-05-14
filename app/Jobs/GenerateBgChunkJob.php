@@ -85,7 +85,7 @@ class GenerateBgChunkJob implements ShouldQueue, ShouldBeUnique
             '-f', 'lavfi', '-t', (string) $chunkDur, '-i', 'anullsrc=r=44100:cl=stereo',
             '-t', (string) $chunkDur, '-i', $bgAudioPath,
         ];
-        $filters   = ['[1:a]pan=stereo|c0=c0-0.7*c1|c1=c1-0.7*c0,volume=1.5,aresample=44100[bg]'];
+        $filters   = ['[1:a]pan=stereo|c0=c0-0.88*c1|c1=c1-0.88*c0,volume=1.0,aresample=44100[bg]'];
         $mixInputs = ['[0:a]', '[bg]'];
         $inputIdx  = 2;
         $tmpFiles  = [];
@@ -118,7 +118,7 @@ class GenerateBgChunkJob implements ShouldQueue, ShouldBeUnique
             $cmd[] = (string) round($ttsSeek, 3);
             $cmd[] = '-i';
             $cmd[] = $tmpMp3;
-            $filters[]   = "[{$inputIdx}:a]adelay={$ttsDelayMs}|{$ttsDelayMs},volume=2.5,aresample=44100[tts{$inputIdx}]";
+            $filters[]   = "[{$inputIdx}:a]adelay={$ttsDelayMs}|{$ttsDelayMs},volume=3.0,aresample=44100[tts{$inputIdx}]";
             $mixInputs[] = "[tts{$inputIdx}]";
             $inputIdx++;
         }
