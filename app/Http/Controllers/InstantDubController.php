@@ -150,9 +150,8 @@ class InstantDubController extends Controller
             $now = now()->timestamp;
 
             if ($lastProgress && ($now - $lastProgress) > 120) {
-                // No progress for 2 minutes — force complete
+                // No progress for 2 minutes — force complete (playable already set by GenerateBgChunkJob)
                 $session['status'] = 'complete';
-                $session['playable'] = true;
                 Redis::setex("instant-dub:{$sessionId}", 50400, json_encode($session));
                 Log::warning("[DUB] Session auto-completed (stale): {$ready}/{$total} segments", [
                     'session' => $sessionId,
@@ -230,6 +229,7 @@ class InstantDubController extends Controller
             "instant-dub:{$sessionId}:full-dialogue",
             "instant-dub:{$sessionId}:all-segments",
             "instant-dub:{$sessionId}:character-context",
+            "instant-dub:{$sessionId}:bgchunks",
         ];
         // Clean up batch keys
         $totalBatches = (int) ceil($total / 15);
@@ -555,33 +555,28 @@ class InstantDubController extends Controller
             $horizon = $i;
         }
 
-        // Build playlist from bg chunks (each chunk = one segment, contains bg + TTS)
-        $bgChunks     = $session['bg_chunks'] ?? [];
-        $totalBg      = (int) ($session['total_bg_chunks'] ?? 0);
-        $availableBg  = count($bgChunks);
-        $entries      = [];
-
-        $aacDir = $this->aacDir($sessionId);
+        // Build playlist from bg chunks stored in dedicated Redis hash (not session JSON).
+        // Iterate in strict sequential order — HLS EVENT playlists are append-only.
+        $totalBg    = (int) ($session['total_bg_chunks'] ?? 0);
+        $aacDir     = $this->aacDir($sessionId);
+        $entries    = [];
         $readyCount = 0;
 
-        if (!empty($bgChunks)) {
-            // Only list segments in strict sequential order (0,1,2,...).
-            // Stop at the first gap or missing file — HLS EVENT playlists are
-            // append-only, so a gap would cause the player to jump in time and
-            // desync (or fall back to the original audio track).
-            ksort($bgChunks);
-            foreach ($bgChunks as $bgIdx => $bgChunk) {
-                // Require strict sequence: 0, 1, 2, ...
-                if ($bgIdx !== $readyCount) break;
-                $aacFile = "{$aacDir}/bg-{$bgIdx}.aac";
-                if (!file_exists($aacFile) || filesize($aacFile) <= 10) break;
-                $cs  = (float) ($bgChunk['start'] ?? 0);
-                $ce  = (float) ($bgChunk['end']   ?? 0);
-                $dur = round($this->frameAlignedDuration($cs, $ce), 6);
-                $entries[] = ['uri' => "dub-segment/bg-{$bgIdx}.aac", 'duration' => $dur];
-                $readyCount++;
-            }
+        $bgHashData = \Illuminate\Support\Facades\Redis::hgetall("instant-dub:{$sessionId}:bgchunks") ?? [];
+        ksort($bgHashData, SORT_NUMERIC);
+
+        foreach ($bgHashData as $bgIdx => $bgJson) {
+            if ((int) $bgIdx !== $readyCount) break; // stop at first gap
+            $aacFile = "{$aacDir}/bg-{$bgIdx}.aac";
+            if (!file_exists($aacFile) || filesize($aacFile) <= 10) break;
+            $bgChunk = json_decode($bgJson, true);
+            $cs  = (float) ($bgChunk['start'] ?? ($bgIdx * 32.0));
+            $ce  = (float) ($bgChunk['end']   ?? (($bgIdx + 1) * 32.0));
+            $dur = round($this->frameAlignedDuration($cs, $ce), 6);
+            $entries[] = ['uri' => "dub-segment/bg-{$bgIdx}.aac", 'duration' => $dur];
+            $readyCount++;
         }
+        $availableBg = $readyCount;
 
         // If nothing is ready yet, serve a short silence placeholder so the
         // EVENT playlist stays syntactically valid while we wait.
@@ -713,10 +708,10 @@ class InstantDubController extends Controller
         }
 
         // Not ready yet — return silence of expected duration
-        $session  = $this->getSession($sessionId);
-        $bgChunks = $session['bg_chunks'] ?? [];
-        $cs = isset($bgChunks[$index]) ? (float)($bgChunks[$index]['start'] ?? 0) : $index * 10.0;
-        $ce = isset($bgChunks[$index]) ? (float)($bgChunks[$index]['end'] ?? 0)   : ($index + 1) * 10.0;
+        $bgJson = \Illuminate\Support\Facades\Redis::hget("instant-dub:{$sessionId}:bgchunks", (string) $index);
+        $bgChunk = $bgJson ? json_decode($bgJson, true) : null;
+        $cs = $bgChunk ? (float) ($bgChunk['start'] ?? $index * 32.0) : $index * 32.0;
+        $ce = $bgChunk ? (float) ($bgChunk['end']   ?? ($index + 1) * 32.0) : ($index + 1) * 32.0;
         $dur = round($this->frameAlignedDuration($cs, $ce), 6);
 
         return $this->silentAacOfDuration($dur);

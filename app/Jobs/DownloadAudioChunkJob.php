@@ -9,6 +9,7 @@ use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
+use App\Jobs\GenerateBgChunkJob;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Facades\Redis;
@@ -102,20 +103,17 @@ class DownloadAudioChunkJob implements ShouldQueue
             return;
         }
 
-        // bg_chunks ga path saqlash
-        $lock = \Illuminate\Support\Facades\Cache::lock("instant-dub:{$this->sessionId}:bg-lock", 10);
-        $lock->block(10, function () use ($sessionKey, $chunkFile) {
-            $sessionJson = Redis::get($sessionKey);
-            if (!$sessionJson) return;
-            $s = json_decode($sessionJson, true);
+        // Store bg chunk metadata in a dedicated Redis hash (keeps session JSON lean)
+        $bgChunkData = json_encode(['path' => $chunkFile, 'start' => $this->startTime, 'end' => $this->endTime]);
+        Redis::hset("instant-dub:{$this->sessionId}:bgchunks", (string) $this->chunkIndex, $bgChunkData);
+        Redis::expire("instant-dub:{$this->sessionId}:bgchunks", 50400);
+
+        // Mark has_bg in session so checkAndSetComplete can detect it without reading the hash
+        $bgLock = Cache::lock("instant-dub:{$this->sessionId}:bg-lock", 10);
+        $bgLock->block(5, function () use ($sessionKey, $chunkFile) {
+            $s = json_decode(Redis::get($sessionKey) ?? '{}', true);
             $s['original_audio_path'] = $chunkFile;
-            $bgChunks = $s['bg_chunks'] ?? [];
-            $bgChunks[$this->chunkIndex] = [
-                'path'  => $chunkFile,
-                'start' => $this->startTime,
-                'end'   => $this->endTime,
-            ];
-            $s['bg_chunks'] = $bgChunks;
+            $s['has_bg'] = true;
             Redis::setex($sessionKey, 50400, json_encode($s));
         });
 
@@ -123,7 +121,12 @@ class DownloadAudioChunkJob implements ShouldQueue
             'session' => $this->sessionId,
         ]);
 
-        $this->generateBgChunkAac($chunkFile);
+        // Dispatch the bg mix job with a short delay so concurrent TTS completions
+        // can accumulate before the ffmpeg run. ShouldBeUnique drops duplicates.
+        GenerateBgChunkJob::dispatch($this->sessionId, $this->chunkIndex, $this->startTime, $this->endTime)
+            ->onQueue('bg-mix')
+            ->delay(now()->addSeconds(2));
+
         $this->applyEnergyTransferToOverlappingSegments($chunkFile);
 
         // Check if all TTS segments are ready + bg is now available → set complete/playable
@@ -138,134 +141,15 @@ class DownloadAudioChunkJob implements ShouldQueue
             local session = cjson.decode(data)
             local ready = session['segments_ready'] or 0
             local total = session['total_segments'] or 999999
-            local hasBg = session['bg_chunks'] ~= nil and next(session['bg_chunks']) ~= nil
+            local hasBg = session['has_bg'] == true
             if ready >= total and hasBg and session['status'] ~= 'complete' then
                 session['status'] = 'complete'
-                session['playable'] = true
                 redis.call('SETEX', KEYS[1], 50400, cjson.encode(session))
             end
             return ready
         LUA;
 
         Redis::eval($lua, 1, "instant-dub:{$this->sessionId}");
-    }
-
-    public function generateBgChunkAac(string $bgAudioPath): void
-    {
-        // Race condition oldini olish: bir vaqtda faqat bitta process bg-N.aac ga yozsin
-        $lock = \Illuminate\Support\Facades\Cache::lock(
-            "bg-gen:{$this->sessionId}:{$this->chunkIndex}", 30
-        );
-        if (!$lock->get()) return; // Boshqa process yozayapti — skip qil
-
-        try {
-            $this->generateBgChunkAacInner($bgAudioPath);
-        } finally {
-            $lock->release();
-        }
-    }
-
-    private function generateBgChunkAacInner(string $bgAudioPath): void
-    {
-        $sessionKey = "instant-dub:{$this->sessionId}";
-        $sessionJson = Redis::get($sessionKey);
-        if (!$sessionJson) return;
-
-        $session  = json_decode($sessionJson, true);
-        $total    = (int) ($session['total_segments'] ?? 0);
-        $aacDir   = storage_path("app/instant-dub/{$this->sessionId}/aac");
-        if (!is_dir($aacDir)) @mkdir($aacDir, 0755, true);
-
-        $chunkDur = round($this->frameAlignedDuration($this->startTime, $this->endTime), 6);
-        $outFile  = "{$aacDir}/bg-{$this->chunkIndex}.aac";
-
-        // Stereo center cancellation: pan=stereo|c0=c0-0.7*c1|c1=c1-0.7*c0
-        // Filmda ovozlar center-da (L≈R), musiqa/effektlar stereo (L≠R).
-        // 70% koeffitsient: center 70% pasayadi, stereo effektlar saqlanadi.
-        $cmd = [
-            'ffmpeg', '-y',
-            '-f', 'lavfi', '-t', (string) $chunkDur, '-i', 'anullsrc=r=44100:cl=stereo',
-            '-t', (string) $chunkDur, '-i', $bgAudioPath,
-        ];
-        $filters   = [
-            '[1:a]pan=stereo|c0=c0-0.7*c1|c1=c1-0.7*c0,volume=1.5,aresample=44100[bg]',
-        ];
-        $mixInputs = ['[0:a]', '[bg]'];
-        $inputIdx  = 2;
-        $tmpFiles  = [];
-
-        for ($i = 0; $i < $total; $i++) {
-            $chunkJson = Redis::get("{$sessionKey}:chunk:{$i}");
-            if (!$chunkJson) continue;
-            $chunk    = json_decode($chunkJson, true);
-            $segStart = (float) ($chunk['start_time'] ?? 0);
-            $segEnd   = (float) ($chunk['end_time'] ?? 0);
-            $b64      = $chunk['audio_base64'] ?? null;
-
-            if ($segStart >= $this->endTime || $segEnd <= $this->startTime) continue;
-            if (!$b64) continue;
-
-            $tmpMp3 = "/tmp/bggen_{$this->sessionId}_{$this->chunkIndex}_{$i}.mp3";
-            file_put_contents($tmpMp3, base64_decode($b64));
-            $tmpFiles[] = $tmpMp3;
-
-            $ttsSeek    = max(0.0, $this->startTime - $segStart);
-            $ttsDelayMs = (int) round(max(0.0, $segStart - $this->startTime) * 1000);
-
-            $cmd[] = '-ss';
-            $cmd[] = (string) round($ttsSeek, 3);
-            $cmd[] = '-i';
-            $cmd[] = $tmpMp3;
-            $filters[]   = "[{$inputIdx}:a]adelay={$ttsDelayMs}|{$ttsDelayMs},volume=2.5,aresample=44100[tts{$inputIdx}]";
-            $mixInputs[] = "[tts{$inputIdx}]";
-            $inputIdx++;
-        }
-
-        $filter = implode(';', $filters) . ';' . implode('', $mixInputs)
-            . "amix=inputs=" . count($mixInputs) . ":duration=first:normalize=0";
-
-        $cmd = array_merge($cmd, [
-            '-filter_complex', $filter,
-            '-ac', '1', '-c:a', 'aac', '-b:a', '96k', '-f', 'adts', $outFile,
-        ]);
-
-        $timeout = max(20, (int) ceil($chunkDur) + 10);
-        $result  = Process::timeout($timeout)->run($cmd);
-
-        foreach ($tmpFiles as $f) @unlink($f);
-
-        if ($result->successful()) {
-            Log::info("[DUB] bg-{$this->chunkIndex}.aac ready (" . round($this->startTime) . "-" . round($this->endTime) . "s, tts=" . ($inputIdx - 2) . ")", [
-                'session' => $this->sessionId,
-            ]);
-
-            // playable = true: bg-0..bg-4 (5 ta chunk = 160s) diskda bo'lganda qo'yamiz.
-            // Bu iOS playerga yetarli bufer beradi, TTS segmentlari yetib kelishga vaqt qoladi.
-            $aacDir0 = storage_path("app/instant-dub/{$this->sessionId}/aac");
-            $threeReady = true;
-            for ($bi = 0; $bi <= 4; $bi++) {
-                $f = "{$aacDir0}/bg-{$bi}.aac";
-                if (!file_exists($f) || filesize($f) <= 10) { $threeReady = false; break; }
-            }
-            if ($threeReady) {
-                $lua = <<<'LUA'
-                    local data = redis.call('GET', KEYS[1])
-                    if not data then return 0 end
-                    local session = cjson.decode(data)
-                    if not session['playable'] then
-                        session['playable'] = true
-                        redis.call('SETEX', KEYS[1], 50400, cjson.encode(session))
-                    end
-                    return 1
-                LUA;
-                \Illuminate\Support\Facades\Redis::eval($lua, 1, "instant-dub:{$this->sessionId}");
-            }
-        } else {
-            Log::warning("[DUB] bg-{$this->chunkIndex}.aac failed", [
-                'session' => $this->sessionId,
-                'error'   => Str::limit($result->errorOutput(), 300),
-            ]);
-        }
     }
 
     private function applyEnergyTransferToOverlappingSegments(string $rawAudioPath): void

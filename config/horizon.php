@@ -225,6 +225,20 @@ return [
             'timeout' => 600,
             'nice' => 0,
         ],
+        // bg audio mixing (ffmpeg filter_complex — separate from TTS to avoid contention)
+        'supervisor-bg-mix' => [
+            'connection' => 'redis',
+            'queue' => ['bg-mix'],
+            'balance' => 'auto',
+            'autoScalingStrategy' => 'time',
+            'maxProcesses' => 1,
+            'maxTime' => 0,
+            'maxJobs' => 0,
+            'memory' => 256,
+            'tries' => 2,
+            'timeout' => 180,
+            'nice' => 0,
+        ],
     ],
 
     'environments' => [
@@ -239,6 +253,11 @@ return [
                 'balanceMaxShift' => 2,
                 'balanceCooldown' => 3,
             ],
+            'supervisor-bg-mix' => [
+                'maxProcesses' => 2,
+                'balanceMaxShift' => 1,
+                'balanceCooldown' => 5,
+            ],
         ],
 
         'local' => [
@@ -247,6 +266,9 @@ return [
             ],
             'supervisor-tts' => [
                 'maxProcesses' => 2,
+            ],
+            'supervisor-bg-mix' => [
+                'maxProcesses' => 1,
             ],
         ],
     ],

@@ -8,7 +8,7 @@ use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use App\Http\Controllers\AdminVoicePoolController;
-use App\Jobs\DownloadAudioChunkJob;
+use App\Jobs\GenerateBgChunkJob;
 use App\Jobs\PersistDubCacheJob;
 use App\Services\ElevenLabs\ElevenLabsClient;
 use App\Services\MmsTts\MmsTtsClient;
@@ -171,19 +171,17 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             // (yangi kinoda bg tez, TTS kech bo'ladi; shuning uchun TTS tarafdan ham chaqiramiz)
             $this->applyEnergyTransferIfBgReady();
 
-            // 6. Re-generate bg-{i}.aac for any bg chunks that overlap this segment
-            $freshJson = Redis::get($sessionKey);
-            if ($freshJson) {
-                $fresh    = json_decode($freshJson, true);
-                $bgChunks = $fresh['bg_chunks'] ?? [];
-                foreach ($bgChunks as $bgIdx => $bgChunk) {
-                    $cs   = (float) ($bgChunk['start'] ?? 0);
-                    $ce   = (float) ($bgChunk['end'] ?? 0);
-                    $path = $bgChunk['path'] ?? null;
-                    if ($path && file_exists($path) && $this->startTime < $ce && $this->endTime > $cs) {
-                        $job = new DownloadAudioChunkJob($this->sessionId, (int) $bgIdx, $cs, $ce);
-                        $job->generateBgChunkAac($path);
-                    }
+            // 6. Dispatch GenerateBgChunkJob for bg chunks overlapping this segment.
+            // ShouldBeUnique + 3s delay collapses concurrent TTS completions into one ffmpeg run.
+            $bgHashData = Redis::hgetall("instant-dub:{$this->sessionId}:bgchunks") ?? [];
+            foreach ($bgHashData as $bgIdx => $bgJson) {
+                $bg = json_decode($bgJson, true);
+                $cs = (float) ($bg['start'] ?? 0);
+                $ce = (float) ($bg['end']   ?? 0);
+                if ($this->startTime < $ce && $this->endTime > $cs) {
+                    GenerateBgChunkJob::dispatch($this->sessionId, (int) $bgIdx, $cs, $ce)
+                        ->onQueue('bg-mix')
+                        ->delay(now()->addSeconds(3));
                 }
             }
 
@@ -347,13 +345,14 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         if (!$sessionJson) return;
         $session  = json_decode($sessionJson, true);
         if ($session['disable_prosody'] ?? false) return;
-        $bgChunks = $session['bg_chunks'] ?? [];
 
         $bgPath = null; $bgStart = null; $bgEnd = null;
-        foreach ($bgChunks as $bgChunk) {
-            $cs   = (float) ($bgChunk['start'] ?? 0);
-            $ce   = (float) ($bgChunk['end'] ?? 0);
-            $path = $bgChunk['path'] ?? null;
+        $bgHashData = Redis::hgetall("instant-dub:{$this->sessionId}:bgchunks") ?? [];
+        foreach ($bgHashData as $bgJson) {
+            $bg   = json_decode($bgJson, true);
+            $cs   = (float) ($bg['start'] ?? 0);
+            $ce   = (float) ($bg['end']   ?? 0);
+            $path = $bg['path'] ?? null;
             if ($path && file_exists($path) && $this->startTime >= $cs && $this->startTime < $ce) {
                 $bgPath = $path; $bgStart = $cs; $bgEnd = $ce;
                 break;
@@ -447,26 +446,8 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         $serviceUrl = config('services.prosody_transfer.url') ?: env('PROSODY_TRANSFER_SERVICE_URL');
         if (!$serviceUrl) return null;
 
-        // Segment vaqtini qamrab oluvchi bg_chunk ni topish
-        $sessionJson = Redis::get("instant-dub:{$this->sessionId}");
-        if (!$sessionJson) return null;
-        $session  = json_decode($sessionJson, true);
-        if ($session['disable_prosody'] ?? false) return null;
-        $bgChunks = $session['bg_chunks'] ?? [];
-
-        $vocalsPath = null;
-        $chunkStart = null;
-        foreach ($bgChunks as $bgChunk) {
-            $cs = (float) ($bgChunk['start'] ?? 0);
-            $ce = (float) ($bgChunk['end'] ?? 0);
-            $vp = $bgChunk['vocals_path'] ?? null;
-            if ($vp && file_exists($vp) && $this->startTime < $ce && $this->endTime > $cs) {
-                $vocalsPath = $vp;
-                $chunkStart = $cs;
-                break;
-            }
-        }
-        if (!$vocalsPath) return null;
+        // Demucs removed — no vocals_path available, prosody transfer via vocals disabled.
+        return null;
 
         // Vocals faylidan segment vaqtini kesish
         $segOffset = max(0.0, $this->startTime - $chunkStart);
@@ -624,22 +605,20 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             return null;
         }
 
-        $session  = json_decode(\Illuminate\Support\Facades\Redis::get("instant-dub:{$this->sessionId}") ?? '{}', true);
-        $bgChunks = $session['bg_chunks'] ?? [];
+        $bgHashData = \Illuminate\Support\Facades\Redis::hgetall("instant-dub:{$this->sessionId}:bgchunks") ?? [];
 
-        Log::info("[DUB] Segment #{$this->index} ref search: start={$this->startTime} end={$this->endTime} chunks=" . count($bgChunks), ['session' => $this->sessionId]);
+        Log::info("[DUB] Segment #{$this->index} ref search: start={$this->startTime} end={$this->endTime} chunks=" . count($bgHashData), ['session' => $this->sessionId]);
 
-        foreach ($bgChunks as $bgChunk) {
-            $cs   = (float) ($bgChunk['start'] ?? 0);
-            $ce   = (float) ($bgChunk['end']   ?? 0);
+        foreach ($bgHashData as $bgJson) {
+            $bgChunk = json_decode($bgJson, true);
+            $cs      = (float) ($bgChunk['start'] ?? 0);
+            $ce      = (float) ($bgChunk['end']   ?? 0);
 
             if ($this->startTime < $cs || $this->startTime >= $ce) continue;
 
-            // vocals_path (Demucs) mavjud bo'lsa — toza ref, yo'q bo'lsa original
-            $vocalsPath = $bgChunk['vocals_path'] ?? null;
-            $rawPath    = $bgChunk['path'] ?? null;
-            $useVocals  = $vocalsPath && file_exists($vocalsPath) && filesize($vocalsPath) > 1000;
-            $refPath    = $useVocals ? $vocalsPath : $rawPath;
+            // Use raw original audio with frequency filter (Demucs removed)
+            $rawPath  = $bgChunk['path'] ?? null;
+            $refPath  = $rawPath;
 
             if (!$refPath || !file_exists($refPath)) {
                 continue;
@@ -648,16 +627,15 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             $segOffset = round($this->startTime - $cs, 3);
             $segDur    = round(min($duration, $ce - $this->startTime), 3);
 
-            Log::info("[DUB] Segment #{$this->index} ref cutting " . ($useVocals ? 'vocals' : 'raw') . " {$cs}-{$ce} offset={$segOffset} dur={$segDur}", ['session' => $this->sessionId]);
+            Log::info("[DUB] Segment #{$this->index} ref cutting raw {$cs}-{$ce} offset={$segOffset} dur={$segDur}", ['session' => $this->sessionId]);
 
             $tmpWav = "/tmp/ref_{$this->sessionId}_{$this->index}.wav";
 
-            // vocals allaqachon toza — filter kerak emas; raw da esa frequency filter
-            $ffmpegArgs = ['ffmpeg', '-y', '-ss', (string) $segOffset, '-t', (string) $segDur, '-i', $refPath];
-            if (!$useVocals) {
-                $ffmpegArgs = array_merge($ffmpegArgs, ['-af', 'highpass=f=150,lowpass=f=4000']);
-            }
-            $ffmpegArgs = array_merge($ffmpegArgs, ['-ar', '22050', '-ac', '1', $tmpWav]);
+            $ffmpegArgs = array_merge(
+                ['ffmpeg', '-y', '-ss', (string) $segOffset, '-t', (string) $segDur, '-i', $refPath],
+                ['-af', 'highpass=f=150,lowpass=f=4000'],
+                ['-ar', '22050', '-ac', '1', $tmpWav]
+            );
 
             $result = \Illuminate\Support\Facades\Process::timeout(10)->run($ffmpegArgs);
 
