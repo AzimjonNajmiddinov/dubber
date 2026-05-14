@@ -262,6 +262,7 @@ async function startDubbing(overlay) {
             video.addEventListener('timeupdate', onVideoTimeUpdate);
             video.addEventListener('pause',      onVideoPause);
             video.addEventListener('seeking',    onVideoSeeking);
+            video.addEventListener('seeked',     onVideoSeeked);
             video.addEventListener('play',       onVideoPlay);
             video.addEventListener('ended',      onVideoEnded);
         }
@@ -362,19 +363,12 @@ function _startChunk(i, offset) {
         dubState.currentIdx = i;
         dubState.pendingIdx = -1;
 
-        // Duck original audio during speech
-        if (dubState._video) dubState._video.volume = 0.08;
-
         src.onended = () => {
             if (dubState.currentIdx !== i) return;
             dubState.currentSrc = null;
             dubState.currentIdx = -1;
             if (!dubState.active || !dubState._video || dubState._video.paused) return;
             _afterChunkEnded(i);
-            // Restore volume if no next chunk started immediately
-            if (!dubState.currentSrc && dubState._video) {
-                dubState._video.volume = dubState._origVolume ?? 1;
-            }
         };
     } catch (e) {}
 }
@@ -415,12 +409,8 @@ function playDubAudio(t) {
         if (p && p._audioBuffer && t >= p.start_time) {
             const idx = dubState.pendingIdx;
             dubState.pendingIdx = -1;
-            _startChunk(idx, 0); // _startChunk ducks volume internally
+            _startChunk(idx, 0);
             return;
-        }
-        // Approaching pending chunk — pre-duck slightly
-        if (p && p.start_time - t < 0.5 && dubState._video) {
-            dubState._video.volume = Math.max(0.08, dubState._video.volume - 0.05);
         }
     }
 
@@ -525,17 +515,9 @@ function onVideoTimeUpdate() {
     updateSubtitle(t);
     playDubAudio(t);
 }
-function onVideoPause() {
-    if (!dubState.active) return;
-    stopCurrentAudio();
-    if (dubState._video) dubState._video.volume = dubState._origVolume ?? 1;
-}
-function onVideoSeeking() {
-    if (!dubState.active) return;
-    stopCurrentAudio();
-    if (dubState._video) dubState._video.volume = dubState._origVolume ?? 1;
-    scheduleNearestChunk(this.currentTime);
-}
+function onVideoPause()   { if (dubState.active) stopCurrentAudio(); }
+function onVideoSeeking() { if (dubState.active) stopCurrentAudio(); }
+function onVideoSeeked()  { if (dubState.active) scheduleNearestChunk(this.currentTime); }
 function onVideoEnded()   { if (dubState.active) stopDubbing(); }
 function onVideoPlay()    {
     dubState._waitingToPlay = false;
@@ -555,6 +537,7 @@ function stopDubbing() {
         video.removeEventListener('timeupdate', onVideoTimeUpdate);
         video.removeEventListener('pause',      onVideoPause);
         video.removeEventListener('seeking',    onVideoSeeking);
+        video.removeEventListener('seeked',     onVideoSeeked);
         video.removeEventListener('play',       onVideoPlay);
         video.removeEventListener('ended',      onVideoEnded);
         if (dubState._origVolume != null) video.volume = dubState._origVolume;

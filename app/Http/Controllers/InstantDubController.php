@@ -36,20 +36,28 @@ class InstantDubController extends Controller
         $request->validate([
             'srt'            => 'nullable|string',
             'language'       => 'required|string|max:10',
-            'video_url'      => 'nullable|string',
-            'audio_url'      => 'nullable|string',
+            'video_url'      => 'nullable|url|max:2048',
+            'audio_url'      => 'nullable|url|max:2048',
             'translate_from' => 'nullable|string|max:10',
             'title'          => 'nullable|string|max:255',
             'quality'        => 'nullable|string|in:standard,premium',
             'voice_id'       => 'nullable|string|max:100',
         ]);
 
+        $videoUrl = (string) ($request->input('video_url') ?? '');
+        if ($videoUrl && !str_starts_with($videoUrl, 'https://')) {
+            return response()->json(['message' => 'video_url must use HTTPS.'], 422);
+        }
+        $audioUrlRaw = (string) ($request->input('audio_url') ?? '');
+        if ($audioUrlRaw && !str_starts_with($audioUrlRaw, 'https://')) {
+            return response()->json(['message' => 'audio_url must use HTTPS.'], 422);
+        }
+
         $sessionId = Str::uuid()->toString();
         $language = $request->input('language', 'uz');
-        $videoUrl = $request->input('video_url', '');
         $translateFrom = $request->input('translate_from', '');
         $srt      = (string) ($request->input('srt') ?? '');
-        $audioUrl = (string) ($request->input('audio_url') ?? '') ?: null;
+        $audioUrl = $audioUrlRaw ?: null;
         $title    = $request->input('title', 'Untitled');
         $quality    = $request->input('quality', 'standard');
         $forceVoice = $request->input('voice_id') ?: null;
@@ -246,7 +254,7 @@ class InstantDubController extends Controller
         // Clean up AAC files on disk
         $aacDir = storage_path("app/instant-dub/{$sessionId}/aac");
         if (is_dir($aacDir)) {
-            array_map('unlink', glob("{$aacDir}/*.aac"));
+            array_map('unlink', glob("{$aacDir}/*.aac") ?: []);
             @rmdir($aacDir);
         }
         // Clean up session directory
@@ -258,7 +266,7 @@ class InstantDubController extends Controller
         // Clean up tmp dir used by segment jobs
         $tmpDir = '/tmp/instant-dub-' . $sessionId;
         if (is_dir($tmpDir)) {
-            array_map('unlink', glob("{$tmpDir}/*"));
+            array_map('unlink', glob("{$tmpDir}/*") ?: []);
             @rmdir($tmpDir);
         }
 
@@ -558,7 +566,7 @@ class InstantDubController extends Controller
         // Build playlist from bg chunks stored in dedicated Redis hash (not session JSON).
         // Iterate in strict sequential order — HLS EVENT playlists are append-only.
         $totalBg    = (int) ($session['total_bg_chunks'] ?? 0);
-        $aacDir     = $this->aacDir($sessionId);
+        $aacDir     = $this->aacDir($sessionId, $session);
         $entries    = [];
         $readyCount = 0;
 
@@ -626,9 +634,9 @@ class InstantDubController extends Controller
         return response('', 404);
     }
 
-    private function aacDir(string $sessionId): string
+    private function aacDir(string $sessionId, ?array $session = null): string
     {
-        $session = $this->getSession($sessionId);
+        $session ??= $this->getSession($sessionId);
         return $session['aac_base_dir'] ?? storage_path("app/instant-dub/{$sessionId}/aac");
     }
 
@@ -902,10 +910,26 @@ class InstantDubController extends Controller
             return response('Session not found', 404);
         }
 
+        // Reject path traversal attempts
+        if (str_contains($path, '..') || str_contains($path, "\0") || str_contains($path, '//')) {
+            return response('Invalid path', 400);
+        }
+
         $baseUrl = $session['video_base_url'] ?? '';
+        if (!$baseUrl) {
+            return response('No base URL in session', 400);
+        }
         $query = $session['video_query'] ?? '';
 
-        $url = rtrim($baseUrl, '/') . '/' . $path;
+        $url = rtrim($baseUrl, '/') . '/' . ltrim($path, '/');
+
+        // Ensure the resolved URL stays on the same host as the session's base URL
+        $allowedHost = parse_url($baseUrl, PHP_URL_HOST);
+        $targetHost  = parse_url($url, PHP_URL_HOST);
+        if (!$allowedHost || $allowedHost !== $targetHost) {
+            return response('Proxy target not allowed', 403);
+        }
+
         if ($query) {
             $url .= (str_contains($url, '?') ? '&' : '?') . $query;
         }
@@ -1033,23 +1057,29 @@ class InstantDubController extends Controller
     private function silentAacOfDuration(float $duration): \Illuminate\Http\Response
     {
         $duration = max(0.1, round($duration, 3));
-        $tmpFile = sys_get_temp_dir() . '/silent-' . (int)($duration * 1000) . 'ms.aac';
+        $destFile = sys_get_temp_dir() . '/silent-' . (int) ($duration * 1000) . 'ms.aac';
 
-        if (!file_exists($tmpFile) || filesize($tmpFile) < 10) {
+        if (!file_exists($destFile) || filesize($destFile) < 10) {
+            $buildFile = $destFile . '.tmp.' . getmypid();
             Process::timeout(15)->run([
                 'ffmpeg', '-y', '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=mono',
                 '-t', (string) $duration,
-                '-c:a', 'aac', '-b:a', '32k', '-f', 'adts', $tmpFile,
+                '-c:a', 'aac', '-b:a', '32k', '-f', 'adts', $buildFile,
             ]);
+            if (file_exists($buildFile) && filesize($buildFile) > 10) {
+                rename($buildFile, $destFile);
+            } else {
+                @unlink($buildFile);
+            }
         }
 
-        if (file_exists($tmpFile) && filesize($tmpFile) > 10) {
-            $data = file_get_contents($tmpFile);
+        if (file_exists($destFile) && filesize($destFile) > 10) {
+            $data = file_get_contents($destFile);
             return response($data, 200, [
-                'Content-Type'  => 'audio/aac',
+                'Content-Type'   => 'audio/aac',
                 'Content-Length' => strlen($data),
                 'Access-Control-Allow-Origin' => '*',
-                'Cache-Control' => 'max-age=3600',
+                'Cache-Control'  => 'max-age=3600',
             ]);
         }
 

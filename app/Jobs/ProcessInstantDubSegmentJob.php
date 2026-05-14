@@ -443,55 +443,8 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
 
     private function applyProsodyTransfer(string $ttsWav, string $tmpDir): ?string
     {
-        $serviceUrl = config('services.prosody_transfer.url') ?: env('PROSODY_TRANSFER_SERVICE_URL');
-        if (!$serviceUrl) return null;
-
-        // Demucs removed — no vocals_path available, prosody transfer via vocals disabled.
+        // Demucs removed — vocals reference no longer available.
         return null;
-
-        // Vocals faylidan segment vaqtini kesish
-        $segOffset = max(0.0, $this->startTime - $chunkStart);
-        $segDur    = $this->endTime - $this->startTime;
-        $refClip   = "{$tmpDir}/ref_{$this->index}.wav";
-
-        $cut = Process::timeout(10)->run([
-            'ffmpeg', '-y',
-            '-ss', (string) round($segOffset, 3),
-            '-t',  (string) round($segDur, 3),
-            '-i',  $vocalsPath,
-            $refClip,
-        ]);
-        if (!$cut->successful() || !file_exists($refClip) || filesize($refClip) < 100) {
-            return null;
-        }
-
-        try {
-            $outWav = "{$tmpDir}/seg_{$this->index}_prosody.wav";
-            $resp = \Illuminate\Support\Facades\Http::timeout(30)
-                ->attach('tts_audio',  file_get_contents($ttsWav),  'tts.wav')
-                ->attach('reference',  file_get_contents($refClip), 'ref.wav')
-                ->post("{$serviceUrl}/transfer", [
-                    'f0_mode'         => 'stats',
-                    'energy_transfer' => 'true',
-                ]);
-
-            @unlink($refClip);
-
-            if ($resp->failed()) return null;
-
-            file_put_contents($outWav, $resp->body());
-            if (!file_exists($outWav) || filesize($outWav) < 100) return null;
-
-            Log::info("[DUB] Prosody transfer ok — seg #{$this->index}", ['session' => $this->sessionId]);
-            return $outWav;
-
-        } catch (\Throwable $e) {
-            @unlink($refClip);
-            Log::warning("[DUB] Prosody transfer failed — seg #{$this->index}: " . $e->getMessage(), [
-                'session' => $this->sessionId,
-            ]);
-            return null;
-        }
     }
 
     private function generateWithMms(string $outputMp3, string $tmpDir, array $speakerEntry = []): void
@@ -642,7 +595,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             if ($result->successful() && file_exists($tmpWav) && filesize($tmpWav) > 2000) {
                 $bytes = file_get_contents($tmpWav);
                 @unlink($tmpWav);
-                Log::info("[DUB] Segment #{$this->index} ref ok bytes=" . strlen($bytes) . " (" . ($useVocals ? 'vocals' : 'raw') . ")", ['session' => $this->sessionId]);
+                Log::info("[DUB] Segment #{$this->index} ref ok bytes=" . strlen($bytes), ['session' => $this->sessionId]);
                 return $bytes;
             }
 
