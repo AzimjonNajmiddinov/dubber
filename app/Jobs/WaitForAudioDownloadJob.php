@@ -7,6 +7,7 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use App\Support\DubSession;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Facades\Redis;
@@ -27,12 +28,8 @@ class WaitForAudioDownloadJob implements ShouldQueue
 
     public function handle(): void
     {
-        $sessionKey = "instant-dub:{$this->sessionId}";
-        $sessionJson = Redis::get($sessionKey);
-        if (!$sessionJson) return;
-
-        $session = json_decode($sessionJson, true);
-        if (($session['status'] ?? '') === 'stopped') return;
+        $session = DubSession::get($this->sessionId);
+        if (!$session || ($session['status'] ?? '') === 'stopped') return;
 
         $title = $session['title'] ?? 'Untitled';
         $tmpDir = storage_path("app/instant-dub/{$this->sessionId}");
@@ -43,16 +40,17 @@ class WaitForAudioDownloadJob implements ShouldQueue
         if (!file_exists($donePath)) {
             // Still downloading — re-dispatch to check again in 15s
             // Give up after 30 minutes (120 polls × 15s)
-            $pollCount = (int) Redis::get("instant-dub:{$this->sessionId}:audio-poll-count");
+            $pollKey   = "instant-dub:{$this->sessionId}:audio-poll-count";
+            $pollCount = (int) Redis::get($pollKey);
             if ($pollCount >= 120) {
                 Log::warning("[DUB] [{$title}] Audio download timed out after 30 minutes", [
                     'session' => $this->sessionId,
                 ]);
-                Redis::del("instant-dub:{$this->sessionId}:audio-poll-count");
+                Redis::del($pollKey);
                 return;
             }
 
-            Redis::setex("instant-dub:{$this->sessionId}:audio-poll-count", 3600, $pollCount + 1);
+            Redis::setex($pollKey, 3600, $pollCount + 1);
 
             self::dispatch($this->sessionId)
                 ->delay(now()->addSeconds(15))
@@ -84,15 +82,9 @@ class WaitForAudioDownloadJob implements ShouldQueue
         $audioDuration = $probe->successful() ? (float) trim($probe->output()) : 0;
 
         // Update session with audio path and duration
-        $sessionJson = Redis::get($sessionKey);
-        if ($sessionJson) {
-            $session = json_decode($sessionJson, true);
-            $session['original_audio_path'] = $outputPath;
-            if ($audioDuration > 0) {
-                $session['video_duration'] = $audioDuration;
-            }
-            Redis::setex($sessionKey, 50400, json_encode($session));
-        }
+        $patch = ['original_audio_path' => $outputPath];
+        if ($audioDuration > 0) $patch['video_duration'] = $audioDuration;
+        DubSession::patch($this->sessionId, $patch);
 
         Log::info("[DUB] [{$title}] Original audio downloaded (" . round(filesize($outputPath) / 1024) . " KB, " . round($audioDuration) . "s)", [
             'session' => $this->sessionId,
@@ -108,7 +100,6 @@ class WaitForAudioDownloadJob implements ShouldQueue
 
     private function remixAllSegments(string $originalAudioPath): void
     {
-        $sessionKey = "instant-dub:{$this->sessionId}";
         $aacDir = storage_path("app/instant-dub/{$this->sessionId}/aac");
 
         if (!is_dir($aacDir)) return;
@@ -119,7 +110,7 @@ class WaitForAudioDownloadJob implements ShouldQueue
             // Regenerate lead.aac with background audio
             $leadFile = "{$aacDir}/lead.aac";
             if (file_exists($leadFile)) {
-                $chunk0Json = Redis::get("{$sessionKey}:chunk:0");
+                $chunk0Json = Redis::get(DubSession::chunkKey($this->sessionId, 0));
                 if ($chunk0Json) {
                     $chunk0 = json_decode($chunk0Json, true);
                     $firstStart = (float) ($chunk0['start_time'] ?? 0);
@@ -141,9 +132,8 @@ class WaitForAudioDownloadJob implements ShouldQueue
             }
 
             // Remix all segments
-            $sessionJson = Redis::get($sessionKey);
-            if (!$sessionJson) return;
-            $session = json_decode($sessionJson, true);
+            $session = DubSession::get($this->sessionId);
+            if (!$session) return;
             $total = (int) ($session['total_segments'] ?? 0);
 
             $remixed = 0;
@@ -151,7 +141,7 @@ class WaitForAudioDownloadJob implements ShouldQueue
                 $aacFile = "{$aacDir}/{$i}.aac";
                 if (!file_exists($aacFile)) continue;
 
-                $chunkJson = Redis::get("{$sessionKey}:chunk:{$i}");
+                $chunkJson = Redis::get(DubSession::chunkKey($this->sessionId, $i));
                 if (!$chunkJson) continue;
 
                 $chunk = json_decode($chunkJson, true);
@@ -161,7 +151,7 @@ class WaitForAudioDownloadJob implements ShouldQueue
                 $startTime = (float) ($chunk['start_time'] ?? 0);
                 $endTime = (float) ($chunk['end_time'] ?? 0);
 
-                $nextChunkJson = Redis::get("{$sessionKey}:chunk:" . ($i + 1));
+                $nextChunkJson = Redis::get(DubSession::chunkKey($this->sessionId, $i + 1));
                 $slotEnd = $nextChunkJson
                     ? (float) (json_decode($nextChunkJson, true)['start_time'] ?? $endTime)
                     : $endTime;

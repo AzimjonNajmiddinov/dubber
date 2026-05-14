@@ -7,6 +7,7 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use App\Support\DubSession;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
@@ -30,15 +31,11 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
 
     public function handle(): void
     {
-        $sessionKey = "instant-dub:{$this->sessionId}";
-        $sessionJson = Redis::get($sessionKey);
-        if (!$sessionJson) return;
-
-        $session = json_decode($sessionJson, true);
-        if (($session['status'] ?? '') === 'stopped') return;
+        $session = DubSession::get($this->sessionId);
+        if (!$session || ($session['status'] ?? '') === 'stopped') return;
 
         $title = $session['title'] ?? 'Untitled';
-        $fullDialogueText = Redis::get("instant-dub:{$this->sessionId}:full-dialogue") ?? '';
+        $fullDialogueText = Redis::get(DubSession::fullDialogueKey($this->sessionId)) ?? '';
 
         try {
             $translated = $this->translateMicroBatch($this->segments, $fullDialogueText);
@@ -92,7 +89,7 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
         ];
         $toLang = $langNames[$this->language] ?? $this->language;
 
-        $sessionData = json_decode(Redis::get("instant-dub:{$this->sessionId}") ?? '{}', true);
+        $sessionData = DubSession::get($this->sessionId) ?? [];
         $forceVoice = !empty($sessionData['force_voice']);
 
         $lines = [];
@@ -199,7 +196,7 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
         if (empty($dubSegments)) return null;
 
         // Use full dialogue as scene context (same as Claude path)
-        $sceneContext = Redis::get("instant-dub:{$this->sessionId}:full-dialogue") ?? '';
+        $sceneContext = Redis::get(DubSession::fullDialogueKey($this->sessionId)) ?? '';
 
         try {
             $resp = Http::timeout(60)->post("{$serviceUrl}/translate_dub", [
@@ -323,10 +320,9 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
 
     private function mergeVoiceMap(array $speakers): void
     {
-        $voiceKey = "instant-dub:{$this->sessionId}:voices";
-        $lockKey = "instant-dub:{$this->sessionId}:voices-lock";
-        $sessionJson = Redis::get("instant-dub:{$this->sessionId}");
-        $sessionData = $sessionJson ? json_decode($sessionJson, true) : [];
+        $voiceKey    = DubSession::voicesKey($this->sessionId);
+        $lockKey     = "instant-dub:{$this->sessionId}:voices-lock";
+        $sessionData = DubSession::get($this->sessionId) ?? [];
         $forceVoice = $sessionData['force_voice'] ?? null;
         $driver = $sessionData['tts_driver'] ?? config('dubber.tts.default', 'edge');
 
@@ -334,13 +330,13 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
         if ($forceVoice) {
             $gender = str_starts_with($forceVoice, 'F') ? 'female'
                     : (str_starts_with($forceVoice, 'C') ? 'child' : 'male');
-            $lock = \Illuminate\Support\Facades\Cache::lock($lockKey, 5);
+            $lock = Cache::lock($lockKey, 5);
             $lock->block(5, function () use ($voiceKey, $speakers, $forceVoice, $gender) {
                 $voiceMap = json_decode(Redis::get($voiceKey) ?? '{}', true) ?: [];
                 foreach (array_keys($speakers) as $tag) {
                     $voiceMap[$tag] = ['driver' => 'mms', 'gender' => $gender, 'pool_name' => $forceVoice, 'tau' => 1.0];
                 }
-                Redis::setex($voiceKey, 50400, json_encode($voiceMap));
+                Redis::setex($voiceKey, DubSession::TTL, json_encode($voiceMap));
             });
             return;
         }

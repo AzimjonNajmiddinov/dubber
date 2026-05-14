@@ -2,6 +2,7 @@
 
 namespace App\Jobs;
 
+use App\Support\DubSession;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -28,79 +29,31 @@ class DownloadOriginalAudioJob implements ShouldQueue
 
     public function handle(): void
     {
-        $sessionKey = "instant-dub:{$this->sessionId}";
-        $sessionJson = Redis::get($sessionKey);
-        if (!$sessionJson) return;
-
-        $session = json_decode($sessionJson, true);
-        if (($session['status'] ?? '') === 'stopped') return;
+        $session = DubSession::get($this->sessionId);
+        if (!$session || ($session['status'] ?? '') === 'stopped') return;
 
         if (str_contains($this->videoUrl, 'youtube.com') || str_contains($this->videoUrl, 'youtu.be')) {
-            if ($this->audioUrl) {
-                $this->handleYoutubeDirectUrl($this->audioUrl);
-            } else {
-                $this->handleYoutube();
-            }
+            $this->audioUrl
+                ? $this->handleYoutubeDirectUrl($this->audioUrl)
+                : $this->handleYoutube();
             return;
         }
 
         if (!str_contains($this->videoUrl, '.m3u8')) return;
 
-        // Parse audio playlist to get segment URLs + durations
         $segments = $this->parseAudioPlaylist();
         if (empty($segments)) {
             Log::warning("[DUB] No audio segments found in HLS", ['session' => $this->sessionId]);
             return;
         }
 
-        // Store segments info in Redis for chunked download jobs
         $totalDuration = array_sum(array_column($segments, 'duration'));
-        Redis::setex("instant-dub:{$this->sessionId}:audio-segments", 86400, json_encode($segments));
+        Redis::setex(DubSession::audioSegmentsKey($this->sessionId), 86400, json_encode($segments));
+        DubSession::patch($this->sessionId, ['video_duration' => $totalDuration]);
 
-        // Update session with video duration
-        $sessionJson = Redis::get($sessionKey);
-        if ($sessionJson) {
-            $s = json_decode($sessionJson, true);
-            $s['video_duration'] = $totalDuration;
-            Redis::setex($sessionKey, 50400, json_encode($s));
-        }
-
-        // Group TS segments into 30-second chunks — balances first-chunk latency
-        // (~8s) with queue size (~240 jobs for 2h film instead of ~1400).
-        $CHUNK_SIZE = 30.0;
-        $pendingChunks = [];
-        $chunkIndex  = 0;
-        $chunkStart  = 0.0;
-        $chunkEnd    = 0.0;
-
-        foreach ($segments as $seg) {
-            $chunkEnd += (float) $seg['duration'];
-            if ($chunkEnd - $chunkStart >= $CHUNK_SIZE) {
-                $pendingChunks[] = [$chunkIndex, $chunkStart, $chunkEnd];
-                $chunkStart = $chunkEnd;
-                $chunkIndex++;
-            }
-        }
-        if ($chunkEnd > $chunkStart) {
-            $pendingChunks[] = [$chunkIndex, $chunkStart, $chunkEnd];
-            $chunkIndex++;
-        }
-
-        // Write total BEFORE dispatching so hlsAudioPlaylist sees it immediately
-        $sJson = Redis::get($sessionKey);
-        if ($sJson) {
-            $s = json_decode($sJson, true);
-            $s['total_bg_chunks'] = $chunkIndex;
-            Redis::setex($sessionKey, 50400, json_encode($s));
-        }
-
-        foreach ($pendingChunks as [$idx, $start, $end]) {
+        $this->dispatchChunks($totalDuration, function (int $idx, float $start, float $end) {
             DownloadAudioChunkJob::dispatch($this->sessionId, $idx, $start, $end)->onQueue('default');
-        }
-
-        Log::info("[DUB] Audio download dispatched ({$chunkIndex} chunks, {$totalDuration}s total)", [
-            'session' => $this->sessionId,
-        ]);
+        }, segments: $segments);
     }
 
     private function parseAudioPlaylist(): array
@@ -167,19 +120,14 @@ class DownloadOriginalAudioJob implements ShouldQueue
 
     private function handleYoutubeDirectUrl(string $audioUrl): void
     {
-        $sessionKey = "instant-dub:{$this->sessionId}";
-        $workDir    = storage_path("app/instant-dub/{$this->sessionId}");
-        @mkdir($workDir, 0755, true);
-        $audioPath = "{$workDir}/source_audio.m4a";
-
+        $audioPath = $this->workDirPath('source_audio.m4a');
         Log::info("[DUB] YouTube: downloading audio via direct URL", ['session' => $this->sessionId]);
 
         $result = Process::timeout(300)->run([
             'ffmpeg', '-y',
             '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             '-i', $audioUrl,
-            '-vn', '-acodec', 'copy',
-            $audioPath,
+            '-vn', '-acodec', 'copy', $audioPath,
         ]);
 
         if (!file_exists($audioPath) || filesize($audioPath) < 1000) {
@@ -191,66 +139,12 @@ class DownloadOriginalAudioJob implements ShouldQueue
             return;
         }
 
-        $this->dispatchChunksFromLocalFile($audioPath, $sessionKey);
-    }
-
-    private function dispatchChunksFromLocalFile(string $audioPath, string $sessionKey): void
-    {
-        $probeResult = Process::timeout(15)->run([
-            'ffprobe', '-v', 'error',
-            '-show_entries', 'format=duration',
-            '-of', 'default=noprint_wrappers=1:nokey=1',
-            $audioPath,
-        ]);
-        $totalDuration = (float) trim($probeResult->output());
-        if ($totalDuration <= 0) {
-            Log::warning("[DUB] Could not determine audio duration", ['session' => $this->sessionId]);
-            return;
-        }
-
-        $sessionJson = Redis::get($sessionKey);
-        if ($sessionJson) {
-            $s = json_decode($sessionJson, true);
-            $s['video_duration'] = $totalDuration;
-            Redis::setex($sessionKey, 50400, json_encode($s));
-        }
-
-        $CHUNK_SIZE    = 30.0;
-        $pendingChunks = [];
-        $chunkIndex    = 0;
-        $chunkStart    = 0.0;
-        while ($chunkStart < $totalDuration) {
-            $chunkEnd = min($chunkStart + $CHUNK_SIZE, $totalDuration);
-            $pendingChunks[] = [$chunkIndex, $chunkStart, $chunkEnd];
-            $chunkStart = $chunkEnd;
-            $chunkIndex++;
-        }
-
-        // Write total BEFORE dispatching so hlsAudioPlaylist sees it immediately
-        $sessionJson = Redis::get($sessionKey);
-        if ($sessionJson) {
-            $s = json_decode($sessionJson, true);
-            $s['total_bg_chunks'] = $chunkIndex;
-            Redis::setex($sessionKey, 50400, json_encode($s));
-        }
-
-        foreach ($pendingChunks as [$idx, $start, $end]) {
-            DownloadAudioChunkJob::dispatch($this->sessionId, $idx, $start, $end, $audioPath)->onQueue('default');
-        }
-
-        Log::info("[DUB] Audio dispatched ({$chunkIndex} chunks, {$totalDuration}s)", [
-            'session' => $this->sessionId,
-        ]);
+        $this->dispatchChunksFromLocalFile($audioPath);
     }
 
     private function handleYoutube(): void
     {
-        $sessionKey = "instant-dub:{$this->sessionId}";
-        $workDir = storage_path("app/instant-dub/{$this->sessionId}");
-        @mkdir($workDir, 0755, true);
-
-        $audioPath = "{$workDir}/source_audio.m4a";
-
+        $audioPath = $this->workDirPath('source_audio.m4a');
         Log::info("[DUB] YouTube: downloading audio via yt-dlp", ['session' => $this->sessionId]);
 
         $result = Process::timeout(300)->run([
@@ -272,7 +166,83 @@ class DownloadOriginalAudioJob implements ShouldQueue
             return;
         }
 
-        $this->dispatchChunksFromLocalFile($audioPath, $sessionKey);
+        $this->dispatchChunksFromLocalFile($audioPath);
+    }
+
+    private function dispatchChunksFromLocalFile(string $audioPath): void
+    {
+        $probeResult = Process::timeout(15)->run([
+            'ffprobe', '-v', 'error',
+            '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            $audioPath,
+        ]);
+        $totalDuration = (float) trim($probeResult->output());
+        if ($totalDuration <= 0) {
+            Log::warning("[DUB] Could not determine audio duration", ['session' => $this->sessionId]);
+            return;
+        }
+
+        DubSession::patch($this->sessionId, ['video_duration' => $totalDuration]);
+
+        $this->dispatchChunks($totalDuration, function (int $idx, float $start, float $end) use ($audioPath) {
+            DownloadAudioChunkJob::dispatch($this->sessionId, $idx, $start, $end, $audioPath)->onQueue('default');
+        });
+    }
+
+    /**
+     * Pre-calculate all chunk boundaries, write total_bg_chunks to Redis BEFORE
+     * dispatching so hlsAudioPlaylist never reads 0 (race condition fix).
+     *
+     * @param  float         $totalDuration
+     * @param  callable      $dispatch  fn(int $idx, float $start, float $end): void
+     * @param  array|null    $segments  HLS segment list (optional — used to count without dispatch)
+     */
+    private function dispatchChunks(float $totalDuration, callable $dispatch, ?array $segments = null): void
+    {
+        $CHUNK_SIZE    = 30.0;
+        $pendingChunks = [];
+        $chunkIndex    = 0;
+
+        if ($segments !== null) {
+            $chunkStart = 0.0;
+            $chunkEnd   = 0.0;
+            foreach ($segments as $seg) {
+                $chunkEnd += (float) $seg['duration'];
+                if ($chunkEnd - $chunkStart >= $CHUNK_SIZE) {
+                    $pendingChunks[] = [$chunkIndex++, $chunkStart, $chunkEnd];
+                    $chunkStart = $chunkEnd;
+                }
+            }
+            if ($chunkEnd > $chunkStart) {
+                $pendingChunks[] = [$chunkIndex++, $chunkStart, $chunkEnd];
+            }
+        } else {
+            $chunkStart = 0.0;
+            while ($chunkStart < $totalDuration) {
+                $chunkEnd = min($chunkStart + $CHUNK_SIZE, $totalDuration);
+                $pendingChunks[] = [$chunkIndex++, $chunkStart, $chunkEnd];
+                $chunkStart = $chunkEnd;
+            }
+        }
+
+        // Write total BEFORE dispatching so hlsAudioPlaylist sees it immediately
+        DubSession::patch($this->sessionId, ['total_bg_chunks' => $chunkIndex]);
+
+        foreach ($pendingChunks as [$idx, $start, $end]) {
+            $dispatch($idx, $start, $end);
+        }
+
+        Log::info("[DUB] Audio dispatched ({$chunkIndex} chunks, {$totalDuration}s)", [
+            'session' => $this->sessionId,
+        ]);
+    }
+
+    private function workDirPath(string $filename): string
+    {
+        $dir = storage_path("app/instant-dub/{$this->sessionId}");
+        @mkdir($dir, 0755, true);
+        return "{$dir}/{$filename}";
     }
 
     public function failed(\Throwable $exception): void

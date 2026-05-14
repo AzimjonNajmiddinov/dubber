@@ -10,6 +10,7 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use App\Support\DubSession;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Redis;
 
@@ -24,17 +25,11 @@ class PersistDubCacheJob implements ShouldQueue
 
     public function handle(): void
     {
-        $sessionKey = "instant-dub:{$this->sessionId}";
-
-        // Prevent duplicate persist runs
         $lock = Redis::set("instant-dub:{$this->sessionId}:persist-lock", 1, 'EX', 60, 'NX');
         if (!$lock) return;
 
-        $sessionJson = Redis::get($sessionKey);
-        if (!$sessionJson) return;
-
-        $session = json_decode($sessionJson, true);
-        if (($session['status'] ?? '') !== 'complete') return;
+        $session = DubSession::get($this->sessionId);
+        if (!$session || ($session['status'] ?? '') !== 'complete') return;
 
         $videoUrl   = strtok($session['video_url'] ?? '', '?');
         $contentKey = InstantDub::extractContentKey($session['video_url'] ?? '');
@@ -64,7 +59,7 @@ class PersistDubCacheJob implements ShouldQueue
             $dub->update(['aac_dir' => $aacDir]);
 
             // Save voice map
-            $voiceMap = json_decode(Redis::get("instant-dub:{$this->sessionId}:voices") ?? '{}', true);
+            $voiceMap = json_decode(Redis::get(DubSession::voicesKey($this->sessionId)) ?? '{}', true);
             InstantDubVoiceMap::where('instant_dub_id', $dub->id)->delete();
             foreach ($voiceMap as $tag => $config) {
                 InstantDubVoiceMap::create([
@@ -75,10 +70,7 @@ class PersistDubCacheJob implements ShouldQueue
             }
 
             // Save segments
-            $chunkKeys = [];
-            for ($i = 0; $i < $total; $i++) {
-                $chunkKeys[] = "{$sessionKey}:chunk:{$i}";
-            }
+            $chunkKeys = array_map(fn($i) => DubSession::chunkKey($this->sessionId, $i), range(0, $total - 1));
             $chunkValues = Redis::mget($chunkKeys);
 
             InstantDubSegment::where('instant_dub_id', $dub->id)->delete();
@@ -120,8 +112,7 @@ class PersistDubCacheJob implements ShouldQueue
             $dub->update(['status' => 'complete']);
 
             // Mark session as cached so we don't persist again
-            $session['cached_dub_id'] = $dub->id;
-            Redis::setex($sessionKey, 50400, json_encode($session));
+            DubSession::patch($this->sessionId, ['cached_dub_id' => $dub->id]);
 
             Log::info("[DUB] Persisted dub #{$dub->id} ({$total} segments) for: {$videoUrl}");
 

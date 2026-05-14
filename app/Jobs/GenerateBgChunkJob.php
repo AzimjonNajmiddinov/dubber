@@ -2,6 +2,8 @@
 
 namespace App\Jobs;
 
+use App\Support\AudioFrame;
+use App\Support\DubSession;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -15,7 +17,7 @@ use Illuminate\Support\Facades\Redis;
 use Illuminate\Support\Str;
 
 /**
- * Mixes one 32-second background chunk: center-cancelled original + TTS overlays.
+ * Mixes one 30-second background chunk: centre-cancelled original + TTS overlays.
  *
  * ShouldBeUnique prevents the cascade problem: if 8 TTS completions trigger this job
  * for the same chunk, only the first dispatch is queued; the rest are dropped.
@@ -26,8 +28,8 @@ class GenerateBgChunkJob implements ShouldQueue, ShouldBeUnique
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public int $timeout  = 120;
-    public int $tries    = 2;
+    public int $timeout   = 120;
+    public int $tries     = 2;
     public int $uniqueFor = 60;
 
     public function __construct(
@@ -44,20 +46,16 @@ class GenerateBgChunkJob implements ShouldQueue, ShouldBeUnique
 
     public function handle(): void
     {
-        $sessionKey  = "instant-dub:{$this->sessionId}";
-        $sessionJson = Redis::get($sessionKey);
-        if (!$sessionJson) return;
+        $session = DubSession::get($this->sessionId);
+        if (!$session || ($session['status'] ?? '') === 'stopped') return;
 
-        $session = json_decode($sessionJson, true);
-        if (($session['status'] ?? '') === 'stopped') return;
-
-        $bgChunkJson = Redis::hget("instant-dub:{$this->sessionId}:bgchunks", (string) $this->chunkIndex);
+        $bgChunkJson = Redis::hget(DubSession::bgChunksKey($this->sessionId), (string) $this->chunkIndex);
         if (!$bgChunkJson) return;
 
         $bgAudioPath = json_decode($bgChunkJson, true)['path'] ?? null;
         if (!$bgAudioPath || !file_exists($bgAudioPath)) return;
 
-        $lock = Cache::lock("bg-gen:{$this->sessionId}:{$this->chunkIndex}", 90);
+        $lock = Cache::lock(DubSession::bgGenLockKey($this->sessionId, $this->chunkIndex), 90);
         if (!$lock->get()) return;
 
         try {
@@ -69,17 +67,16 @@ class GenerateBgChunkJob implements ShouldQueue, ShouldBeUnique
 
     private function mix(string $bgAudioPath, array $session): void
     {
-        $sessionKey = "instant-dub:{$this->sessionId}";
-        $total      = (int) ($session['total_segments'] ?? 0);
+        $total    = (int) ($session['total_segments'] ?? 0);
+        $aacDir   = DubSession::aacDir($this->sessionId, $session);
 
-        $aacDir = storage_path("app/instant-dub/{$this->sessionId}/aac");
         if (!is_dir($aacDir)) @mkdir($aacDir, 0755, true);
 
-        $chunkDur = round($this->frameAlignedDuration($this->startTime, $this->endTime), 6);
+        $chunkDur = round(AudioFrame::alignedDuration($this->startTime, $this->endTime), 6);
         $outFile  = "{$aacDir}/bg-{$this->chunkIndex}.aac";
 
-        // Stereo center cancellation: dialogue is center-panned (L≈R), so 70% of it is removed.
-        // Volume boosted 1.5x to compensate for the energy lost from cancellation.
+        // Stereo centre cancellation: dialogue is centre-panned (L≈R),
+        // so 88% cancellation removes most of the original speech.
         $cmd = [
             'ffmpeg', '-y',
             '-f', 'lavfi', '-t', (string) $chunkDur, '-i', 'anullsrc=r=44100:cl=stereo',
@@ -91,14 +88,12 @@ class GenerateBgChunkJob implements ShouldQueue, ShouldBeUnique
         $tmpFiles  = [];
 
         // Fetch all TTS chunks in one Redis pipeline
-        $chunkKeys = array_map(
-            fn($i) => "{$sessionKey}:chunk:{$i}",
-            range(0, max(0, $total - 1))
-        );
+        $chunkKeys   = array_map(fn($i) => DubSession::chunkKey($this->sessionId, $i), range(0, max(0, $total - 1)));
         $chunkValues = $total > 0 ? Redis::mget($chunkKeys) : [];
 
         foreach ($chunkValues as $i => $chunkJson) {
             if (!$chunkJson) continue;
+
             $chunk    = json_decode($chunkJson, true);
             $segStart = (float) ($chunk['start_time'] ?? 0);
             $segEnd   = (float) ($chunk['end_time']   ?? 0);
@@ -118,12 +113,14 @@ class GenerateBgChunkJob implements ShouldQueue, ShouldBeUnique
             $cmd[] = (string) round($ttsSeek, 3);
             $cmd[] = '-i';
             $cmd[] = $tmpMp3;
+
             $filters[]   = "[{$inputIdx}:a]adelay={$ttsDelayMs}|{$ttsDelayMs},volume=3.0,aresample=44100[tts{$inputIdx}]";
             $mixInputs[] = "[tts{$inputIdx}]";
             $inputIdx++;
         }
 
-        $filter = implode(';', $filters) . ';' . implode('', $mixInputs)
+        $filter = implode(';', $filters) . ';'
+            . implode('', $mixInputs)
             . 'amix=inputs=' . count($mixInputs) . ':duration=first:normalize=0';
 
         $cmd = array_merge($cmd, [
@@ -145,7 +142,9 @@ class GenerateBgChunkJob implements ShouldQueue, ShouldBeUnique
         }
 
         Log::info(
-            "[DUB] bg-{$this->chunkIndex}.aac ready (" . round($this->startTime) . '-' . round($this->endTime) . 's, tts=' . ($inputIdx - 2) . ')',
+            "[DUB] bg-{$this->chunkIndex}.aac ready ("
+            . round($this->startTime) . '-' . round($this->endTime) . 's'
+            . ', tts=' . ($inputIdx - 2) . ')',
             ['session' => $this->sessionId]
         );
 
@@ -154,7 +153,7 @@ class GenerateBgChunkJob implements ShouldQueue, ShouldBeUnique
 
     private function checkPlayable(string $aacDir): void
     {
-        // bg-0 + bg-1 ready = 64s buffer. Single authoritative place for playable=true.
+        // bg-0 + bg-1 ready = ~60s buffer. Single authoritative place for playable=true.
         for ($bi = 0; $bi <= 1; $bi++) {
             $f = "{$aacDir}/bg-{$bi}.aac";
             if (!file_exists($f) || filesize($f) <= 10) return;
@@ -172,18 +171,9 @@ class GenerateBgChunkJob implements ShouldQueue, ShouldBeUnique
             return 0
         LUA;
 
-        $fired = Redis::eval($lua, 1, "instant-dub:{$this->sessionId}");
+        $fired = Redis::eval($lua, 1, DubSession::key($this->sessionId));
         if ($fired) {
             Log::info("[DUB] playable=true (bg-0+bg-1 ready)", ['session' => $this->sessionId]);
         }
-    }
-
-    private function frameAlignedDuration(float $start, float $end): float
-    {
-        $sr              = 44100;
-        $frameSize       = 1024;
-        $durationSamples = (int) round(($end - $start) * $sr);
-        $alignedSamples  = (int) ceil($durationSamples / $frameSize) * $frameSize;
-        return $alignedSamples / $sr;
     }
 }

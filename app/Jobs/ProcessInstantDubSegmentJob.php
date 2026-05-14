@@ -14,6 +14,8 @@ use App\Services\ElevenLabs\ElevenLabsClient;
 use App\Services\MmsTts\MmsTtsClient;
 use App\Services\TextNormalizer;
 use App\Services\Tts\Drivers\AishaTtsDriver;
+use App\Support\AudioFrame;
+use App\Support\DubSession;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Facades\Redis;
@@ -40,15 +42,8 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
 
     public function handle(): void
     {
-        $sessionKey = "instant-dub:{$this->sessionId}";
-
-        $sessionJson = Redis::get($sessionKey);
-        if (!$sessionJson) {
-            return;
-        }
-
-        $session = json_decode($sessionJson, true);
-        if (($session['status'] ?? '') === 'stopped') {
+        $session = DubSession::get($this->sessionId);
+        if (!$session || ($session['status'] ?? '') === 'stopped') {
             return;
         }
 
@@ -75,8 +70,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             $rawWav = "{$tmpDir}/seg_{$this->index}.wav";
 
             // Read per-speaker driver from voice map
-            $voiceKey = "instant-dub:{$this->sessionId}:voices";
-            $voiceMap = json_decode(Redis::get($voiceKey), true) ?? [];
+            $voiceMap = json_decode(Redis::get(DubSession::voicesKey($this->sessionId)), true) ?? [];
             $speakerEntry = $voiceMap[$this->speaker] ?? [];
             $driver = $speakerEntry['driver'] ?? ($session['tts_driver'] ?? config('dubber.tts.default', 'edge'));
 
@@ -154,8 +148,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             @unlink($finalMp3);
 
             // 4. Save TTS chunk to Redis
-            $chunkKey = "{$sessionKey}:chunk:{$this->index}";
-            Redis::setex($chunkKey, 50400, json_encode([
+            Redis::setex(DubSession::chunkKey($this->sessionId, $this->index), DubSession::TTL, json_encode([
                 'index'          => $this->index,
                 'start_time'     => $this->startTime,
                 'end_time'       => $this->endTime,
@@ -173,7 +166,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
 
             // 6. Dispatch GenerateBgChunkJob for bg chunks overlapping this segment.
             // ShouldBeUnique + 3s delay collapses concurrent TTS completions into one ffmpeg run.
-            $bgHashData = Redis::hgetall("instant-dub:{$this->sessionId}:bgchunks") ?? [];
+            $bgHashData = Redis::hgetall(DubSession::bgChunksKey($this->sessionId)) ?? [];
             foreach ($bgHashData as $bgIdx => $bgJson) {
                 $bg = json_decode($bgJson, true);
                 $cs = (float) ($bg['start'] ?? 0);
@@ -187,7 +180,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
 
             // 5. Increment ready counter and dispatch cache persist on completion
             $this->incrementReady();
-            $this->dispatchPersistIfComplete($sessionKey);
+            $this->dispatchPersistIfComplete();
 
             Log::info("[DUB] [{$title}] Segment #{$this->index} ready ({$this->speaker}, " . round($ttsDuration, 2) . "s): " . Str::limit($this->text, 60), [
                 'session' => $this->sessionId,
@@ -199,16 +192,15 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             ]);
 
             // Store error chunk so polling doesn't stall
-            $chunkKey = "{$sessionKey}:chunk:{$this->index}";
-            Redis::setex($chunkKey, 50400, json_encode([
-                'index' => $this->index,
-                'start_time' => $this->startTime,
-                'end_time' => $this->endTime,
-                'text' => $this->text,
-                'speaker' => $this->speaker,
-                'audio_base64' => null,
+            Redis::setex(DubSession::chunkKey($this->sessionId, $this->index), DubSession::TTL, json_encode([
+                'index'          => $this->index,
+                'start_time'     => $this->startTime,
+                'end_time'       => $this->endTime,
+                'text'           => $this->text,
+                'speaker'        => $this->speaker,
+                'audio_base64'   => null,
                 'audio_duration' => 0,
-                'error' => $e->getMessage(),
+                'error'          => $e->getMessage(),
             ]));
 
             $this->incrementReady();
@@ -217,11 +209,9 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
 
     public function failed(\Throwable $exception): void
     {
-        $sessionKey = "instant-dub:{$this->sessionId}";
-
-        $chunkKey = "{$sessionKey}:chunk:{$this->index}";
+        $chunkKey = DubSession::chunkKey($this->sessionId, $this->index);
         if (!Redis::exists($chunkKey)) {
-            Redis::setex($chunkKey, 50400, json_encode([
+            Redis::setex($chunkKey, DubSession::TTL, json_encode([
                 'index'          => $this->index,
                 'start_time'     => $this->startTime,
                 'end_time'       => $this->endTime,
@@ -340,14 +330,11 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         $serviceUrl = config('services.prosody_transfer.url') ?: env('PROSODY_TRANSFER_SERVICE_URL');
         if (!$serviceUrl) return;
 
-        $sessionKey = "instant-dub:{$this->sessionId}";
-        $sessionJson = Redis::get($sessionKey);
-        if (!$sessionJson) return;
-        $session  = json_decode($sessionJson, true);
-        if ($session['disable_prosody'] ?? false) return;
+        $session = DubSession::get($this->sessionId);
+        if (!$session || ($session['disable_prosody'] ?? false)) return;
 
         $bgPath = null; $bgStart = null; $bgEnd = null;
-        $bgHashData = Redis::hgetall("instant-dub:{$this->sessionId}:bgchunks") ?? [];
+        $bgHashData = Redis::hgetall(DubSession::bgChunksKey($this->sessionId)) ?? [];
         foreach ($bgHashData as $bgJson) {
             $bg   = json_decode($bgJson, true);
             $cs   = (float) ($bg['start'] ?? 0);
@@ -360,7 +347,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         }
         if (!$bgPath) return;
 
-        $chunkKey  = "{$sessionKey}:chunk:{$this->index}";
+        $chunkKey  = DubSession::chunkKey($this->sessionId, $this->index);
         $chunkJson = Redis::get($chunkKey);
         if (!$chunkJson) return;
         $chunk = json_decode($chunkJson, true);
@@ -423,7 +410,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
 
             $chunk['audio_base64'] = base64_encode(file_get_contents($outMp3));
             @unlink($outMp3);
-            Redis::setex($chunkKey, 50400, json_encode($chunk));
+            Redis::setex($chunkKey, DubSession::TTL, json_encode($chunk));
 
             Log::info("[DUB] Energy transfer ok — seg #{$this->index}", ['session' => $this->sessionId]);
 
@@ -439,12 +426,6 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                 "{$tmpDir}/et_{$this->index}_out.mp3",
             ] as $f) @unlink($f);
         }
-    }
-
-    private function applyProsodyTransfer(string $ttsWav, string $tmpDir): ?string
-    {
-        // Demucs removed — vocals reference no longer available.
-        return null;
     }
 
     private function generateWithMms(string $outputMp3, string $tmpDir, array $speakerEntry = []): void
@@ -558,7 +539,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             return null;
         }
 
-        $bgHashData = \Illuminate\Support\Facades\Redis::hgetall("instant-dub:{$this->sessionId}:bgchunks") ?? [];
+        $bgHashData = Redis::hgetall(DubSession::bgChunksKey($this->sessionId)) ?? [];
 
         Log::info("[DUB] Segment #{$this->index} ref search: start={$this->startTime} end={$this->endTime} chunks=" . count($bgHashData), ['session' => $this->sessionId]);
 
@@ -610,30 +591,22 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
     private function reRegisterMmsVoice(MmsTtsClient $client, ?string $voiceFile, ?string $cacheKey): string
     {
         if (!$voiceFile) {
-            $session   = json_decode(\Illuminate\Support\Facades\Redis::get("instant-dub:{$this->sessionId}") ?? '{}', true);
+            $session   = DubSession::get($this->sessionId) ?? [];
             $fv        = $session['force_voice'] ?? null;
             if (!$fv) throw new \RuntimeException("MMS: cannot re-register — no force_voice in session");
-            $gender    = str_starts_with($fv, 'F') ? 'female' : (str_starts_with($fv, 'C') ? 'child' : 'male');
+            $gender    = DubSession::genderFromTag($fv);
             $voiceFile = $this->mmsPoolFileByName($gender, $fv);
             if (!$voiceFile) throw new \RuntimeException("MMS: cannot re-register — voice file not found for '{$fv}'");
             $cacheKey  = 'voice-pool-id:mms:' . md5($voiceFile);
         }
 
         $name    = pathinfo($voiceFile, PATHINFO_FILENAME);
-        \Illuminate\Support\Facades\Redis::del($cacheKey);
+        Redis::del($cacheKey);
         $voiceId = $client->findVoiceByName("pool-{$name}") ?? $client->addVoice("pool-{$name}", [$voiceFile]);
-        \Illuminate\Support\Facades\Redis::setex($cacheKey, 604800, $voiceId);
+        Redis::setex($cacheKey, 604800, $voiceId);
 
         // Update force_voice_id in session if it was stale
-        $sessionKey = "instant-dub:{$this->sessionId}";
-        $freshJson  = \Illuminate\Support\Facades\Redis::get($sessionKey);
-        if ($freshJson) {
-            $fresh = json_decode($freshJson, true);
-            if (!empty($fresh['force_voice_id'])) {
-                $fresh['force_voice_id'] = $voiceId;
-                \Illuminate\Support\Facades\Redis::setex($sessionKey, 50400, json_encode($fresh));
-            }
-        }
+        DubSession::patch($this->sessionId, ['force_voice_id' => $voiceId]);
 
         Log::info("[MMS] Re-registered voice after pod restart: {$voiceId}", ['session' => $this->sessionId]);
         return $voiceId;
@@ -717,18 +690,6 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         return $voices[$this->language] ?? 'uz-UZ-SardorNeural';
     }
 
-    /**
-     * Compute frame-aligned duration from absolute positions.
-     * Uses cumulative frame counting so rounding errors don't accumulate
-     * across segments (max drift: 23ms at any point, bounded).
-     */
-    private function frameAlignedDuration(float $start, float $end): float
-    {
-        $startFrames = (int) round($start * 44100 / 1024);
-        $endFrames = (int) round($end * 44100 / 1024);
-        return max(1, $endFrames - $startFrames) * 1024 / 44100;
-    }
-
     private function getAudioDuration(string $path): float
     {
         $result = Process::timeout(10)->run([
@@ -741,20 +702,17 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         return (float) trim($result->output());
     }
 
-    private function dispatchPersistIfComplete(string $sessionKey): void
+    private function dispatchPersistIfComplete(): void
     {
-        $sessionJson = Redis::get($sessionKey);
-        if (!$sessionJson) return;
-        $s = json_decode($sessionJson, true);
-        if (($s['status'] ?? '') === 'complete') {
+        $s = DubSession::get($this->sessionId);
+        if ($s && ($s['status'] ?? '') === 'complete') {
             PersistDubCacheJob::dispatch($this->sessionId)->onQueue('default');
         }
     }
 
     private function generateBackgroundOnlyAac(array $session): void
     {
-        $chunkKey = "instant-dub:{$this->sessionId}:chunk:{$this->index}";
-        Redis::setex($chunkKey, 50400, json_encode([
+        Redis::setex(DubSession::chunkKey($this->sessionId, $this->index), DubSession::TTL, json_encode([
             'index'          => $this->index,
             'start_time'     => $this->startTime,
             'end_time'       => $this->endTime,
@@ -768,7 +726,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
 
     private function incrementReady(): void
     {
-        $sessionKey = "instant-dub:{$this->sessionId}";
+        $sessionKey = DubSession::key($this->sessionId);
 
         // Atomic increment + completion check via Lua.
         // playable=true is only set here when total_bg_chunks=0 (no bg audio expected).
@@ -789,6 +747,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                 end
             end
             redis.call('SETEX', KEYS[1], 50400, cjson.encode(session))
+
             return session['segments_ready']
         LUA;
 

@@ -9,6 +9,7 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use App\Support\DubSession;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
@@ -35,11 +36,8 @@ class TranslateInstantDubBatchJob implements ShouldQueue
 
     public function handle(): void
     {
-        // Check if session was stopped
-        $sessionKey = "instant-dub:{$this->sessionId}";
-        $sessionJson = Redis::get($sessionKey);
-        if (!$sessionJson) return;
-        $session = json_decode($sessionJson, true);
+        $session = DubSession::get($this->sessionId);
+        if (!$session) return;
         $this->title = $session['title'] ?? 'Untitled';
 
         if (($session['status'] ?? '') === 'stopped') {
@@ -47,11 +45,9 @@ class TranslateInstantDubBatchJob implements ShouldQueue
             return;
         }
 
-        // Load full dialogue from Redis (stored once by PrepareInstantDubJob)
-        $fullDialogueText = Redis::get("instant-dub:{$this->sessionId}:full-dialogue") ?? '';
+        $fullDialogueText = Redis::get(DubSession::fullDialogueKey($this->sessionId)) ?? '';
 
-        // Load batch from Redis
-        $batchKey = "instant-dub:{$this->sessionId}:batch:{$this->batchIndex}";
+        $batchKey = DubSession::batchKey($this->sessionId, $this->batchIndex);
         $batchJson = Redis::get($batchKey);
         if (!$batchJson) {
             Log::error("[DUB] [{$this->title}] Batch {$this->batchIndex} data missing from Redis", ['session' => $this->sessionId]);
@@ -109,7 +105,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         $nextBatchFirstStart = null;
         $nextBatchIdx = $this->batchIndex + 1;
         if ($nextBatchIdx < $this->totalBatches) {
-            $nextBatchJson = Redis::get("instant-dub:{$this->sessionId}:batch:{$nextBatchIdx}");
+            $nextBatchJson = Redis::get(DubSession::batchKey($this->sessionId, $nextBatchIdx));
             if ($nextBatchJson) {
                 $nextBatch = json_decode($nextBatchJson, true);
                 $nextBatchFirstStart = (float) ($nextBatch[0]['start'] ?? 0);
@@ -157,8 +153,8 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         } else {
             // Last batch — clean up
             Redis::del(
-                "instant-dub:{$this->sessionId}:full-dialogue",
-                "instant-dub:{$this->sessionId}:all-segments",
+                DubSession::fullDialogueKey($this->sessionId),
+                DubSession::allSegmentsKey($this->sessionId),
             );
             Log::info("[DUB] [{$this->title}] All {$this->totalBatches} translation batches complete", [
                 'session' => $this->sessionId,
@@ -169,7 +165,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
     private function translateBatchZero(array $batch, string $fullDialogueText): array
     {
         // Load all segments for character analysis
-        $allSegmentsJson = Redis::get("instant-dub:{$this->sessionId}:all-segments");
+        $allSegmentsJson = Redis::get(DubSession::allSegmentsKey($this->sessionId));
         $allSegments = $allSegmentsJson ? json_decode($allSegmentsJson, true) : [];
 
         // Build prompts for both analysis and translation
@@ -263,7 +259,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         }
 
         // Store character context for subsequent batches
-        Redis::setex("instant-dub:{$this->sessionId}:character-context", 50400, $characterContext);
+        Redis::setex(DubSession::characterContextKey($this->sessionId), DubSession::TTL, $characterContext);
 
         // Use parallel translation result if available
         if ($translationResult) {
@@ -276,7 +272,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
 
     private function translateBatchWithContext(array $batch, string $fullDialogueText): array
     {
-        $characterContext = Redis::get("instant-dub:{$this->sessionId}:character-context") ?? '';
+        $characterContext = Redis::get(DubSession::characterContextKey($this->sessionId)) ?? '';
         $messages = $this->buildTranslationMessages($batch, $characterContext, $fullDialogueText);
 
         // Try Claude Sonnet first
@@ -392,15 +388,13 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         $apiKey = config('services.elevenlabs.api_key', '');
         if ($apiKey === '') return;
 
-        // Get original audio path from session
-        $sessionJson = Redis::get("instant-dub:{$this->sessionId}");
-        if (!$sessionJson) return;
-        $session = json_decode($sessionJson, true);
+        $session = DubSession::get($this->sessionId);
+        if (!$session) return;
         $originalAudioPath = $session['original_audio_path'] ?? null;
         if (!$originalAudioPath || !file_exists($originalAudioPath)) return;
 
         // Load all segments for sample extraction (need original timing + speaker tags)
-        $allSegmentsJson = Redis::get("instant-dub:{$this->sessionId}:all-segments");
+        $allSegmentsJson = Redis::get(DubSession::allSegmentsKey($this->sessionId));
         $allSegments = $allSegmentsJson ? json_decode($allSegmentsJson, true) : [];
         if (empty($allSegments)) return;
 
@@ -426,7 +420,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
             if (empty($samples)) return;
 
             $client = new ElevenLabsClient($apiKey);
-            $voiceKey = "instant-dub:{$this->sessionId}:voices";
+            $voiceKey = DubSession::voicesKey($this->sessionId);
             $voiceMap = json_decode(Redis::get($voiceKey), true) ?? [];
             $clonedVoiceIds = [];
 
@@ -475,9 +469,9 @@ class TranslateInstantDubBatchJob implements ShouldQueue
                 }
             }
 
-            Redis::setex($voiceKey, 50400, json_encode($voiceMap));
+            Redis::setex($voiceKey, DubSession::TTL, json_encode($voiceMap));
             if (!empty($clonedVoiceIds)) {
-                Redis::setex("instant-dub:{$this->sessionId}:elevenlabs-voices", 50400, json_encode($clonedVoiceIds));
+                Redis::setex(DubSession::elevenLabsVoicesKey($this->sessionId), DubSession::TTL, json_encode($clonedVoiceIds));
             }
         } catch (\Throwable $e) {
             Log::warning("[DUB] [{$this->title}] ElevenLabs voice cloning failed entirely", [
@@ -489,9 +483,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
 
     private function extractAndStoreTitle(string $analysisText): void
     {
-        $sessionKey = "instant-dub:{$this->sessionId}";
-        $sessionJson = Redis::get($sessionKey);
-        $session = $sessionJson ? json_decode($sessionJson, true) : [];
+        $session = DubSession::get($this->sessionId) ?? [];
         $changed = false;
 
         // Extract title
@@ -532,8 +524,8 @@ class TranslateInstantDubBatchJob implements ShouldQueue
             ]);
         }
 
-        if ($changed && $sessionJson) {
-            Redis::setex($sessionKey, 50400, json_encode($session));
+        if ($changed) {
+            DubSession::save($this->sessionId, $session);
         }
     }
 
@@ -545,13 +537,12 @@ class TranslateInstantDubBatchJob implements ShouldQueue
     {
         // Count segments per speaker across ALL session chunks (not just this batch)
         $allCounts = [];
-        $sessionKey = "instant-dub:{$this->sessionId}";
-        $sessionJson = Redis::get($sessionKey);
-        $total = $sessionJson ? (int) (json_decode($sessionJson, true)['total_segments'] ?? 0) : 0;
+        $s = DubSession::get($this->sessionId);
+        $total = $s ? (int) ($s['total_segments'] ?? 0) : 0;
 
         // Count from already-processed chunks
         for ($i = 0; $i < $total; $i++) {
-            $chunkJson = Redis::get("{$sessionKey}:chunk:{$i}");
+            $chunkJson = Redis::get(DubSession::chunkKey($this->sessionId, $i));
             if ($chunkJson) {
                 $chunk = json_decode($chunkJson, true);
                 $tag = $chunk['speaker'] ?? 'M1';
@@ -613,10 +604,9 @@ class TranslateInstantDubBatchJob implements ShouldQueue
 
     private function mergeVoiceMap(array $newSpeakers): void
     {
-        $voiceKey = "instant-dub:{$this->sessionId}:voices";
-        $lockKey = "instant-dub:{$this->sessionId}:voices-lock";
-        $sessionJson = Redis::get("instant-dub:{$this->sessionId}");
-        $sessionData = $sessionJson ? json_decode($sessionJson, true) : [];
+        $voiceKey = DubSession::voicesKey($this->sessionId);
+        $lockKey  = "instant-dub:{$this->sessionId}:voices-lock";
+        $sessionData = DubSession::get($this->sessionId) ?? [];
         $forceVoice = $sessionData['force_voice'] ?? null;
         $driver = $sessionData['tts_driver'] ?? config('dubber.tts.default', 'edge');
 
@@ -630,7 +620,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
                 foreach (array_keys($newSpeakers) as $tag) {
                     $voiceMap[$tag] = ['driver' => 'mms', 'gender' => $gender, 'pool_name' => $forceVoice, 'tau' => 1.0];
                 }
-                Redis::setex($voiceKey, 50400, json_encode($voiceMap));
+                Redis::setex($voiceKey, DubSession::TTL, json_encode($voiceMap));
             });
             return;
         }
@@ -680,7 +670,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
                 }
             }
 
-            Redis::setex($voiceKey, 50400, json_encode($voiceMap));
+            Redis::setex($voiceKey, DubSession::TTL, json_encode($voiceMap));
         });
 
         Log::info("[DUB] [{$this->title}] Voice map merged (batch {$this->batchIndex}): new=" . implode(',', array_keys($newSpeakers)) . " total=" . implode(',', array_keys($voiceMap)), [
@@ -953,28 +943,20 @@ class TranslateInstantDubBatchJob implements ShouldQueue
 
     private function updateSession(array $data): void
     {
-        $sessionKey = "instant-dub:{$this->sessionId}";
-        $json = Redis::get($sessionKey);
-        if (!$json) return;
-        $session = json_decode($json, true);
-        Redis::setex($sessionKey, 50400, json_encode(array_merge($session, $data)));
+        DubSession::patch($this->sessionId, $data);
     }
 
     public function failed(\Throwable $exception): void
     {
-        $title = 'Untitled';
-        $sessionJson = Redis::get("instant-dub:{$this->sessionId}");
-        $session = $sessionJson ? json_decode($sessionJson, true) : [];
-        if ($session) {
-            $title = $session['title'] ?? 'Untitled';
-        }
+        $session = DubSession::get($this->sessionId) ?? [];
+        $title   = $session['title'] ?? 'Untitled';
 
         Log::error("[DUB] [{$title}] Batch {$this->batchIndex} failed permanently: " . $exception->getMessage(), [
             'session' => $this->sessionId,
         ]);
 
         // Generate background-only segments for failed batch so there are no gaps
-        $batchKey = "instant-dub:{$this->sessionId}:batch:{$this->batchIndex}";
+        $batchKey = DubSession::batchKey($this->sessionId, $this->batchIndex);
         $batchJson = Redis::get($batchKey);
         if ($batchJson) {
             $batch = json_decode($batchJson, true);
@@ -990,7 +972,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
                 if (isset($batch[$i + 1])) {
                     $slotEnd = (float) $batch[$i + 1]['start'];
                 } elseif ($globalIdx + 1 < $total) {
-                    $nextBatchKey = "instant-dub:{$this->sessionId}:batch:" . ($this->batchIndex + 1);
+                    $nextBatchKey = DubSession::batchKey($this->sessionId, $this->batchIndex + 1);
                     $nextBatchJson = Redis::get($nextBatchKey);
                     if ($nextBatchJson) {
                         $nextBatch = json_decode($nextBatchJson, true);
@@ -1035,8 +1017,8 @@ class TranslateInstantDubBatchJob implements ShouldQueue
             )->onQueue('default');
         } else {
             Redis::del(
-                "instant-dub:{$this->sessionId}:full-dialogue",
-                "instant-dub:{$this->sessionId}:all-segments",
+                DubSession::fullDialogueKey($this->sessionId),
+                DubSession::allSegmentsKey($this->sessionId),
             );
         }
     }

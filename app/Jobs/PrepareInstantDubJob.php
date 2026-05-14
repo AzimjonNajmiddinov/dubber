@@ -4,6 +4,7 @@ namespace App\Jobs;
 
 use App\Models\InstantDub;
 use App\Services\SrtParser;
+use App\Support\DubSession;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -33,18 +34,8 @@ class PrepareInstantDubJob implements ShouldQueue
 
     public function handle(): void
     {
-        $sessionKey = "instant-dub:{$this->sessionId}";
-
-        // Read title from session for logging context
-        $title = 'Untitled';
-        $sessionJson = Redis::get($sessionKey);
-        if ($sessionJson) {
-            $title = json_decode($sessionJson, true)['title'] ?? 'Untitled';
-        }
-
-        // Pre-register force_voice with MMS once (single-job context = no race condition).
-        // Stores force_voice_id in session so all segment workers use the same voice ID.
-        $session = $sessionJson ? json_decode($sessionJson, true) : [];
+        $session = DubSession::get($this->sessionId) ?? [];
+        $title   = $session['title'] ?? 'Untitled';
         $forceVoice = $session['force_voice'] ?? null;
         // Chrome extension (force_voice) → disable prosody transfer so voice stays clean
         if ($forceVoice && empty($session['disable_prosody'])) {
@@ -194,9 +185,9 @@ class PrepareInstantDubJob implements ShouldQueue
         }
 
         // Store all segments and full dialogue in Redis (avoids duplicating in every job payload)
-        $allSegmentsKey = "instant-dub:{$this->sessionId}:all-segments";
-        Redis::setex($allSegmentsKey, 50400, json_encode($allSegments));
-        Redis::setex("instant-dub:{$this->sessionId}:full-dialogue", 50400, $fullDialogueText);
+        $allSegmentsKey = DubSession::allSegmentsKey($this->sessionId);
+        Redis::setex($allSegmentsKey, DubSession::TTL, json_encode($allSegments));
+        Redis::setex(DubSession::fullDialogueKey($this->sessionId), DubSession::TTL, $fullDialogueText);
 
         // 4. Micro-batch: dispatch first 3 segments for fast translation → immediate TTS
         $microBatchSize = min(3, count($segments));
@@ -217,8 +208,8 @@ class PrepareInstantDubJob implements ShouldQueue
         $batches = array_chunk($remainingSegments, 15);
         $totalBatches = count($batches);
         foreach ($batches as $batchIdx => $batch) {
-            $batchKey = "instant-dub:{$this->sessionId}:batch:{$batchIdx}";
-            Redis::setex($batchKey, 50400, json_encode(array_values($batch)));
+            $batchKey = DubSession::batchKey($this->sessionId, $batchIdx);
+            Redis::setex($batchKey, DubSession::TTL, json_encode(array_values($batch)));
         }
 
         // 6. Dispatch full translation chain (batch 0 starts from segment offset after micro-batch)
@@ -294,7 +285,7 @@ class PrepareInstantDubJob implements ShouldQueue
 
     private function buildVoiceMap(array $speakers): void
     {
-        $sessionJson = Redis::get("instant-dub:{$this->sessionId}");
+        $sessionJson = Redis::get(DubSession::key($this->sessionId));
         $session     = $sessionJson ? json_decode($sessionJson, true) : [];
         $forceVoice  = $session['force_voice'] ?? null;
 
@@ -309,8 +300,7 @@ class PrepareInstantDubJob implements ShouldQueue
             foreach (array_keys($speakers) as $tag) {
                 $voiceMap[$tag] = ['driver' => 'mms', 'gender' => $gender, 'pool_name' => $forceVoice, 'tau' => $tau, 'speed' => $speed];
             }
-            $voiceKey = "instant-dub:{$this->sessionId}:voices";
-            Redis::setex($voiceKey, 50400, json_encode($voiceMap));
+            Redis::setex(DubSession::voicesKey($this->sessionId), DubSession::TTL, json_encode($voiceMap));
             Log::info("[DUB] Voice map built (force_voice={$forceVoice}): " . implode(', ', array_keys($speakers)), [
                 'session' => $this->sessionId,
             ]);
@@ -360,12 +350,11 @@ class PrepareInstantDubJob implements ShouldQueue
             }
         }
 
-        $voiceKey = "instant-dub:{$this->sessionId}:voices";
-        Redis::setex($voiceKey, 50400, json_encode($voiceMap));
+        Redis::setex(DubSession::voicesKey($this->sessionId), DubSession::TTL, json_encode($voiceMap));
 
         if (count($speakers) === 1) {
             $session['disable_prosody'] = true;
-            Redis::setex("instant-dub:{$this->sessionId}", 50400, json_encode($session));
+            Redis::setex(DubSession::key($this->sessionId), DubSession::TTL, json_encode($session));
         }
 
         Log::info("[DUB] Voice map built (driver={$driver}): " . implode(', ', array_keys($speakers)), [
@@ -590,22 +579,14 @@ class PrepareInstantDubJob implements ShouldQueue
 
     private function updateStatus(string $status, string $error = ''): void
     {
-        $sessionKey = "instant-dub:{$this->sessionId}";
-        $json = Redis::get($sessionKey);
-        if (!$json) return;
-        $session = json_decode($json, true);
-        $session['status'] = $status;
-        if ($error) $session['error'] = $error;
-        Redis::setex($sessionKey, 50400, json_encode($session));
+        $data = ['status' => $status];
+        if ($error) $data['error'] = $error;
+        DubSession::patch($this->sessionId, $data);
     }
 
     private function updateSession(array $data): void
     {
-        $sessionKey = "instant-dub:{$this->sessionId}";
-        $json = Redis::get($sessionKey);
-        if (!$json) return;
-        $session = json_decode($json, true);
-        Redis::setex($sessionKey, 50400, json_encode(array_merge($session, $data)));
+        DubSession::patch($this->sessionId, $data);
     }
 
     private function fetchYouTubeSrt(string $url): string
