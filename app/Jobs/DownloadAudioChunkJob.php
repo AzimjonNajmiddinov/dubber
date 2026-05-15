@@ -139,17 +139,15 @@ class DownloadAudioChunkJob implements ShouldQueue
         Redis::hset(DubSession::bgChunksKey($this->sessionId), (string) $this->chunkIndex, $bgChunkData);
         Redis::expire(DubSession::bgChunksKey($this->sessionId), DubSession::TTL);
 
-        Cache::lock(DubSession::bgLockKey($this->sessionId), 10)->block(5, function () use ($chunkFile) {
-            $s = DubSession::get($this->sessionId) ?? [];
-            $s['original_audio_path'] = $chunkFile;
-            $s['has_bg']              = true;
-            DubSession::save($this->sessionId, $s);
+        Cache::lock(DubSession::bgLockKey($this->sessionId), 10)->block(5, function () {
+            DubSession::patch($this->sessionId, ['has_bg' => true]);
         });
     }
 
     private function checkAndSetComplete(): void
     {
-        $lua = <<<'LUA'
+        $ttl = DubSession::TTL;
+        $lua = <<<LUA
             local data = redis.call('GET', KEYS[1])
             if not data then return 0 end
             local session = cjson.decode(data)
@@ -158,7 +156,7 @@ class DownloadAudioChunkJob implements ShouldQueue
             local hasBg  = session['has_bg'] == true
             if ready >= total and hasBg and session['status'] ~= 'complete' then
                 session['status'] = 'complete'
-                redis.call('SETEX', KEYS[1], 50400, cjson.encode(session))
+                redis.call('SETEX', KEYS[1], {$ttl}, cjson.encode(session))
             end
             return ready
         LUA;

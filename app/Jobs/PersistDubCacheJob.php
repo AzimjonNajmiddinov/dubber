@@ -25,7 +25,7 @@ class PersistDubCacheJob implements ShouldQueue
 
     public function handle(): void
     {
-        $lock = Redis::set("instant-dub:{$this->sessionId}:persist-lock", 1, 'EX', 60, 'NX');
+        $lock = Redis::set(DubSession::persistLockKey($this->sessionId), 1, 'EX', 60, 'NX');
         if (!$lock) return;
 
         $session = DubSession::get($this->sessionId);

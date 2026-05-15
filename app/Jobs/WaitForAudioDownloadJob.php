@@ -40,7 +40,7 @@ class WaitForAudioDownloadJob implements ShouldQueue
         if (!file_exists($donePath)) {
             // Still downloading — re-dispatch to check again in 15s
             // Give up after 30 minutes (120 polls × 15s)
-            $pollKey   = "instant-dub:{$this->sessionId}:audio-poll-count";
+            $pollKey   = DubSession::audioPollKey($this->sessionId);
             $pollCount = (int) Redis::get($pollKey);
             if ($pollCount >= 120) {
                 Log::warning("[DUB] [{$title}] Audio download timed out after 30 minutes", [
@@ -59,7 +59,7 @@ class WaitForAudioDownloadJob implements ShouldQueue
         }
 
         // Download done — clean up poll counter and playlist
-        Redis::del("instant-dub:{$this->sessionId}:audio-poll-count");
+        Redis::del(DubSession::audioPollKey($this->sessionId));
         @unlink("{$tmpDir}/audio_playlist.m3u8");
         @unlink($donePath);
 

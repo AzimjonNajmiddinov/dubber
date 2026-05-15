@@ -7,6 +7,7 @@ use App\Models\InstantDub;
 use App\Models\InstantDubSegment;
 use App\Models\InstantDubVoiceMap;
 use App\Services\VoiceVariants;
+use App\Support\DubSession;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Redis;
 use Illuminate\Support\Str;
@@ -209,7 +210,7 @@ class AdminDubController extends Controller
             'created_at'     => now()->toIso8601String(),
         ];
 
-        Redis::setex("instant-dub:{$sessionId}", 50400, json_encode($session));
+        DubSession::save($sessionId, $session);
 
         $dub->update(['status' => 'processing', 'session_id' => $sessionId]);
 
@@ -232,12 +233,10 @@ class AdminDubController extends Controller
             return response()->json(['status' => $dub->status, 'ready' => 0, 'total' => 0]);
         }
 
-        $sessionJson = Redis::get("instant-dub:{$sessionId}");
-        if (!$sessionJson) {
+        $session = DubSession::get($sessionId);
+        if (!$session) {
             return response()->json(['status' => $dub->status, 'ready' => 0, 'total' => 0]);
         }
-
-        $session = json_decode($sessionJson, true);
 
         return response()->json([
             'status' => $session['status'] ?? 'processing',

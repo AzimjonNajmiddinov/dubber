@@ -605,7 +605,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
     private function mergeVoiceMap(array $newSpeakers): void
     {
         $voiceKey = DubSession::voicesKey($this->sessionId);
-        $lockKey  = "instant-dub:{$this->sessionId}:voices-lock";
+        $lockKey  = DubSession::voicesLockKey($this->sessionId);
         $sessionData = DubSession::get($this->sessionId) ?? [];
         $forceVoice = $sessionData['force_voice'] ?? null;
         $driver = $sessionData['tts_driver'] ?? config('dubber.tts.default', 'edge');

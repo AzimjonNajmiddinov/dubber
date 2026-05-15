@@ -159,13 +159,14 @@ class GenerateBgChunkJob implements ShouldQueue, ShouldBeUnique
             if (!file_exists($f) || filesize($f) <= 10) return;
         }
 
-        $lua = <<<'LUA'
+        $ttl = DubSession::TTL;
+        $lua = <<<LUA
             local data = redis.call('GET', KEYS[1])
             if not data then return 0 end
             local session = cjson.decode(data)
             if not session['playable'] then
                 session['playable'] = true
-                redis.call('SETEX', KEYS[1], 50400, cjson.encode(session))
+                redis.call('SETEX', KEYS[1], {$ttl}, cjson.encode(session))
                 return 1
             end
             return 0

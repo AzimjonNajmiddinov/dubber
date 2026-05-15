@@ -321,7 +321,7 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
     private function mergeVoiceMap(array $speakers): void
     {
         $voiceKey    = DubSession::voicesKey($this->sessionId);
-        $lockKey     = "instant-dub:{$this->sessionId}:voices-lock";
+        $lockKey     = DubSession::voicesLockKey($this->sessionId);
         $sessionData = DubSession::get($this->sessionId) ?? [];
         $forceVoice = $sessionData['force_voice'] ?? null;
         $driver = $sessionData['tts_driver'] ?? config('dubber.tts.default', 'edge');
@@ -381,7 +381,7 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
                 }
             }
 
-            Redis::setex($voiceKey, 50400, json_encode($voiceMap));
+            Redis::setex($voiceKey, DubSession::TTL, json_encode($voiceMap));
         });
     }
 

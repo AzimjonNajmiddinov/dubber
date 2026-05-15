@@ -6,6 +6,8 @@ use App\Jobs\DownloadOriginalAudioJob;
 use App\Jobs\PrepareInstantDubJob;
 use App\Models\InstantDub;
 use App\Services\ElevenLabs\ElevenLabsClient;
+use App\Support\AudioFrame;
+use App\Support\DubSession;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
@@ -93,7 +95,7 @@ class InstantDubController extends Controller
                 }
 
                 $session = $this->buildSessionFromCache($cached, $sessionId, $videoUrl, $videoBaseUrl, $videoQuery, $title, $forceVoice);
-                Redis::setex("instant-dub:{$sessionId}", 50400, json_encode($session));
+                DubSession::save($sessionId, $session);
 
                 $cached->update(['status' => 'processing', 'session_id' => $sessionId]);
                 PrepareInstantDubJob::dispatch(
@@ -122,7 +124,7 @@ class InstantDubController extends Controller
             'created_at'     => now()->toIso8601String(),
         ];
 
-        Redis::setex("instant-dub:{$sessionId}", 50400, json_encode($session));
+        DubSession::save($sessionId, $session);
 
         PrepareInstantDubJob::dispatch(
             $sessionId, $videoUrl, $language, $translateFrom, $srt, null, $audioUrl,
@@ -141,13 +143,12 @@ class InstantDubController extends Controller
 
     public function poll(string $sessionId, Request $request): JsonResponse
     {
-        $sessionJson = Redis::get("instant-dub:{$sessionId}");
+        $session = DubSession::get($sessionId);
 
-        if (!$sessionJson) {
+        if (!$session) {
             return response()->json(['error' => 'Session not found'], 404);
         }
 
-        $session = json_decode($sessionJson, true);
         $status = $session['status'] ?? 'preparing';
         $ready = (int) ($session['segments_ready'] ?? 0);
         $total = (int) ($session['total_segments'] ?? 0);
@@ -159,8 +160,8 @@ class InstantDubController extends Controller
 
             if ($lastProgress && ($now - $lastProgress) > 120) {
                 // No progress for 2 minutes — force complete (playable already set by GenerateBgChunkJob)
-                $session['status'] = 'complete';
-                Redis::setex("instant-dub:{$sessionId}", 50400, json_encode($session));
+                $status = 'complete';
+                DubSession::patch($sessionId, ['status' => 'complete']);
                 Log::warning("[DUB] Session auto-completed (stale): {$ready}/{$total} segments", [
                     'session' => $sessionId,
                     'stale_seconds' => $now - $lastProgress,
@@ -173,7 +174,7 @@ class InstantDubController extends Controller
         // Batch fetch up to 20 chunks in one Redis call
         $chunkKeys = [];
         for ($i = $after + 1; $i < $after + 21; $i++) {
-            $chunkKeys[] = "instant-dub:{$sessionId}:chunk:{$i}";
+            $chunkKeys[] = DubSession::chunkKey($sessionId, $i);
         }
         $chunkValues = Redis::mget($chunkKeys);
 
@@ -197,56 +198,39 @@ class InstantDubController extends Controller
 
     public function stop(string $sessionId): JsonResponse
     {
-        $sessionJson = Redis::get("instant-dub:{$sessionId}");
+        $session = DubSession::get($sessionId);
 
-        if (!$sessionJson) {
+        if (!$session) {
             return response()->json(['error' => 'Session not found'], 404);
         }
 
-        $session = json_decode($sessionJson, true);
         $title = $session['title'] ?? 'Untitled';
         $session['status'] = 'stopped';
-        Redis::setex("instant-dub:{$sessionId}", 300, json_encode($session));
+        // Intentional short TTL (5 min) for stopped sessions so Redis cleans up quickly
+        Redis::setex(DubSession::key($sessionId), 300, json_encode($session));
 
         Log::info("[DUB] [{$title}] Session stopped", ['session' => $sessionId]);
 
-        // Clean up original audio file
-        if (!empty($session['original_audio_path'])) {
-            @unlink($session['original_audio_path']);
-            $dir = dirname($session['original_audio_path']);
-            @rmdir($dir);
+        // Clean up source audio file
+        $sourceAudio = storage_path("app/instant-dub/{$sessionId}/source_audio.m4a");
+        if (file_exists($sourceAudio)) {
+            @unlink($sourceAudio);
         }
 
         // Delete cloned ElevenLabs voices
-        $voiceIdsJson = Redis::get("instant-dub:{$sessionId}:elevenlabs-voices");
+        $voiceIdsJson = Redis::get(DubSession::elevenLabsVoicesKey($sessionId));
         if ($voiceIdsJson) {
             $client = new ElevenLabsClient();
             foreach (json_decode($voiceIdsJson, true) as $voiceId) {
                 try { $client->deleteVoice($voiceId); } catch (\Throwable) {}
             }
-            Redis::del("instant-dub:{$sessionId}:elevenlabs-voices");
+            Redis::del(DubSession::elevenLabsVoicesKey($sessionId));
         }
 
         // Batch delete all chunk keys + cached responses
-        $total = $session['total_segments'] ?? 0;
-        $keysToDelete = [
-            "instant-dub:{$sessionId}:rewritten-master",
-            "instant-dub:{$sessionId}:master-playlist",
-            "instant-dub:{$sessionId}:vtt-cache",
-            "instant-dub:{$sessionId}:voices",
-            "instant-dub:{$sessionId}:full-dialogue",
-            "instant-dub:{$sessionId}:all-segments",
-            "instant-dub:{$sessionId}:character-context",
-            "instant-dub:{$sessionId}:bgchunks",
-        ];
-        // Clean up batch keys
+        $total = (int) ($session['total_segments'] ?? 0);
         $totalBatches = (int) ceil($total / 15);
-        for ($i = 0; $i < $totalBatches; $i++) {
-            $keysToDelete[] = "instant-dub:{$sessionId}:batch:{$i}";
-        }
-        for ($i = 0; $i < $total; $i++) {
-            $keysToDelete[] = "instant-dub:{$sessionId}:chunk:{$i}";
-        }
+        $keysToDelete = DubSession::allDeleteKeys($sessionId, $total, $totalBatches);
         if (!empty($keysToDelete)) {
             Redis::del($keysToDelete);
         }
@@ -383,7 +367,7 @@ class InstantDubController extends Controller
         }
 
         // Cache the fully rewritten master playlist — deterministic, no need to recompute
-        $rewrittenKey = "instant-dub:{$sessionId}:rewritten-master";
+        $rewrittenKey = DubSession::rewrittenMasterKey($sessionId);
         $cached = Redis::get($rewrittenKey);
         if ($cached) {
             return response($cached, 200, [
@@ -394,7 +378,7 @@ class InstantDubController extends Controller
         }
 
         // Fetch original master playlist (cached separately for CDN token lifetime)
-        $masterCacheKey = "instant-dub:{$sessionId}:master-playlist";
+        $masterCacheKey = DubSession::masterPlaylistKey($sessionId);
         $master = Redis::get($masterCacheKey);
         if (!$master) {
             $response = Http::timeout(10)->get($videoUrl);
@@ -402,7 +386,7 @@ class InstantDubController extends Controller
                 return response('Failed to fetch master playlist', 502);
             }
             $master = $response->body();
-            Redis::setex($masterCacheKey, 50400, $master);
+            Redis::setex($masterCacheKey, DubSession::TTL, $master);
         }
         $videoBaseUrl = $session['video_base_url'] ?? '';
         $videoQuery = $session['video_query'] ?? '';
@@ -522,7 +506,7 @@ class InstantDubController extends Controller
         $result = implode("\n", $output);
 
         // Cache rewritten master — it won't change for this session
-        Redis::setex($rewrittenKey, 50400, $result);
+        Redis::setex($rewrittenKey, DubSession::TTL, $result);
 
         return response($result, 200, [
             'Content-Type' => 'application/vnd.apple.mpegurl',
@@ -545,7 +529,7 @@ class InstantDubController extends Controller
         // Batch fetch all chunks in one Redis call (eliminates N+1)
         $chunkKeys = [];
         for ($i = 0; $i < $total; $i++) {
-            $chunkKeys[] = "instant-dub:{$sessionId}:chunk:{$i}";
+            $chunkKeys[] = DubSession::chunkKey($sessionId, $i);
         }
         $chunkValues = $total > 0 ? Redis::mget($chunkKeys) : [];
 
@@ -570,7 +554,7 @@ class InstantDubController extends Controller
         $entries    = [];
         $readyCount = 0;
 
-        $bgHashData = \Illuminate\Support\Facades\Redis::hgetall("instant-dub:{$sessionId}:bgchunks") ?? [];
+        $bgHashData = Redis::hgetall(DubSession::bgChunksKey($sessionId)) ?? [];
         ksort($bgHashData, SORT_NUMERIC);
 
         foreach ($bgHashData as $bgIdx => $bgJson) {
@@ -632,8 +616,7 @@ class InstantDubController extends Controller
 
     private function aacDir(string $sessionId, ?array $session = null): string
     {
-        $session ??= $this->getSession($sessionId);
-        return $session['aac_base_dir'] ?? storage_path("app/instant-dub/{$sessionId}/aac");
+        return DubSession::aacDir($sessionId, $session);
     }
 
     public function hlsGapSegment(string $sessionId, int $index)
@@ -675,7 +658,7 @@ class InstantDubController extends Controller
         $session = $this->getSession($sessionId);
         $total = (int) ($session['total_segments'] ?? 0);
         if ($total > 0) {
-            $firstChunkJson = Redis::get("instant-dub:{$sessionId}:chunk:0");
+            $firstChunkJson = Redis::get(DubSession::chunkKey($sessionId, 0));
             if ($firstChunkJson) {
                 $firstChunk = json_decode($firstChunkJson, true);
                 $firstStart = (float) ($firstChunk['start_time'] ?? 0);
@@ -712,7 +695,7 @@ class InstantDubController extends Controller
         }
 
         // Not ready yet — return silence of expected duration
-        $bgJson = \Illuminate\Support\Facades\Redis::hget("instant-dub:{$sessionId}:bgchunks", (string) $index);
+        $bgJson = Redis::hget(DubSession::bgChunksKey($sessionId), (string) $index);
         $bgChunk = $bgJson ? json_decode($bgJson, true) : null;
         $cs = $bgChunk ? (float) ($bgChunk['start'] ?? $index * 32.0) : $index * 32.0;
         $ce = $bgChunk ? (float) ($bgChunk['end']   ?? ($index + 1) * 32.0) : ($index + 1) * 32.0;
@@ -759,7 +742,7 @@ class InstantDubController extends Controller
         ]);
 
         // Fallback: generate on-demand if pre-gen missed (e.g. race condition, old session)
-        $chunkJson = Redis::get("instant-dub:{$sessionId}:chunk:{$index}");
+        $chunkJson = Redis::get(DubSession::chunkKey($sessionId, $index));
         if (!$chunkJson) {
             return $this->silentAacResponse();
         }
@@ -808,7 +791,7 @@ class InstantDubController extends Controller
 
         // Get last chunk's end_time for duration
         $lastChunkJson = $total > 0
-            ? Redis::get("instant-dub:{$sessionId}:chunk:" . ($total - 1))
+            ? Redis::get(DubSession::chunkKey($sessionId, $total - 1))
             : null;
         $totalDuration = 3600; // fallback 1h
         if ($lastChunkJson) {
@@ -852,7 +835,7 @@ class InstantDubController extends Controller
 
         // Serve cached VTT for completed sessions
         if ($status === 'complete') {
-            $cached = Redis::get("instant-dub:{$sessionId}:vtt-cache");
+            $cached = Redis::get(DubSession::vttCacheKey($sessionId));
             if ($cached) {
                 return response($cached, 200, [
                     'Content-Type' => 'text/vtt',
@@ -868,7 +851,7 @@ class InstantDubController extends Controller
         // Batch fetch all chunks
         $chunkKeys = [];
         for ($i = 0; $i < $total; $i++) {
-            $chunkKeys[] = "instant-dub:{$sessionId}:chunk:{$i}";
+            $chunkKeys[] = DubSession::chunkKey($sessionId, $i);
         }
         $chunkValues = $total > 0 ? Redis::mget($chunkKeys) : [];
 
@@ -887,7 +870,7 @@ class InstantDubController extends Controller
 
         // Cache VTT once session is complete (won't change)
         if ($status === 'complete') {
-            Redis::setex("instant-dub:{$sessionId}:vtt-cache", 50400, $vtt);
+            Redis::setex(DubSession::vttCacheKey($sessionId), DubSession::TTL, $vtt);
         }
 
         $cacheControl = $status === 'complete' ? 'max-age=3600' : 'no-cache';
@@ -1107,15 +1090,12 @@ class InstantDubController extends Controller
 
     private function frameAlignedDuration(float $start, float $end): float
     {
-        $startFrames = (int) round($start * 44100 / 1024);
-        $endFrames = (int) round($end * 44100 / 1024);
-        return max(1, $endFrames - $startFrames) * 1024 / 44100;
+        return AudioFrame::alignedDuration($start, $end);
     }
 
     private function getSession(string $sessionId): ?array
     {
-        $json = Redis::get("instant-dub:{$sessionId}");
-        return $json ? json_decode($json, true) : null;
+        return DubSession::get($sessionId);
     }
 
     /**
@@ -1130,7 +1110,7 @@ class InstantDubController extends Controller
 
         $slotStart = $startTime;
 
-        $nextJson = Redis::get("instant-dub:{$sessionId}:chunk:" . ($index + 1));
+        $nextJson = Redis::get(DubSession::chunkKey($sessionId, $index + 1));
         if ($nextJson) {
             $next = json_decode($nextJson, true);
             $slotEnd = (float) ($next['start_time'] ?? $endTime);

@@ -89,6 +89,21 @@ class DubSession
         return "instant-dub:{$id}:bg-lock";
     }
 
+    public static function audioPollKey(string $id): string
+    {
+        return "instant-dub:{$id}:audio-poll-count";
+    }
+
+    public static function persistLockKey(string $id): string
+    {
+        return "instant-dub:{$id}:persist-lock";
+    }
+
+    public static function voicesLockKey(string $id): string
+    {
+        return "instant-dub:{$id}:voices-lock";
+    }
+
     // ── Session CRUD ──────────────────────────────────────────────────────────
 
     public static function get(string $id): ?array

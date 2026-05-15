@@ -732,7 +732,8 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         // playable=true is only set here when total_bg_chunks=0 (no bg audio expected).
         // When bg audio is present, GenerateBgChunkJob.checkPlayable() sets playable=true
         // once bg-0+bg-1 are on disk — prevents iOS from loading audio before files exist.
-        $lua = <<<'LUA'
+        $ttl = DubSession::TTL;
+        $lua = <<<LUA
             local data = redis.call('GET', KEYS[1])
             if not data then return 0 end
             local session = cjson.decode(data)
@@ -746,7 +747,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                     session['playable'] = true
                 end
             end
-            redis.call('SETEX', KEYS[1], 50400, cjson.encode(session))
+            redis.call('SETEX', KEYS[1], {$ttl}, cjson.encode(session))
 
             return session['segments_ready']
         LUA;
