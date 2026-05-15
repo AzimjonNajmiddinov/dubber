@@ -152,16 +152,14 @@ class DownloadOriginalAudioJob implements ShouldQueue
             '-f', 'bestaudio[ext=m4a]/bestaudio',
             '-o', $audioPath,
             '--no-playlist', '--quiet', '--no-warnings',
-            '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            '--force-ipv4',
-            '--extractor-args', 'youtube:player_client=web',
+            '--extractor-args', 'youtube:player_client=ios',
             $this->videoUrl,
         ]);
 
         if (!$result->successful() || !file_exists($audioPath) || filesize($audioPath) < 1000) {
             Log::warning("[DUB] YouTube audio download failed", [
                 'session' => $this->sessionId,
-                'error'   => Str::limit($result->errorOutput(), 300),
+                'error'   => Str::limit($result->errorOutput(), 1000),
             ]);
             return;
         }
