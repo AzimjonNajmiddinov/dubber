@@ -130,6 +130,7 @@ async function showOverlay() {
     overlay.querySelectorAll('[data-lang]').forEach(b => {
         b.addEventListener('click', () => {
             dubState.language = b.dataset.lang;
+            chrome.storage.sync.set({ language: dubState.language });
             overlay.querySelectorAll('[data-lang]').forEach(x =>
                 x.style.background = x.dataset.lang === dubState.language ? '#1a73e8' : 'transparent'
             );
@@ -613,25 +614,6 @@ function getDomYouTubeData() {
     return null;
 }
 
-function json3ToSrt(data) {
-    let srt = '', idx = 1;
-    for (const ev of data.events || []) {
-        if (!ev.segs || !ev.dDurationMs) continue;
-        const text = ev.segs.map(s => (s.utf8 || '').replace(/\n/g, ' ')).join('').trim();
-        if (!text) continue;
-        const s = ev.tStartMs || 0, e = s + ev.dDurationMs;
-        srt += `${idx}\n${ms2srt(s)} --> ${ms2srt(e)}\n${text}\n\n`;
-        idx++;
-    }
-    return srt || null;
-}
-
-function ms2srt(ms) {
-    const h = Math.floor(ms/3600000), m = Math.floor(ms%3600000/60000),
-          s = Math.floor(ms%60000/1000), f = ms % 1000;
-    return `${p(h)}:${p(m)}:${p(s)},${String(f).padStart(3,'0')}`;
-}
-function p(n) { return String(n).padStart(2,'0'); }
 function countSrt(s) { return (s.match(/^\d+$/gm) || []).length; }
 function base64ToArrayBuffer(b64) {
     const bin = atob(b64), len = bin.length, bytes = new Uint8Array(len);

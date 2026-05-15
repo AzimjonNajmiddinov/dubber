@@ -87,8 +87,9 @@ async function getYouTubeData(tabId, videoUrl) {
         } catch {}
     }
 
-    // Step 3: get audioUrl from MAIN world
+    // Step 3: get audioUrl + detectedLanguage from MAIN world
     let audioUrl = null;
+    let detectedLanguage = null;
     try {
         const r = await chrome.scripting.executeScript({
             target: { tabId },
@@ -96,21 +97,32 @@ async function getYouTubeData(tabId, videoUrl) {
             func: () => {
                 const pr = window.ytInitialPlayerResponse;
                 if (!pr) return null;
+
+                // Audio URL — pick highest-bitrate audio-only stream
                 const formats = pr.streamingData?.adaptiveFormats || [];
-                const f = formats.filter(f => f.mimeType?.startsWith('audio/') && f.url)
+                const audioFmt = formats
+                    .filter(f => f.mimeType?.startsWith('audio/') && f.url)
                     .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
-                return f?.url || null;
+
+                // Caption language — prefer the default/selected track
+                const tracks = pr.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
+                const defaultTrack = tracks.find(t => t.isDefault) || tracks.find(t => !t.kind || t.kind !== 'asr') || tracks[0];
+                const lang = defaultTrack?.languageCode?.slice(0, 2) || null;
+
+                return { audioUrl: audioFmt?.url || null, detectedLanguage: lang };
             },
         });
-        audioUrl = r?.[0]?.result || null;
+        const result = r?.[0]?.result;
+        audioUrl         = result?.audioUrl         || null;
+        detectedLanguage = result?.detectedLanguage || null;
     } catch {}
 
-    if (!srtText) return { srt: null, audioUrl };
+    if (!srtText) return { srt: null, audioUrl, detectedLanguage };
 
     try {
         const data = JSON.parse(srtText);
-        return { srt: json3ToSrt(data), audioUrl };
-    } catch { return { srt: null, audioUrl }; }
+        return { srt: json3ToSrt(data), audioUrl, detectedLanguage };
+    } catch { return { srt: null, audioUrl, detectedLanguage }; }
 }
 
 function json3ToSrt(data) {
