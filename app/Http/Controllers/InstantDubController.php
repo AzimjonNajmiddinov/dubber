@@ -522,30 +522,8 @@ class InstantDubController extends Controller
             return response('Session not found', 404);
         }
 
-        $total = (int) ($session['total_segments'] ?? 0);
-        $status = $session['status'] ?? 'preparing';
+        $status  = $session['status'] ?? 'preparing';
         $allDone = in_array($status, ['complete', 'stopped']);
-
-        // Batch fetch all chunks in one Redis call (eliminates N+1)
-        $chunkKeys = [];
-        for ($i = 0; $i < $total; $i++) {
-            $chunkKeys[] = DubSession::chunkKey($sessionId, $i);
-        }
-        $chunkValues = $total > 0 ? Redis::mget($chunkKeys) : [];
-
-        // Sequential-only while in progress: include segments 0..horizon where ALL are present.
-        // EVENT playlists must only append — never modify existing entries.
-        // Once complete: include ALL segments, skipping gaps (use silent fallback for missing).
-        $chunks = [];
-        $horizon = -1;
-        foreach ($chunkValues as $i => $chunkJson) {
-            if (!$chunkJson) {
-                if ($allDone) continue; // skip gaps when complete
-                break; // stop at first gap while in progress
-            }
-            $chunks[$i] = json_decode($chunkJson, true);
-            $horizon = $i;
-        }
 
         // Build playlist from bg chunks stored in dedicated Redis hash (not session JSON).
         // Iterate in strict sequential order — HLS EVENT playlists are append-only.
@@ -568,10 +546,12 @@ class InstantDubController extends Controller
             $entries[] = ['uri' => "dub-segment/bg-{$bgIdx}.aac", 'duration' => $dur];
             $readyCount++;
         }
-        $availableBg = $readyCount;
 
         // allBgDone: no bg audio expected (totalBg=0) → treat as done once TTS completes;
-        // otherwise done when all bg chunks are on disk.
+        // otherwise done when all bg chunks are on disk — even if TTS is still running.
+        // ENDLIST is added as soon as all bg files are ready (not waiting for TTS) because
+        // AVPlayer abandons EVENT playlists that stop growing and falls back to the embedded
+        // Russian audio in the video segments (~100s after last playlist growth).
         $allBgDone = ($totalBg === 0 && $allDone) || ($totalBg > 0 && $readyCount >= $totalBg);
 
         // Calculate TARGETDURATION
@@ -586,7 +566,7 @@ class InstantDubController extends Controller
         $m3u8 .= "#EXT-X-MEDIA-SEQUENCE:0\n";
         $m3u8 .= "#EXT-X-INDEPENDENT-SEGMENTS\n";
 
-        if (!($allDone && $allBgDone)) {
+        if (!$allBgDone) {
             $m3u8 .= "#EXT-X-PLAYLIST-TYPE:EVENT\n";
         }
 
@@ -595,11 +575,11 @@ class InstantDubController extends Controller
             $m3u8 .= "{$entry['uri']}\n";
         }
 
-        if ($allDone && $allBgDone) {
+        if ($allBgDone) {
             $m3u8 .= "#EXT-X-ENDLIST\n";
         }
 
-        $cacheControl = $allDone ? 'max-age=3600' : 'max-age=3';
+        $cacheControl = $allDone && $allBgDone ? 'max-age=3600' : 'max-age=3';
 
         return response($m3u8, 200, [
             'Content-Type' => 'application/vnd.apple.mpegurl',

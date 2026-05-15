@@ -117,14 +117,23 @@ class DubSession
         Redis::setex(static::key($id), static::TTL, json_encode($session));
     }
 
-    /** Merge $data into existing session without overwriting other keys. */
+    /** Merge $data into existing session atomically (Lua prevents GET+SET races). */
     public static function patch(string $id, array $data): void
     {
-        $current = Redis::get(static::key($id));
-        if (!$current) return;
-        Redis::setex(static::key($id), static::TTL, json_encode(
-            array_merge(json_decode($current, true), $data)
-        ));
+        $ttl   = static::TTL;
+        $patch = json_encode($data);
+        $lua   = <<<LUA
+            local raw = redis.call('GET', KEYS[1])
+            if not raw then return 0 end
+            local session = cjson.decode(raw)
+            local patch = cjson.decode(ARGV[1])
+            for k, v in pairs(patch) do
+                session[k] = v
+            end
+            redis.call('SETEX', KEYS[1], {$ttl}, cjson.encode(session))
+            return 1
+        LUA;
+        Redis::eval($lua, 1, static::key($id), $patch);
     }
 
     public static function isStopped(string $id): bool
