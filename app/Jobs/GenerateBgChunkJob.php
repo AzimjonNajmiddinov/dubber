@@ -75,14 +75,27 @@ class GenerateBgChunkJob implements ShouldQueue, ShouldBeUnique
         $chunkDur = round(AudioFrame::alignedDuration($this->startTime, $this->endTime), 6);
         $outFile  = "{$aacDir}/bg-{$this->chunkIndex}.aac";
 
-        // Stereo centre cancellation: dialogue is centre-panned (L≈R),
-        // so 88% cancellation removes most of the original speech.
+        // Detect channel count of the bg audio chunk
+        $chanProbe = Process::timeout(5)->run([
+            'ffprobe', '-v', 'error', '-select_streams', 'a:0',
+            '-show_entries', 'stream=channels',
+            '-of', 'default=nw=1:nk=1', $bgAudioPath,
+        ]);
+        $bgChannels = (int) trim($chanProbe->output());
+
+        // Stereo centre cancellation: dialogue is centre-panned (L≈R), 88% cancellation
+        // removes most of the original speech. Only works with stereo source.
+        // For mono sources, just pass through at normal volume (voice removal impossible).
+        $bgFilter = $bgChannels >= 2
+            ? '[1:a]pan=stereo|c0=c0-0.88*c1|c1=c1-0.88*c0,volume=1.0,aresample=44100[bg]'
+            : '[1:a]volume=1.0,aresample=44100[bg]';
+
         $cmd = [
             'ffmpeg', '-y',
             '-f', 'lavfi', '-t', (string) $chunkDur, '-i', 'anullsrc=r=44100:cl=stereo',
             '-t', (string) $chunkDur, '-i', $bgAudioPath,
         ];
-        $filters   = ['[1:a]pan=stereo|c0=c0-0.88*c1|c1=c1-0.88*c0,volume=1.0,aresample=44100[bg]'];
+        $filters   = [$bgFilter];
         $mixInputs = ['[0:a]', '[bg]'];
         $inputIdx  = 2;
         $tmpFiles  = [];

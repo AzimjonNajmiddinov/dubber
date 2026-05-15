@@ -160,12 +160,11 @@ class PrepareInstantDubJob implements ShouldQueue
             }
             $this->buildVoiceMap($allSpeakers);
 
-            $dispatched = 0;
+            // Always dispatch — ProcessInstantDubSegmentJob handles empty text via generateBackgroundOnlyAac.
             foreach ($segments as $i => $seg) {
                 $text = trim($seg['text']);
                 $text = trim(preg_replace('/\[[^\]]*\]\s*/', '', $text));
                 $text = str_replace('`', '\'', $text);
-                if ($text === '') continue;
 
                 $slotEnd = isset($segments[$i + 1]) ? $segments[$i + 1]['start'] : null;
 
@@ -175,10 +174,9 @@ class PrepareInstantDubJob implements ShouldQueue
                     $seg['speaker'] ?? 'M1',
                     $slotEnd,
                 )->onQueue('segment-generation');
-                $dispatched++;
             }
 
-            Log::info("[DUB] [{$title}] Prepared (no translation), {$dispatched} segments dispatched", [
+            Log::info("[DUB] [{$title}] Prepared (no translation), " . count($segments) . " segments dispatched", [
                 'session' => $this->sessionId,
             ]);
             return;
@@ -285,9 +283,8 @@ class PrepareInstantDubJob implements ShouldQueue
 
     private function buildVoiceMap(array $speakers): void
     {
-        $sessionJson = Redis::get(DubSession::key($this->sessionId));
-        $session     = $sessionJson ? json_decode($sessionJson, true) : [];
-        $forceVoice  = $session['force_voice'] ?? null;
+        $session    = DubSession::get($this->sessionId) ?? [];
+        $forceVoice = $session['force_voice'] ?? null;
 
         // Flow 3 (Chrome Extension): user picked a specific voice — assign it to ALL speakers.
         // Gender-based cycling (old approach) is DISABLED when force_voice is set.
@@ -353,8 +350,7 @@ class PrepareInstantDubJob implements ShouldQueue
         Redis::setex(DubSession::voicesKey($this->sessionId), DubSession::TTL, json_encode($voiceMap));
 
         if (count($speakers) === 1) {
-            $session['disable_prosody'] = true;
-            Redis::setex(DubSession::key($this->sessionId), DubSession::TTL, json_encode($session));
+            DubSession::patch($this->sessionId, ['disable_prosody' => true]);
         }
 
         Log::info("[DUB] Voice map built (driver={$driver}): " . implode(', ', array_keys($speakers)), [

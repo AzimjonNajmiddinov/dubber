@@ -81,7 +81,7 @@ class DownloadAudioChunkJob implements ShouldQueue
             '-ss', (string) round($this->startTime, 3),
             '-t',  (string) $duration,
             '-i',  $this->localAudioPath,
-            '-vn', '-ac', '1', '-ar', '44100',
+            '-vn', '-ar', '44100',
             '-c:a', 'aac', '-b:a', '96k', '-f', 'adts', $chunkFile,
         ]);
     }
@@ -120,7 +120,7 @@ class DownloadAudioChunkJob implements ShouldQueue
             'ffmpeg', '-y',
             '-protocol_whitelist', 'file,http,https,tcp,tls,crypto',
             '-i', $tmpPlaylist,
-            '-vn', '-ac', '1', '-ar', '44100',
+            '-vn', '-ar', '44100',
             '-c:a', 'aac', '-b:a', '96k', '-f', 'adts', $chunkFile,
         ]);
 

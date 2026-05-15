@@ -112,11 +112,12 @@ class TranslateInstantDubBatchJob implements ShouldQueue
             }
         }
 
+        // Always dispatch — ProcessInstantDubSegmentJob handles empty text via generateBackgroundOnlyAac.
+        // Skipping here would leave segments_ready < total_segments → session never completes.
         foreach ($batch as $localIdx => $seg) {
             $text = trim($seg['text']);
             $text = trim(preg_replace('/\[[^\]]*\]\s*/', '', $text));
             $text = str_replace('`', '\'', $text);
-            if ($text === '') continue;
 
             // slotEnd = next segment's start (within batch or from next batch)
             $slotEnd = isset($batch[$localIdx + 1])

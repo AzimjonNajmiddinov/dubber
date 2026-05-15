@@ -54,13 +54,14 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
         $this->mergeVoiceMap($speakers);
 
         // Dispatch TTS for micro-batch segments (global indices 0, 1, 2, ...)
+        // Always dispatch — ProcessInstantDubSegmentJob handles empty text via generateBackgroundOnlyAac.
+        // Skipping here would leave segments_ready < total_segments → session never completes.
         foreach ($translated as $i => $seg) {
             $text = trim($seg['text']);
             $text = trim(preg_replace('/\[[^\]]*\]\s*/', '', $text));
             $text = str_replace('`', '\'', $text);
             // Strip *emphasis* markers — kept as metadata by translator but not speakable
             $text = preg_replace('/\*([^*]+)\*/', '$1', $text);
-            if ($text === '') continue;
 
             $slotEnd = isset($translated[$i + 1])
                 ? (float) $translated[$i + 1]['start']
