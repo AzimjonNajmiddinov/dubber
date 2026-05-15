@@ -122,6 +122,13 @@ class PrepareInstantDubJob implements ShouldQueue
         }
         $fullDialogueText = implode("\n", $fullDialogue);
 
+        // Store expected audio duration from last subtitle so DownloadOriginalAudioJob
+        // can detect CDN-truncated downloads and fall back to yt-dlp before dispatching chunks.
+        if (!empty($allSegments)) {
+            $lastSeg = end($allSegments);
+            $this->updateSession(['expected_duration' => (float) ($lastSeg['end'] ?? 0)]);
+        }
+
         // 2b. Dispatch background audio download in parallel (non-blocking)
         // Must go on 'default' queue — NOT 'segment-generation' — so TTS jobs
         // (which are on segment-generation with higher priority) aren't blocked.

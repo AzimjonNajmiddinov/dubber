@@ -33,9 +33,9 @@ class DownloadOriginalAudioJob implements ShouldQueue
         if (!$session || ($session['status'] ?? '') === 'stopped') return;
 
         if (str_contains($this->videoUrl, 'youtube.com') || str_contains($this->videoUrl, 'youtu.be')) {
-            $this->audioUrl
-                ? $this->handleYoutubeDirectUrl($this->audioUrl)
-                : $this->handleYoutube();
+            // Always use yt-dlp — ffmpeg direct URL downloads are truncated by YouTube CDN
+            // at DASH range boundaries (~130s), causing audio to stop at 2:10 for long videos.
+            $this->handleYoutube();
             return;
         }
 
@@ -121,7 +121,7 @@ class DownloadOriginalAudioJob implements ShouldQueue
     private function handleYoutubeDirectUrl(string $audioUrl): void
     {
         $audioPath = $this->workDirPath('source_audio.m4a');
-        Log::info("[DUB] YouTube: downloading audio via direct URL", ['session' => $this->sessionId]);
+        Log::info("[DUB] Downloading audio via direct URL", ['session' => $this->sessionId]);
 
         $result = Process::timeout(300)->run([
             'ffmpeg', '-y',
@@ -131,10 +131,29 @@ class DownloadOriginalAudioJob implements ShouldQueue
         ]);
 
         if (!file_exists($audioPath) || filesize($audioPath) < 1000) {
-            Log::warning("[DUB] YouTube direct audio download failed, falling back to yt-dlp", [
+            Log::warning("[DUB] Direct audio download failed, falling back to yt-dlp", [
                 'session' => $this->sessionId,
                 'error'   => Str::limit($result->errorOutput(), 300),
             ]);
+            $this->handleYoutube();
+            return;
+        }
+
+        // Detect CDN range truncation: compare downloaded duration vs expected from subtitles
+        $probeResult = Process::timeout(10)->run([
+            'ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1', $audioPath,
+        ]);
+        $audioDuration = (float) trim($probeResult->output());
+
+        $session          = DubSession::get($this->sessionId);
+        $expectedDuration = (float) ($session['expected_duration'] ?? 0);
+
+        if ($expectedDuration > 120 && $audioDuration > 0 && $audioDuration < $expectedDuration * 0.75) {
+            Log::warning("[DUB] Direct URL audio truncated ({$audioDuration}s vs expected {$expectedDuration}s), falling back to yt-dlp", [
+                'session' => $this->sessionId,
+            ]);
+            @unlink($audioPath);
             $this->handleYoutube();
             return;
         }
