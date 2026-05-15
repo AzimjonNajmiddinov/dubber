@@ -74,6 +74,11 @@ class GenerateBgChunkJob implements ShouldQueue, ShouldBeUnique
 
         $chunkDur = round(AudioFrame::alignedDuration($this->startTime, $this->endTime), 6);
         $outFile  = "{$aacDir}/bg-{$this->chunkIndex}.aac";
+        // Write to a temp file, then atomically rename to outFile.
+        // This prevents hlsAudioPlaylist from seeing a 0-byte file mid-write
+        // (ffmpeg -y truncates the output file before writing), which would
+        // cause the HLS EVENT playlist to shrink — a fatal spec violation.
+        $writeFile = "{$aacDir}/bg-{$this->chunkIndex}.aac.tmp";
 
         // Detect channel count of the bg audio chunk
         $chanProbe = Process::timeout(5)->run([
@@ -138,7 +143,7 @@ class GenerateBgChunkJob implements ShouldQueue, ShouldBeUnique
 
         $cmd = array_merge($cmd, [
             '-filter_complex', $filter,
-            '-ac', '1', '-c:a', 'aac', '-b:a', '96k', '-f', 'adts', $outFile,
+            '-ac', '1', '-c:a', 'aac', '-b:a', '96k', '-f', 'adts', $writeFile,
         ]);
 
         $timeout = max(20, (int) ceil($chunkDur) + 15);
@@ -146,13 +151,17 @@ class GenerateBgChunkJob implements ShouldQueue, ShouldBeUnique
 
         foreach ($tmpFiles as $f) @unlink($f);
 
-        if (!$result->successful()) {
+        if (!$result->successful() || !file_exists($writeFile) || filesize($writeFile) <= 10) {
+            @unlink($writeFile);
             Log::warning("[DUB] bg-{$this->chunkIndex}.aac mix failed", [
                 'session' => $this->sessionId,
                 'error'   => Str::limit($result->errorOutput(), 300),
             ]);
             return;
         }
+
+        // Atomic replace: outFile is only visible once fully written
+        rename($writeFile, $outFile);
 
         Log::info(
             "[DUB] bg-{$this->chunkIndex}.aac ready ("
