@@ -821,7 +821,14 @@ class TranslateInstantDubBatchJob implements ShouldQueue
                 . '  * Use "bor" not "mavjud", "yo\'q" not "mavjud emas"' . "\n"
                 . '  * Contractions: "nimaga" not "nima uchun" (when casual)' . "\n"
                 . '  * Emotional words: "voy!" (surprise), "ey!" (calling), "qo\'ying!" (stop it!)' . "\n"
-                . "- Names and proper nouns: keep original, don't translate\n"
+                . "- Names and proper nouns: write in Uzbek phonetics — keep the name, but transliterate the spelling:\n"
+                . "  * c before e/i/y → s: Barcelona→Barselona, France→Fransiya, concert→konsert\n"
+                . "  * c before a/o/u → k: Monaco→Monako, Cuba→Kuba, music→muzik\n"
+                . "  * ch stays ch: Chicago→Chikago, Chelsea→Chelsi\n"
+                . "  * w → v: Washington→Vashington, Wilson→Vilson\n"
+                . "  * ph → f: Philip→Filip, Philadelphia→Filadelfiya\n"
+                . "  * th → t: Thomas→Tomas, Thailand→Tailand\n"
+                . "  * Uzbek/Arabic/Persian names stay unchanged (Toshkent, Samarqand, Muhammad...)\n"
                 . "- Keep emotional register: anger, love, fear, humor must come through";
         }
 

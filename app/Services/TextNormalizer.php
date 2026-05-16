@@ -35,6 +35,11 @@ class TextNormalizer
         // Strip *emphasis* markers added by the translator (not renderable by TTS engines)
         $text = preg_replace('/\*([^*]+)\*/', '$1', $text);
 
+        // Adapt foreign letters to Uzbek phonetics (c→s/k, w→v, ph→f)
+        if (in_array($lang, ['uz', 'uzbek'])) {
+            $text = self::adaptForeignLettersUzbek($text);
+        }
+
         // Normalize Uzbek apostrophes LAST — after abbreviation/number expansion
         // which may introduce ASCII apostrophes (e.g. "to'rt", "Qo'shma")
         if (in_array($lang, ['uz', 'uzbek'])) {
@@ -82,7 +87,7 @@ class TextNormalizer
             'В' => 'V',  'в' => 'v',
             'Г' => 'G',  'г' => 'g',
             'Д' => 'D',  'д' => 'd',
-            'Е' => 'E',  'е' => 'e',
+            'Е' => 'Ye', 'е' => 'ye', // Е = "ye" sound (Елена→Yelena, Европа→Yevropa)
             'З' => 'Z',  'з' => 'z',
             'И' => 'I',  'и' => 'i',
             'Й' => 'Y',  'й' => 'y',
@@ -104,6 +109,50 @@ class TextNormalizer
         ];
 
         return str_replace(array_keys($single), array_values($single), $text);
+    }
+
+    /**
+     * Adapt foreign letters to Uzbek phonetics for TTS.
+     *
+     * Uzbek Latin alphabet has no standalone "c", "w", or "ph" digraph.
+     * Any such occurrence in Uzbek text is from a foreign word/name and must
+     * be adapted so the TTS engine pronounces it correctly.
+     *
+     * Rules:
+     *   c before e/i/y → s  (Barcelona→Barselona, concert→konsert)
+     *   c elsewhere     → k  (Monaco→Monako, Cuba→Kuba, music→muzik)
+     *   ch              → unchanged (valid Uzbek digraph: Chicago→Chikago ✓)
+     *   ph              → f  (Philip→Filip, Philadelphia→Filadelfiya)
+     *   w               → v  (Washington→Vashington, Wilson→Vilson)
+     */
+    private static function adaptForeignLettersUzbek(string $text): string
+    {
+        // c before e/i/y → s
+        $text = preg_replace_callback(
+            '/([Cc])(?=[eEiIyY])/u',
+            fn($m) => $m[1] === 'C' ? 'S' : 's',
+            $text
+        );
+        // remaining c (not before h) → k
+        $text = preg_replace_callback(
+            '/([Cc])(?![hH])/u',
+            fn($m) => $m[1] === 'C' ? 'K' : 'k',
+            $text
+        );
+        // ph → f (preserve case of P)
+        $text = preg_replace_callback(
+            '/([Pp])[hH]/u',
+            fn($m) => $m[1] === 'P' ? 'F' : 'f',
+            $text
+        );
+        // w → v
+        $text = preg_replace_callback(
+            '/[Ww]/u',
+            fn($m) => $m[0] === 'W' ? 'V' : 'v',
+            $text
+        );
+
+        return $text;
     }
 
     /**

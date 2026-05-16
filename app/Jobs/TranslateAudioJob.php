@@ -512,7 +512,14 @@ class TranslateAudioJob implements ShouldQueue, ShouldBeUnique
                 "QOIDALAR:\n" .
                 "1. MAʻNONI SAQLANG - inglizcha gap nimani anglatsa, oʻzbekcha ham shu maʻnoni bersin\n" .
                 "2. RASMIYLIKNI SAQLANG - kontekstga qarab \"sen\" yoki \"siz\" ishlating\n" .
-                "3. QISQA BOʻLSIN - dublyaj uchun\n";
+                "3. QISQA BOʻLSIN - dublyaj uchun\n" .
+                "4. XORIJIY NOMLAR - oʻzbek alifbosida \"c\" harfi YOʻQ, shuning uchun:\n" .
+                "   - c + e/i/y → s: Barcelona→Barselona, France→Fransiya, concert→konsert\n" .
+                "   - c + a/o/u → k: Monaco→Monako, Cuba→Kuba, music→muzik\n" .
+                "   - ch → ch (oʻzgarishsiz): Chicago→Chikago\n" .
+                "   - w → v: Washington→Vashington, Wilson→Vilson\n" .
+                "   - ph → f: Philip→Filip\n" .
+                "   - th → t: Thomas→Tomas\n";
         }
 
         // Emotional arc context
