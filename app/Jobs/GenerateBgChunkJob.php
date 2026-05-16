@@ -28,7 +28,7 @@ class GenerateBgChunkJob implements ShouldQueue, ShouldBeUnique
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public int $timeout   = 120;
+    public int $timeout   = 180;
     public int $tries     = 2;
     public int $uniqueFor = 60;
 
@@ -146,7 +146,8 @@ class GenerateBgChunkJob implements ShouldQueue, ShouldBeUnique
             '-ac', '1', '-c:a', 'aac', '-b:a', '96k', '-f', 'adts', $writeFile,
         ]);
 
-        $timeout = max(20, (int) ceil($chunkDur) + 15);
+        // Dense-dialogue chunks can have 15+ TTS inputs; give ffmpeg ample time.
+        $timeout = max(60, (int) ceil($chunkDur) * 2 + 30);
         $result  = Process::timeout($timeout)->run($cmd);
 
         foreach ($tmpFiles as $f) @unlink($f);

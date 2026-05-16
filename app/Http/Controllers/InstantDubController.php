@@ -568,6 +568,8 @@ class InstantDubController extends Controller
 
         if (!$allBgDone) {
             $m3u8 .= "#EXT-X-PLAYLIST-TYPE:EVENT\n";
+        } else {
+            $m3u8 .= "#EXT-X-PLAYLIST-TYPE:VOD\n";
         }
 
         foreach ($entries as $entry) {
