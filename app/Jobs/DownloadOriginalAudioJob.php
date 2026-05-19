@@ -171,7 +171,7 @@ class DownloadOriginalAudioJob implements ShouldQueue
             '-f', 'bestaudio[ext=m4a]/bestaudio',
             '-o', $audioPath,
             '--no-playlist', '--quiet', '--no-warnings',
-            '--extractor-args', 'youtube:player_client=ios',
+            '--extractor-args', 'youtube:player_client=web_creator,mweb,ios',
             $this->videoUrl,
         ]);
 
