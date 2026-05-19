@@ -19,7 +19,7 @@ class PrepareInstantDubJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public int $timeout = 300;
+    public int $timeout = 900;
     public int $tries = 2;
 
     public function __construct(
@@ -431,16 +431,40 @@ class PrepareInstantDubJob implements ShouldQueue
             }
             unset($track);
 
-            // Fetch all tracks — for duplicate languages, keep the one with most cues
+            // Fetch only the tracks we actually need: best text (ru priority) + best timing (en priority).
+            // Downloading all tracks is O(N_tracks × N_vtt_files) — far too slow for long films.
             $byLang = [];
+            $textTarget   = null; // first langCode from $langPriority that exists in $tracks
+            $timingTarget = null; // first langCode from $timingPriority that exists in $tracks
+
+            foreach ($langPriority as $lc) {
+                foreach ($tracks as $t) {
+                    if ($t['langCode'] === $lc) { $textTarget = $lc; break 2; }
+                }
+            }
+            foreach ($timingPriority as $lc) {
+                foreach ($tracks as $t) {
+                    if ($t['langCode'] === $lc) { $timingTarget = $lc; break 2; }
+                }
+            }
+
+            // Collect candidate tracks: text + (timing if different) + fallback unknown
+            $needed = array_unique(array_filter([$textTarget, $timingTarget, 'unknown']));
+
             foreach ($tracks as $track) {
                 $lang = $track['langCode'];
+                if (!in_array($lang, $needed) && $lang !== 'unknown') continue;
+                if (isset($byLang[$lang])) continue; // already have one for this language
+
                 $result = $this->fetchSubtitleTrack($track, $baseUrl, $resolve);
                 if ($result['cues'] > 0 && $result['srt'] !== '') {
-                    if (!isset($byLang[$lang]) || $result['cues'] > $byLang[$lang]['cues']) {
-                        $byLang[$lang] = $result;
-                    }
+                    $byLang[$lang] = $result;
                 }
+
+                // Early exit: stop once we have all needed languages
+                $have = array_keys($byLang);
+                $stillNeed = array_filter($needed, fn($l) => !in_array($l, $have) && $l !== 'unknown');
+                if (empty($stillNeed)) break;
             }
 
             if (empty($byLang)) return null;

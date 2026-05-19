@@ -147,12 +147,14 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                 }
             }
 
-            // 3. Encode to base64
-            $audioBase64 = base64_encode(file_get_contents($finalMp3));
+            // 3. Move audio to persistent per-session directory (avoids base64 bloat in Redis)
+            $audioDir = DubSession::audioDir($this->sessionId);
+            @mkdir($audioDir, 0755, true);
+            $ext       = pathinfo($finalMp3, PATHINFO_EXTENSION) ?: 'mp3';
+            $audioPath = "{$audioDir}/seg_{$this->index}.{$ext}";
+            rename($finalMp3, $audioPath);
 
-            @unlink($finalMp3);
-
-            // 4. Save TTS chunk to Redis
+            // 4. Save TTS chunk metadata to Redis (path only — no base64)
             Redis::setex(DubSession::chunkKey($this->sessionId, $this->index), DubSession::TTL, json_encode([
                 'index'          => $this->index,
                 'start_time'     => $this->startTime,
@@ -161,7 +163,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                 'text'           => $this->text,
                 'source_text'    => $this->sourceText,
                 'speaker'        => $this->speaker,
-                'audio_base64'   => $audioBase64,
+                'audio_path'     => $audioPath,
                 'audio_duration' => $ttsDuration,
             ]));
 
@@ -203,7 +205,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                 'end_time'       => $this->endTime,
                 'text'           => $this->text,
                 'speaker'        => $this->speaker,
-                'audio_base64'   => null,
+                'audio_path'     => null,
                 'audio_duration' => 0,
                 'error'          => $e->getMessage(),
             ]));
@@ -222,7 +224,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                 'end_time'       => $this->endTime,
                 'text'           => $this->text,
                 'speaker'        => $this->speaker,
-                'audio_base64'   => null,
+                'audio_path'     => null,
                 'audio_duration' => 0,
                 'error'          => 'Job killed: ' . Str::limit($exception->getMessage(), 100),
             ]));
@@ -432,22 +434,18 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         $chunkKey  = DubSession::chunkKey($this->sessionId, $this->index);
         $chunkJson = Redis::get($chunkKey);
         if (!$chunkJson) return;
-        $chunk = json_decode($chunkJson, true);
-        $b64   = $chunk['audio_base64'] ?? null;
-        if (!$b64) return;
+        $chunk     = json_decode($chunkJson, true);
+        $audioPath = $chunk['audio_path'] ?? null;
+        if (!$audioPath || !file_exists($audioPath)) return;
 
         $tmpDir = '/tmp/instant-dub-' . $this->sessionId;
         @mkdir($tmpDir, 0755, true);
 
         try {
-            $tmpMp3 = "{$tmpDir}/et_{$this->index}.mp3";
-            file_put_contents($tmpMp3, base64_decode($b64));
-
             $ttsWav = "{$tmpDir}/et_{$this->index}_tts.wav";
             $conv = Process::timeout(10)->run([
-                'ffmpeg', '-y', '-i', $tmpMp3, '-ar', '44100', '-ac', '1', '-f', 'wav', $ttsWav,
+                'ffmpeg', '-y', '-i', $audioPath, '-ar', '44100', '-ac', '1', '-f', 'wav', $ttsWav,
             ]);
-            @unlink($tmpMp3);
             if (!$conv->successful() || !file_exists($ttsWav) || filesize($ttsWav) < 100) return;
 
             $segOffset    = max(0.0, $this->startTime - $bgStart);
@@ -490,9 +488,15 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                 @unlink($outMp3); return;
             }
 
-            $chunk['audio_base64'] = base64_encode(file_get_contents($outMp3));
-            @unlink($outMp3);
-            Redis::setex($chunkKey, DubSession::TTL, json_encode($chunk));
+            // Replace the original audio file with the energy-transferred version
+            @unlink($audioPath);
+            rename($outMp3, $audioPath);
+
+            // Update chunk in Redis if the path/extension changed (e.g. wav → mp3)
+            if (($chunk['audio_path'] ?? '') !== $audioPath) {
+                $chunk['audio_path'] = $audioPath;
+                Redis::setex($chunkKey, DubSession::TTL, json_encode($chunk));
+            }
 
             Log::info("[DUB] Energy transfer ok — seg #{$this->index}", ['session' => $this->sessionId]);
 
@@ -801,7 +805,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             'slot_end'       => $this->slotEnd,
             'text'           => '',
             'speaker'        => $this->speaker,
-            'audio_base64'   => null,
+            'audio_path'     => null,
             'audio_duration' => 0,
         ]));
     }

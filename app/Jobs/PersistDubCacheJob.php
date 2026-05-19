@@ -39,24 +39,18 @@ class PersistDubCacheJob implements ShouldQueue
         if (!$videoUrl || $total === 0) return;
 
         try {
-            // Create or update the dub record — match by content_key to handle tokenized URLs
             $dub = InstantDub::updateOrCreate(
                 ['video_content_key' => $contentKey, 'language' => $language],
                 [
-                    'title'             => $session['title'] ?? 'Untitled',
-                    'video_url'         => $videoUrl,
-                    'translate_from'    => $session['translate_from'] ?? null,
-                    'tts_driver'        => $session['tts_driver'] ?? 'edge',
-                    'status'            => 'processing',
-                    'total_segments'    => $total,
-                    'session_id'        => $this->sessionId,
+                    'title'          => $session['title'] ?? 'Untitled',
+                    'video_url'      => $videoUrl,
+                    'translate_from' => $session['translate_from'] ?? null,
+                    'tts_driver'     => $session['tts_driver'] ?? 'edge',
+                    'status'         => 'processing',
+                    'total_segments' => $total,
+                    'session_id'     => $this->sessionId,
                 ]
             );
-
-            // Permanent TTS directory (stores raw TTS mp3 per segment — no mixed AAC)
-            $aacDir = storage_path("app/instant-dub-cache/{$dub->id}/aac");
-            @mkdir($aacDir, 0755, true);
-            $dub->update(['aac_dir' => $aacDir]);
 
             // Save voice map
             $voiceMap = json_decode(Redis::get(DubSession::voicesKey($this->sessionId)) ?? '{}', true);
@@ -69,8 +63,8 @@ class PersistDubCacheJob implements ShouldQueue
                 ]);
             }
 
-            // Save segments
-            $chunkKeys = array_map(fn($i) => DubSession::chunkKey($this->sessionId, $i), range(0, $total - 1));
+            // Save translations only — TTS is always regenerated fresh on cache hit
+            $chunkKeys   = array_map(fn($i) => DubSession::chunkKey($this->sessionId, $i), range(0, $total - 1));
             $chunkValues = Redis::mget($chunkKeys);
 
             InstantDubSegment::where('instant_dub_id', $dub->id)->delete();
@@ -79,33 +73,20 @@ class PersistDubCacheJob implements ShouldQueue
                 if (!$chunkJson) continue;
                 $chunk = json_decode($chunkJson, true);
 
-                // Save raw TTS mp3 (from audio_base64) — much smaller than mixed AAC
-                $ttsPath = null;
-                $ttsDuration = $chunk['audio_duration'] ?? null;
-                $audioBase64 = $chunk['audio_base64'] ?? null;
-                if ($audioBase64) {
-                    $ttsPath = "{$aacDir}/{$i}.mp3";
-                    file_put_contents($ttsPath, base64_decode($audioBase64));
-                    if (!file_exists($ttsPath) || filesize($ttsPath) < 100) {
-                        @unlink($ttsPath);
-                        $ttsPath = null;
-                    }
-                }
-
                 InstantDubSegment::create([
-                    'instant_dub_id' => $dub->id,
-                    'segment_index'  => $i,
-                    'speaker'        => $chunk['speaker'] ?? 'M1',
-                    'start_time'     => $chunk['start_time'] ?? 0,
-                    'end_time'       => $chunk['end_time'] ?? 0,
-                    'slot_end'       => $chunk['slot_end'] ?? null,
-                    'source_text'    => $chunk['source_text'] ?? null,
-                    'translated_text'=> $chunk['text'] ?? '',
-                    'aac_path'       => null,
-                    'aac_duration'   => null,
-                    'tts_path'       => $ttsPath,
-                    'tts_duration'   => $ttsDuration,
-                    'needs_retts'    => false,
+                    'instant_dub_id'  => $dub->id,
+                    'segment_index'   => $i,
+                    'speaker'         => $chunk['speaker'] ?? 'M1',
+                    'start_time'      => $chunk['start_time'] ?? 0,
+                    'end_time'        => $chunk['end_time'] ?? 0,
+                    'slot_end'        => $chunk['slot_end'] ?? null,
+                    'source_text'     => $chunk['source_text'] ?? null,
+                    'translated_text' => $chunk['text'] ?? '',
+                    'aac_path'        => null,
+                    'aac_duration'    => null,
+                    'tts_path'        => null,
+                    'tts_duration'    => null,
+                    'needs_retts'     => false,
                 ]);
             }
 

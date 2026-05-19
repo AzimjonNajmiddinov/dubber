@@ -208,7 +208,15 @@ class InstantDubController extends Controller
         $chunks = [];
         foreach ($chunkValues as $chunkJson) {
             if (!$chunkJson) continue;
-            $chunks[] = json_decode($chunkJson, true);
+            $chunk = json_decode($chunkJson, true);
+            // Hydrate audio from disk (file-based storage; audio_path not exposed to client)
+            if (!empty($chunk['audio_path']) && file_exists($chunk['audio_path'])) {
+                $chunk['audio_base64'] = base64_encode(file_get_contents($chunk['audio_path']));
+            } else {
+                $chunk['audio_base64'] = null;
+            }
+            unset($chunk['audio_path']);
+            $chunks[] = $chunk;
         }
 
         return response()->json([
@@ -262,24 +270,12 @@ class InstantDubController extends Controller
             Redis::del($keysToDelete);
         }
 
-        // Clean up AAC files on disk
-        $aacDir = storage_path("app/instant-dub/{$sessionId}/aac");
-        if (is_dir($aacDir)) {
-            array_map('unlink', glob("{$aacDir}/*.aac") ?: []);
-            @rmdir($aacDir);
-        }
-        // Clean up session directory
+        // Recursively delete all session files (audio, AAC, window downloads, etc.)
         $sessionDir = storage_path("app/instant-dub/{$sessionId}");
-        if (is_dir($sessionDir)) {
-            @rmdir($sessionDir);
-        }
+        $this->deleteDirectory($sessionDir);
 
-        // Clean up tmp dir used by segment jobs
-        $tmpDir = '/tmp/instant-dub-' . $sessionId;
-        if (is_dir($tmpDir)) {
-            array_map('unlink', glob("{$tmpDir}/*") ?: []);
-            @rmdir($tmpDir);
-        }
+        // Clean up tmp dir used by segment TTS jobs
+        $this->deleteDirectory('/tmp/instant-dub-' . $sessionId);
 
         return response()->json(['status' => 'stopped']);
     }
@@ -1087,7 +1083,7 @@ class InstantDubController extends Controller
             'video_query'    => $videoQuery,
             'status'         => 'processing',
             'playable'       => false,
-            'tts_driver'     => 'mms',
+            'tts_driver'     => config('dubber.tts.default', 'edge'),
             'force_voice'    => $forceVoice,
             'disable_prosody' => (bool) $forceVoice,
             'total_segments' => $dub->total_segments,
@@ -1105,6 +1101,15 @@ class InstantDubController extends Controller
     private function getSession(string $sessionId): ?array
     {
         return DubSession::get($sessionId);
+    }
+
+    private function deleteDirectory(string $dir): void
+    {
+        if (!is_dir($dir)) return;
+        foreach (glob("{$dir}/*") ?: [] as $entry) {
+            is_dir($entry) ? $this->deleteDirectory($entry) : @unlink($entry);
+        }
+        @rmdir($dir);
     }
 
     /**
@@ -1155,7 +1160,11 @@ class InstantDubController extends Controller
             $preGap = max(0, $startTime - $slotStart);
             $preGapMs = (int) round($preGap * 1000);
 
+            // Resolve audio: prefer in-memory base64, fall back to reading from disk
             $audioBase64 = $chunk['audio_base64'] ?? null;
+            if (!$audioBase64 && !empty($chunk['audio_path']) && file_exists($chunk['audio_path'])) {
+                $audioBase64 = base64_encode(file_get_contents($chunk['audio_path']));
+            }
 
             if (!$audioBase64) {
                 if ($hasBg) {

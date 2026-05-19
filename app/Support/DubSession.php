@@ -10,7 +10,7 @@ use Illuminate\Support\Facades\Redis;
  */
 class DubSession
 {
-    const TTL = 50400; // 14 hours
+    const TTL = 86400; // 24 hours
 
     // ── Key builders ──────────────────────────────────────────────────────────
 
@@ -156,6 +156,11 @@ class DubSession
     {
         $session ??= static::get($id);
         return $session['aac_base_dir'] ?? storage_path("app/instant-dub/{$id}/aac");
+    }
+
+    public static function audioDir(string $id): string
+    {
+        return storage_path("app/instant-dub/{$id}/audio");
     }
 
     /** Returns all Redis keys to delete when a session is stopped. */

@@ -28,6 +28,7 @@ class DownloadAudioChunkJob implements ShouldQueue
         public float   $startTime,
         public float   $endTime,
         public ?string $localAudioPath = null,
+        public float   $fileOffset     = 0.0, // global start time of localAudioPath (for window files)
     ) {}
 
     public function handle(): void
@@ -75,10 +76,12 @@ class DownloadAudioChunkJob implements ShouldQueue
 
     private function cutFromLocal(string $chunkFile): ?\Illuminate\Process\ProcessResult
     {
-        $duration = round($this->endTime - $this->startTime, 3);
+        // Seek relative to file start (window files don't start at t=0 globally)
+        $localSeek = max(0.0, round($this->startTime - $this->fileOffset, 3));
+        $duration  = round($this->endTime - $this->startTime, 3);
         return Process::timeout(90)->run([
             'ffmpeg', '-y',
-            '-ss', (string) round($this->startTime, 3),
+            '-ss', (string) $localSeek,
             '-t',  (string) $duration,
             '-i',  $this->localAudioPath,
             '-vn', '-ar', '44100',
@@ -183,16 +186,15 @@ class DownloadAudioChunkJob implements ShouldQueue
         foreach ($chunkValues as $i => $chunkJson) {
             if (!$chunkJson) continue;
 
-            $chunk    = json_decode($chunkJson, true);
-            $segStart = (float) ($chunk['start_time'] ?? 0);
-            $segEnd   = (float) ($chunk['end_time']   ?? 0);
-            $b64      = $chunk['audio_base64']         ?? null;
+            $chunk     = json_decode($chunkJson, true);
+            $segStart  = (float) ($chunk['start_time'] ?? 0);
+            $audioPath = $chunk['audio_path']           ?? null;
 
             if ($segStart < $this->startTime || $segStart >= $this->endTime) continue;
-            if (!$b64) continue;
+            if (!$audioPath || !file_exists($audioPath)) continue;
 
             $this->transferEnergyForSegment(
-                $i, $chunk, $b64, $rawAudioPath,
+                $i, $chunk, $audioPath, $rawAudioPath,
                 $this->startTime, $this->endTime,
                 $serviceUrl
             );
@@ -202,7 +204,7 @@ class DownloadAudioChunkJob implements ShouldQueue
     private function transferEnergyForSegment(
         int    $segIdx,
         array  $chunk,
-        string $b64,
+        string $segAudioPath,
         string $rawAudioPath,
         float  $bgStart,
         float  $bgEnd,
@@ -213,19 +215,15 @@ class DownloadAudioChunkJob implements ShouldQueue
         $tmpDir   = "/tmp/instant-dub-{$this->sessionId}";
         @mkdir($tmpDir, 0755, true);
 
-        $tmpMp3  = "{$tmpDir}/prosody_{$this->chunkIndex}_{$segIdx}.mp3";
         $ttsWav  = "{$tmpDir}/prosody_{$this->chunkIndex}_{$segIdx}_tts.wav";
         $refClip = "{$tmpDir}/prosody_{$this->chunkIndex}_{$segIdx}_ref.wav";
         $outWav  = "{$tmpDir}/prosody_{$this->chunkIndex}_{$segIdx}_out.wav";
         $outMp3  = "{$tmpDir}/prosody_{$this->chunkIndex}_{$segIdx}_out.mp3";
 
         try {
-            file_put_contents($tmpMp3, base64_decode($b64));
-
             $conv = Process::timeout(10)->run([
-                'ffmpeg', '-y', '-i', $tmpMp3, '-ar', '44100', '-ac', '1', '-f', 'wav', $ttsWav,
+                'ffmpeg', '-y', '-i', $segAudioPath, '-ar', '44100', '-ac', '1', '-f', 'wav', $ttsWav,
             ]);
-            @unlink($tmpMp3);
             if (!$conv->successful() || !file_exists($ttsWav) || filesize($ttsWav) < 100) return;
 
             $segOffset    = max(0.0, $segStart - $bgStart);
@@ -268,11 +266,16 @@ class DownloadAudioChunkJob implements ShouldQueue
                 return;
             }
 
-            $chunk['audio_base64'] = base64_encode(file_get_contents($outMp3));
-            @unlink($outMp3);
+            // Replace segment audio file with energy-transferred version
+            @unlink($segAudioPath);
+            rename($outMp3, $segAudioPath);
 
-            $chunkKey = DubSession::chunkKey($this->sessionId, $segIdx);
-            Redis::setex($chunkKey, DubSession::TTL, json_encode($chunk));
+            // Update chunk in Redis only if path changed
+            if (($chunk['audio_path'] ?? '') !== $segAudioPath) {
+                $chunk['audio_path'] = $segAudioPath;
+                $chunkKey = DubSession::chunkKey($this->sessionId, $segIdx);
+                Redis::setex($chunkKey, DubSession::TTL, json_encode($chunk));
+            }
 
             Log::info("[DUB] Energy transfer applied to seg #{$segIdx} via bg-chunk {$this->chunkIndex}", [
                 'session' => $this->sessionId,
@@ -281,7 +284,7 @@ class DownloadAudioChunkJob implements ShouldQueue
             Log::warning("[DUB] Energy transfer for seg #{$segIdx} failed: " . $e->getMessage(), [
                 'session' => $this->sessionId,
             ]);
-            foreach ([$tmpMp3, $ttsWav, $refClip, $outWav, $outMp3] as $f) {
+            foreach ([$ttsWav, $refClip, $outWav, $outMp3] as $f) {
                 @unlink($f);
             }
         }

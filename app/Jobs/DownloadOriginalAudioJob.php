@@ -18,8 +18,8 @@ class DownloadOriginalAudioJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public int $timeout = 300;
-    public int $tries = 3;
+    public int $timeout = 7200; // 2 hours — large video downloads need time
+    public int $tries = 2;
 
     public function __construct(
         public string  $sessionId,
@@ -123,7 +123,7 @@ class DownloadOriginalAudioJob implements ShouldQueue
         $audioPath = $this->workDirPath('source_audio.m4a');
         Log::info("[DUB] Downloading audio via direct URL", ['session' => $this->sessionId]);
 
-        $result = Process::timeout(300)->run([
+        $result = Process::timeout(3600)->run([
             'ffmpeg', '-y',
             '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             '-i', $audioUrl,
@@ -163,10 +163,52 @@ class DownloadOriginalAudioJob implements ShouldQueue
 
     private function handleYoutube(): void
     {
-        $audioPath = $this->workDirPath('source_audio.m4a');
-        Log::info("[DUB] YouTube: downloading audio via yt-dlp", ['session' => $this->sessionId]);
+        Log::info("[DUB] YouTube: fetching duration metadata", ['session' => $this->sessionId]);
 
-        $result = Process::timeout(300)->run([
+        // Fast metadata-only call — gets duration without downloading audio (~2s)
+        $metaResult = Process::timeout(30)->run([
+            'yt-dlp', '--print', 'duration', '--no-download',
+            '--extractor-args', 'youtube:player_client=web_creator,mweb,ios',
+            $this->videoUrl,
+        ]);
+
+        $totalDuration = (float) trim($metaResult->output());
+
+        if ($totalDuration <= 0) {
+            Log::warning("[DUB] YouTube: could not get duration, falling back to single-file download", [
+                'session' => $this->sessionId,
+                'error'   => Str::limit($metaResult->errorOutput(), 300),
+            ]);
+            $this->handleYoutubeFallback();
+            return;
+        }
+
+        DubSession::patch($this->sessionId, ['video_duration' => $totalDuration]);
+
+        // Pre-write total_bg_chunks so hlsAudioPlaylist / checkPlayable never sees 0
+        $totalBgChunks = (int) ceil($totalDuration / DownloadYouTubeWindowJob::CHUNK_SIZE);
+        DubSession::patch($this->sessionId, ['total_bg_chunks' => $totalBgChunks]);
+
+        // Dispatch one window job per 5-minute slice (FIFO: window 0 starts TTS immediately)
+        $windowSize  = 300.0; // 5 minutes
+        $windowIndex = 0;
+        for ($start = 0.0; $start < $totalDuration; $start += $windowSize) {
+            $end = min($start + $windowSize, $totalDuration);
+            DownloadYouTubeWindowJob::dispatch($this->sessionId, $this->videoUrl, $windowIndex++, $start, $end)
+                ->onQueue('default');
+        }
+
+        Log::info("[DUB] YouTube: dispatched {$windowIndex} windows for {$totalDuration}s", [
+            'session' => $this->sessionId,
+        ]);
+    }
+
+    private function handleYoutubeFallback(): void
+    {
+        $audioPath = $this->workDirPath('source_audio.m4a');
+        Log::info("[DUB] YouTube: single-file fallback download via yt-dlp", ['session' => $this->sessionId]);
+
+        $result = Process::timeout(7200)->run([
             'yt-dlp',
             '-f', 'bestaudio[ext=m4a]/bestaudio',
             '-o', $audioPath,
@@ -176,7 +218,7 @@ class DownloadOriginalAudioJob implements ShouldQueue
         ]);
 
         if (!$result->successful() || !file_exists($audioPath) || filesize($audioPath) < 1000) {
-            Log::warning("[DUB] YouTube audio download failed", [
+            Log::warning("[DUB] YouTube single-file download failed", [
                 'session' => $this->sessionId,
                 'error'   => Str::limit($result->errorOutput(), 1000),
             ]);

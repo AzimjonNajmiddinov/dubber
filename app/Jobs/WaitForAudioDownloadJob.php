@@ -144,12 +144,12 @@ class WaitForAudioDownloadJob implements ShouldQueue
                 $chunkJson = Redis::get(DubSession::chunkKey($this->sessionId, $i));
                 if (!$chunkJson) continue;
 
-                $chunk = json_decode($chunkJson, true);
-                $audioBase64 = $chunk['audio_base64'] ?? null;
-                if (!$audioBase64) continue;
+                $chunk     = json_decode($chunkJson, true);
+                $audioPath = $chunk['audio_path'] ?? null;
+                if (!$audioPath || !file_exists($audioPath)) continue;
 
                 $startTime = (float) ($chunk['start_time'] ?? 0);
-                $endTime = (float) ($chunk['end_time'] ?? 0);
+                $endTime   = (float) ($chunk['end_time']   ?? 0);
 
                 $nextChunkJson = Redis::get(DubSession::chunkKey($this->sessionId, $i + 1));
                 $slotEnd = $nextChunkJson
@@ -158,12 +158,9 @@ class WaitForAudioDownloadJob implements ShouldQueue
 
                 $slotDuration = round(max(0.1, $slotEnd - $startTime), 3);
 
-                $tmpMp3 = "/tmp/remix_{$this->sessionId}_{$i}.mp3";
-                file_put_contents($tmpMp3, base64_decode($audioBase64));
-
                 $result = Process::timeout(20)->run([
                     'ffmpeg', '-y',
-                    '-i', $tmpMp3,
+                    '-i', $audioPath,
                     '-ss', (string) round($startTime, 3),
                     '-t', (string) $slotDuration,
                     '-i', $originalAudioPath,
@@ -172,8 +169,6 @@ class WaitForAudioDownloadJob implements ShouldQueue
                     '-t', (string) $slotDuration,
                     '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
                 ]);
-
-                @unlink($tmpMp3);
 
                 if ($result->successful()) {
                     $remixed++;

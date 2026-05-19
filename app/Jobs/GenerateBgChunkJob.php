@@ -103,7 +103,6 @@ class GenerateBgChunkJob implements ShouldQueue, ShouldBeUnique
         $filters   = [$bgFilter];
         $mixInputs = ['[0:a]', '[bg]'];
         $inputIdx  = 2;
-        $tmpFiles  = [];
 
         // Fetch all TTS chunks in one Redis pipeline
         $chunkKeys   = array_map(fn($i) => DubSession::chunkKey($this->sessionId, $i), range(0, max(0, $total - 1)));
@@ -112,17 +111,13 @@ class GenerateBgChunkJob implements ShouldQueue, ShouldBeUnique
         foreach ($chunkValues as $i => $chunkJson) {
             if (!$chunkJson) continue;
 
-            $chunk    = json_decode($chunkJson, true);
-            $segStart = (float) ($chunk['start_time'] ?? 0);
-            $segEnd   = (float) ($chunk['end_time']   ?? 0);
-            $b64      = $chunk['audio_base64']         ?? null;
+            $chunk     = json_decode($chunkJson, true);
+            $segStart  = (float) ($chunk['start_time'] ?? 0);
+            $segEnd    = (float) ($chunk['end_time']   ?? 0);
+            $audioPath = $chunk['audio_path']           ?? null;
 
             if ($segStart >= $this->endTime || $segEnd <= $this->startTime) continue;
-            if (!$b64) continue;
-
-            $tmpMp3 = "/tmp/bggen_{$this->sessionId}_{$this->chunkIndex}_{$i}.mp3";
-            file_put_contents($tmpMp3, base64_decode($b64));
-            $tmpFiles[] = $tmpMp3;
+            if (!$audioPath || !file_exists($audioPath)) continue;
 
             $ttsSeek    = max(0.0, $this->startTime - $segStart);
             $ttsDelayMs = (int) round(max(0.0, $segStart - $this->startTime) * 1000);
@@ -130,7 +125,7 @@ class GenerateBgChunkJob implements ShouldQueue, ShouldBeUnique
             $cmd[] = '-ss';
             $cmd[] = (string) round($ttsSeek, 3);
             $cmd[] = '-i';
-            $cmd[] = $tmpMp3;
+            $cmd[] = $audioPath;
 
             $filters[]   = "[{$inputIdx}:a]adelay={$ttsDelayMs}|{$ttsDelayMs},volume=3.0,aresample=44100[tts{$inputIdx}]";
             $mixInputs[] = "[tts{$inputIdx}]";
@@ -149,8 +144,6 @@ class GenerateBgChunkJob implements ShouldQueue, ShouldBeUnique
         // Dense-dialogue chunks can have 15+ TTS inputs; give ffmpeg ample time.
         $timeout = max(60, (int) ceil($chunkDur) * 2 + 30);
         $result  = Process::timeout($timeout)->run($cmd);
-
-        foreach ($tmpFiles as $f) @unlink($f);
 
         if (!$result->successful() || !file_exists($writeFile) || filesize($writeFile) <= 10) {
             @unlink($writeFile);
