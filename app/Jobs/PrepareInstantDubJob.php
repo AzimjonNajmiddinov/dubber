@@ -626,6 +626,7 @@ class PrepareInstantDubJob implements ShouldQueue
                     '-o', $tmpDir . '/sub',
                     '--no-playlist',
                     '--quiet',
+                    '--extractor-args', 'youtube:player_client=web_creator,mweb,ios',
                     $url,
                 ]);
 

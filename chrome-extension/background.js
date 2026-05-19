@@ -87,9 +87,10 @@ async function getYouTubeData(tabId, videoUrl) {
         } catch {}
     }
 
-    // Step 3: get audioUrl + detectedLanguage from MAIN world
+    // Step 3: get audioUrl + detectedLanguage + captionBaseUrl from MAIN world
     let audioUrl = null;
     let detectedLanguage = null;
+    let captionBaseUrl = null;
     try {
         const r = await chrome.scripting.executeScript({
             target: { tabId },
@@ -104,18 +105,29 @@ async function getYouTubeData(tabId, videoUrl) {
                     .filter(f => f.mimeType?.startsWith('audio/') && f.url)
                     .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
 
-                // Caption language — prefer the default/selected track
+                // Caption language + baseUrl — prefer manual over auto-generated
                 const tracks = pr.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
                 const defaultTrack = tracks.find(t => t.isDefault) || tracks.find(t => !t.kind || t.kind !== 'asr') || tracks[0];
                 const lang = defaultTrack?.languageCode?.slice(0, 2) || null;
+                const baseUrl = defaultTrack?.baseUrl || null;
 
-                return { audioUrl: audioFmt?.url || null, detectedLanguage: lang };
+                return { audioUrl: audioFmt?.url || null, detectedLanguage: lang, captionBaseUrl: baseUrl };
             },
         });
         const result = r?.[0]?.result;
-        audioUrl         = result?.audioUrl         || null;
+        audioUrl        = result?.audioUrl        || null;
         detectedLanguage = result?.detectedLanguage || null;
+        captionBaseUrl  = result?.captionBaseUrl  || null;
     } catch {}
+
+    // Step 4: if intercept missed, fetch caption directly via baseUrl (runs in extension context, no IP block)
+    if (!srtText && captionBaseUrl) {
+        try {
+            const url = captionBaseUrl.includes('fmt=') ? captionBaseUrl : captionBaseUrl + '&fmt=json3';
+            const resp = await fetch(url);
+            if (resp.ok) srtText = await resp.text();
+        } catch {}
+    }
 
     if (!srtText) return { srt: null, audioUrl, detectedLanguage };
 

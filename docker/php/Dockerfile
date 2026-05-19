@@ -13,6 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pip \
     pipx \
     docker.io \
+    nodejs \
   && docker-php-ext-install pdo pdo_mysql zip mbstring exif pcntl \
   && rm -rf /var/lib/apt/lists/*
 
