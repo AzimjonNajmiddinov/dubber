@@ -296,16 +296,28 @@ class PrepareInstantDubJob implements ShouldQueue
         // Flow 3 (Chrome Extension): user picked a specific voice — assign it to ALL speakers.
         // Gender-based cycling (old approach) is DISABLED when force_voice is set.
         if ($forceVoice) {
-            $gender = str_starts_with($forceVoice, 'F') ? 'female'
-                    : (str_starts_with($forceVoice, 'C') ? 'child' : 'male');
-            $tau   = \App\Http\Controllers\AdminVoicePoolController::getTau($gender, $forceVoice);
-            $speed = \App\Http\Controllers\AdminVoicePoolController::getSpeed($gender, $forceVoice);
-            $voiceMap = [];
-            foreach (array_keys($speakers) as $tag) {
-                $voiceMap[$tag] = ['driver' => 'mms', 'gender' => $gender, 'pool_name' => $forceVoice, 'tau' => $tau, 'speed' => $speed];
+            $ttsDriver = $session['tts_driver'] ?? config('dubber.tts.default', 'edge');
+            $voiceMap  = [];
+
+            if ($ttsDriver === 'openai') {
+                // OpenAI voices: onyx/echo/alloy = male, nova/shimmer/fable = female
+                $gender = in_array($forceVoice, ['nova', 'shimmer', 'fable']) ? 'female' : 'male';
+                foreach (array_keys($speakers) as $tag) {
+                    $voiceMap[$tag] = ['driver' => 'openai', 'gender' => $gender, 'openai_voice' => $forceVoice];
+                }
+            } else {
+                // MMS voice pool: force_voice is a pool file name (M1, F1, etc.)
+                $gender = str_starts_with($forceVoice, 'F') ? 'female'
+                        : (str_starts_with($forceVoice, 'C') ? 'child' : 'male');
+                $tau   = \App\Http\Controllers\AdminVoicePoolController::getTau($gender, $forceVoice);
+                $speed = \App\Http\Controllers\AdminVoicePoolController::getSpeed($gender, $forceVoice);
+                foreach (array_keys($speakers) as $tag) {
+                    $voiceMap[$tag] = ['driver' => 'mms', 'gender' => $gender, 'pool_name' => $forceVoice, 'tau' => $tau, 'speed' => $speed];
+                }
             }
+
             Redis::setex(DubSession::voicesKey($this->sessionId), DubSession::TTL, json_encode($voiceMap));
-            Log::info("[DUB] Voice map built (force_voice={$forceVoice}): " . implode(', ', array_keys($speakers)), [
+            Log::info("[DUB] Voice map built (force_voice={$forceVoice}, driver={$ttsDriver}): " . implode(', ', array_keys($speakers)), [
                 'session' => $this->sessionId,
             ]);
             return;
