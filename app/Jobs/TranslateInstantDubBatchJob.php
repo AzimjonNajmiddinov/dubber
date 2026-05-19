@@ -156,7 +156,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
                 self::dispatch(
                     $this->sessionId, $i, $this->totalBatches,
                     $this->language, $this->translateFrom, $this->segmentOffset,
-                )->onQueue('default');
+                )->onQueue('segment-generation');
             }
         }
 

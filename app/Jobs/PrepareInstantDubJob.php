@@ -207,7 +207,7 @@ class PrepareInstantDubJob implements ShouldQueue
             $this->language,
             $this->translateFrom,
             $nextSegmentStart,
-        )->onQueue('default');
+        )->onQueue('segment-generation');
 
         // 5. Store remaining segments in batches for full translation chain
         $batches = array_chunk($remainingSegments, 15);
@@ -229,7 +229,7 @@ class PrepareInstantDubJob implements ShouldQueue
                 $this->language,
                 $this->translateFrom,
                 $microBatchSize,
-            )->onQueue('default');
+            )->onQueue('segment-generation');
         }
 
         Log::info("[DUB] [{$title}] Prepared: {$microBatchSize} micro-batch + " . count($remainingSegments) . " remaining in {$totalBatches} batches, {$this->translateFrom}→{$this->language}", [
