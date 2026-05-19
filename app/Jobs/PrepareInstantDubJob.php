@@ -300,8 +300,8 @@ class PrepareInstantDubJob implements ShouldQueue
             $voiceMap  = [];
 
             if ($ttsDriver === 'openai') {
-                // OpenAI voices: onyx/echo/alloy = male, nova/shimmer/fable = female
-                $gender = in_array($forceVoice, ['nova', 'shimmer', 'fable']) ? 'female' : 'male';
+                // OpenAI voices: nova/shimmer/fable/coral/marin/ballad = female, rest = male
+                $gender = in_array($forceVoice, ['nova', 'shimmer', 'fable', 'coral', 'marin', 'ballad']) ? 'female' : 'male';
                 foreach (array_keys($speakers) as $tag) {
                     $voiceMap[$tag] = ['driver' => 'openai', 'gender' => $gender, 'openai_voice' => $forceVoice];
                 }

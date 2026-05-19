@@ -22,15 +22,22 @@ class InstantDubController extends Controller
     {
         $driver = config('dubber.tts.default', 'edge');
 
-        // OpenAI TTS has 6 fixed voices — no voice pool files needed
+        // OpenAI TTS voices for gpt-4o-mini-tts (13 voices)
         if ($driver === 'openai') {
             return response()->json([
+                ['voice_id' => 'cedar',   'name' => 'Cedar (Erkak)',   'gender' => 'male',   'language' => 'uz'],
                 ['voice_id' => 'onyx',    'name' => 'Onyx (Erkak)',    'gender' => 'male',   'language' => 'uz'],
                 ['voice_id' => 'echo',    'name' => 'Echo (Erkak)',    'gender' => 'male',   'language' => 'uz'],
+                ['voice_id' => 'verse',   'name' => 'Verse (Erkak)',   'gender' => 'male',   'language' => 'uz'],
+                ['voice_id' => 'ash',     'name' => 'Ash (Neytral)',   'gender' => 'male',   'language' => 'uz'],
                 ['voice_id' => 'alloy',   'name' => 'Alloy (Neytral)', 'gender' => 'male',   'language' => 'uz'],
+                ['voice_id' => 'sage',    'name' => 'Sage (Neytral)',  'gender' => 'male',   'language' => 'uz'],
                 ['voice_id' => 'nova',    'name' => 'Nova (Ayol)',     'gender' => 'female', 'language' => 'uz'],
                 ['voice_id' => 'shimmer', 'name' => 'Shimmer (Ayol)',  'gender' => 'female', 'language' => 'uz'],
+                ['voice_id' => 'coral',   'name' => 'Coral (Ayol)',    'gender' => 'female', 'language' => 'uz'],
+                ['voice_id' => 'marin',   'name' => 'Marin (Ayol)',    'gender' => 'female', 'language' => 'uz'],
                 ['voice_id' => 'fable',   'name' => 'Fable (Neytral)', 'gender' => 'female', 'language' => 'uz'],
+                ['voice_id' => 'ballad',  'name' => 'Ballad (Neytral)','gender' => 'female', 'language' => 'uz'],
             ]);
         }
 
