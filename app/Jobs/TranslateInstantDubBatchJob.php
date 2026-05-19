@@ -134,6 +134,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
                 $seg['speaker'] ?? 'M1',
                 $slotEnd,
                 $seg['source_text'] ?? null,
+                $seg['delivery'] ?? null,
             )->onQueue('segment-generation');
         }
 
@@ -865,7 +866,11 @@ class TranslateInstantDubBatchJob implements ShouldQueue
             . "7. Cultural references: adapt to {$toLang} culture, don't translate literally. A joke must be funny in {$toLang}.\n"
             . "6. Preserve interruptions, hesitations, and conversational flow.\n"
             . "7. Cultural adaptation: if a joke, idiom, or reference won't land in {$toLang}, adapt it to an equivalent that carries the same meaning and humor — don't translate it literally.\n"
-            . "\n" . 'Format: "1. [M1] translated text"' . "\n"
+            . "\n" . 'Format: "1. [M1] translated text {emotion|pace}"' . "\n"
+            . "After each line append a delivery hint in curly braces:\n"
+            . "- emotion: neutral angry happy sad fearful excited calm whisper\n"
+            . "- pace: normal fast slow\n"
+            . "Example: \"3. [M1] Qo'ying! {angry|fast}\"\n"
             . "Do not include timing info. Do not skip or merge lines. Keep exact numbering.";
 
         return [
@@ -881,13 +886,13 @@ class TranslateInstantDubBatchJob implements ShouldQueue
             if (preg_match('/^(\d+)\.\s*\[([MFC]\d+)\]\s*(.+)/', $line, $lm)) {
                 $idx = (int) $lm[1] - 1;
                 if (isset($batch[$idx])) {
-                    $batch[$idx]['speaker'] = $lm[2];
-                    $batch[$idx]['text'] = trim($lm[3]);
+                    $batch[$idx]['speaker']  = $lm[2];
+                    $batch[$idx]['text']     = $this->extractDelivery($lm[3], $batch[$idx]);
                 }
             } elseif (preg_match('/^(\d+)\.\s*(.+)/', $line, $lm)) {
                 $idx = (int) $lm[1] - 1;
                 if (isset($batch[$idx])) {
-                    $batch[$idx]['text'] = trim($lm[2]);
+                    $batch[$idx]['text'] = $this->extractDelivery($lm[2], $batch[$idx]);
                 }
             }
         }
@@ -936,6 +941,17 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         }
 
         return $batch;
+    }
+
+    /** Extract {emotion|pace} delivery hint from end of translated text. Mutates $seg. */
+    private function extractDelivery(string $text, array &$seg): string
+    {
+        $text = trim($text);
+        if (preg_match('/\{([a-z]+)\|([a-z]+)\}\s*$/', $text, $m)) {
+            $seg['delivery'] = $m[1] . '|' . $m[2];
+            $text = trim(substr($text, 0, -strlen($m[0])));
+        }
+        return $text;
     }
 
     private function mmsPoolVariants(string $gender): array

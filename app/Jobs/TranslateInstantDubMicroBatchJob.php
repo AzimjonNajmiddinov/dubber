@@ -72,6 +72,8 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
                 $seg['start'], $seg['end'], $this->language,
                 $seg['speaker'] ?? 'M1',
                 $slotEnd,
+                $seg['source_text'] ?? null,
+                $seg['delivery'] ?? null,
                 $this->segments[$i]['text'] ?? null,
             )->onQueue('segment-generation');
         }
@@ -121,7 +123,8 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
                 . "3. Strip annotations [music], [laughing] — write only spoken words.\n"
                 . "4. Punctuation = emotion: ! anger, ... hesitation, — pause, ? question.\n"
                 . "5. Text inside quotation marks \" \" or « » is a name, title, or label — do NOT translate it. Keep it verbatim.\n"
-                . "\n" . 'Format: "1. [M1] text"';
+                . "\n" . 'Format: "1. [M1] text {emotion|pace}"' . "\n"
+                . "Append delivery hint: emotion=neutral/angry/happy/sad/fearful/excited/calm/whisper, pace=normal/fast/slow";
         } else {
             $systemPrompt = "You are a dubbing voice director writing dialogue for a film in {$toLang}. You watch the scene, understand the story and emotions, then write what the characters would ACTUALLY SAY in {$toLang} — not a translation, but a re-creation.\n"
                 . "\nCRITICAL: Each line has a TIME SLOT [Ns]. Your text must be speakable within that duration. Short slot = concise. Long slot = natural phrasing. Never write more than fits.\n"
@@ -134,7 +137,8 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
                 . "4. Strip annotations [music], [laughing] — write only spoken words.\n"
                 . "5. Punctuation = emotion: ! anger, ... hesitation, — pause, ? question.\n"
                 . "6. Text inside quotation marks \" \" or « » is a name, title, or label — do NOT translate it. Keep it verbatim.\n"
-                . "\n" . 'Format: "1. [M1] text"';
+                . "\n" . 'Format: "1. [M1] text {emotion|pace}"' . "\n"
+                . "Append delivery hint: emotion=neutral/angry/happy/sad/fearful/excited/calm/whisper, pace=normal/fast/slow";
         }
 
         $messages = [
@@ -280,12 +284,12 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
                 $idx = (int) $lm[1] - 1;
                 if (isset($batch[$idx])) {
                     $batch[$idx]['speaker'] = $lm[2];
-                    $batch[$idx]['text'] = trim($lm[3]);
+                    $batch[$idx]['text']    = $this->extractDelivery(trim($lm[3]), $batch[$idx]);
                 }
             } elseif (preg_match('/^(\d+)\.\s*(.+)/', $line, $lm)) {
                 $idx = (int) $lm[1] - 1;
                 if (isset($batch[$idx])) {
-                    $batch[$idx]['text'] = trim($lm[2]);
+                    $batch[$idx]['text'] = $this->extractDelivery(trim($lm[2]), $batch[$idx]);
                 }
             }
         }
@@ -317,6 +321,15 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
         }
 
         return $batch;
+    }
+
+    private function extractDelivery(string $text, array &$seg): string
+    {
+        if (preg_match('/\{([a-z]+)\|([a-z]+)\}\s*$/', $text, $m)) {
+            $seg['delivery'] = $m[1] . '|' . $m[2];
+            $text = trim(substr($text, 0, -strlen($m[0])));
+        }
+        return $text;
     }
 
     private function mergeVoiceMap(array $speakers): void

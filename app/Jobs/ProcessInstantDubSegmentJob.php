@@ -38,6 +38,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         public string  $speaker = 'M1',
         public ?float  $slotEnd = null,
         public ?string $sourceText = null,
+        public ?string $delivery = null, // "emotion|pace" e.g. "angry|fast"
     ) {}
 
     public function handle(): void
@@ -236,17 +237,53 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
 
     private function generateWithOpenAi(string $outputMp3, array $speakerEntry = []): void
     {
-        $text = TextNormalizer::normalize($this->text, $this->language);
+        $text   = TextNormalizer::normalize($this->text, $this->language);
+        $gender = strtolower($speakerEntry['gender'] ?? (str_starts_with($this->speaker, 'F') ? 'female' : (str_starts_with($this->speaker, 'C') ? 'child' : 'male')));
 
-        $gender  = strtolower($speakerEntry['gender'] ?? (str_starts_with($this->speaker, 'F') ? 'female' : (str_starts_with($this->speaker, 'C') ? 'child' : 'male')));
-        $default = match($gender) { 'female' => 'nova', 'child' => 'shimmer', default => 'onyx' };
-        $voice   = $speakerEntry['openai_voice'] ?? $default;
-        $model   = config('services.openai.tts_model', 'tts-1');
-        $apiKey  = config('services.openai.key');
+        // Voice: user-selected or gender default
+        $defaultVoice = match($gender) { 'female' => 'nova', 'child' => 'shimmer', default => 'onyx' };
+        $voice = $speakerEntry['openai_voice'] ?? $defaultVoice;
+
+        // Parse delivery hint "emotion|pace" from translation
+        $emotion = 'neutral';
+        $pace    = 'normal';
+        if ($this->delivery) {
+            [$emotion, $pace] = array_pad(explode('|', $this->delivery, 2), 2, 'normal');
+        }
+
+        // Build natural-language instructions for gpt-4o-mini-tts
+        $emotionMap = [
+            'angry'   => 'angry and aggressive',
+            'happy'   => 'cheerful and warm',
+            'sad'     => 'sad and heavy-hearted',
+            'fearful' => 'fearful and anxious',
+            'excited' => 'excited and energetic',
+            'calm'    => 'calm and composed',
+            'whisper' => 'in a quiet whisper',
+            'neutral' => 'natural and conversational',
+        ];
+        $emotionDesc = $emotionMap[$emotion] ?? 'natural and conversational';
+
+        $paceDesc  = match($pace) { 'fast' => ' Speak quickly.', 'slow' => ' Speak slowly and deliberately.', default => '' };
+        $speed     = match($pace) { 'fast' => 1.12, 'slow' => 0.88, default => 1.0 };
+
+        $instructions = "Speak {$emotionDesc}.{$paceDesc}";
+
+        $model  = 'gpt-4o-mini-tts'; // supports instructions parameter
+        $apiKey = config('services.openai.key');
 
         if (!$apiKey) {
             throw new \RuntimeException('OpenAI API key not configured — set OPENAI_API_KEY in .env');
         }
+
+        $payload = [
+            'model'           => $model,
+            'input'           => $text,
+            'voice'           => $voice,
+            'instructions'    => $instructions,
+            'speed'           => $speed,
+            'response_format' => 'mp3',
+        ];
 
         $lastError = '';
         for ($attempt = 1; $attempt <= 3; $attempt++) {
@@ -254,12 +291,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
 
             $response = \Illuminate\Support\Facades\Http::withToken($apiKey)
                 ->timeout(30)
-                ->post('https://api.openai.com/v1/audio/speech', [
-                    'model'           => $model,
-                    'input'           => $text,
-                    'voice'           => $voice,
-                    'response_format' => 'mp3',
-                ]);
+                ->post('https://api.openai.com/v1/audio/speech', $payload);
 
             if ($response->successful()) {
                 file_put_contents($outputMp3, $response->body());
@@ -269,7 +301,6 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                 $lastError = 'Empty response body';
             } else {
                 $lastError = $response->status() . ': ' . Str::limit($response->body(), 200);
-                // 429 rate-limit or 5xx → retry; 4xx auth errors → fail immediately
                 if ($response->status() === 401 || $response->status() === 403) break;
             }
 
