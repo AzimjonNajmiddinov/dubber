@@ -119,11 +119,10 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
                 . $uzbekRules
                 . "\nRULES:\n"
                 . "1. Translate every word faithfully — omitting words is not allowed.\n"
-                . "2. Assign speaker tags [M1], [F1] based on gender clues.\n"
-                . "3. Strip annotations [music], [laughing] — write only spoken words.\n"
-                . "4. Punctuation = emotion: ! anger, ... hesitation, — pause, ? question.\n"
-                . "5. Text inside quotation marks \" \" or « » is a name, title, or label — do NOT translate it. Keep it verbatim.\n"
-                . "\n" . 'Format: "1. [M1] text {emotion|pace}"' . "\n"
+                . "2. Strip annotations [music], [laughing] — write only spoken words.\n"
+                . "3. Punctuation = emotion: ! anger, ... hesitation, — pause, ? question.\n"
+                . "4. Text inside quotation marks \" \" or « » is a name, title, or label — do NOT translate it. Keep it verbatim.\n"
+                . "\n" . 'Format: "1. text {emotion|pace}"' . "\n"
                 . "Append delivery hint: emotion=neutral/angry/happy/sad/fearful/excited/calm/whisper, pace=normal/fast/slow";
         } else {
             $systemPrompt = "You are a dubbing voice director writing dialogue for a film in {$toLang}. You watch the scene, understand the story and emotions, then write what the characters would ACTUALLY SAY in {$toLang} — not a translation, but a re-creation.\n"
@@ -133,11 +132,10 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
                 . "\nRULES:\n"
                 . "1. Read the scene. Understand WHY each character says what they say.\n"
                 . "2. Write what a {$toLang} speaker would ACTUALLY SAY in that moment — not a word-for-word translation.\n"
-                . "3. Assign speaker tags [M1], [F1] based on gender clues.\n"
-                . "4. Strip annotations [music], [laughing] — write only spoken words.\n"
-                . "5. Punctuation = emotion: ! anger, ... hesitation, — pause, ? question.\n"
-                . "6. Text inside quotation marks \" \" or « » is a name, title, or label — do NOT translate it. Keep it verbatim.\n"
-                . "\n" . 'Format: "1. [M1] text {emotion|pace}"' . "\n"
+                . "3. Strip annotations [music], [laughing] — write only spoken words.\n"
+                . "4. Punctuation = emotion: ! anger, ... hesitation, — pause, ? question.\n"
+                . "5. Text inside quotation marks \" \" or « » is a name, title, or label — do NOT translate it. Keep it verbatim.\n"
+                . "\n" . 'Format: "1. text {emotion|pace}"' . "\n"
                 . "Append delivery hint: emotion=neutral/angry/happy/sad/fearful/excited/calm/whisper, pace=normal/fast/slow";
         }
 
@@ -280,16 +278,11 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
     {
         $translated = trim($content);
         foreach (preg_split('/\n+/', $translated) as $line) {
-            if (preg_match('/^(\d+)\.\s*\[([MFC]\d+)\]\s*(.+)/', $line, $lm)) {
+            if (preg_match('/^(\d+)\.\s*(?:\[[MFC]\d+\]\s*)?(.+)/', $line, $lm)) {
                 $idx = (int) $lm[1] - 1;
                 if (isset($batch[$idx])) {
-                    $batch[$idx]['speaker'] = $lm[2];
-                    $batch[$idx]['text']    = $this->extractDelivery(trim($lm[3]), $batch[$idx]);
-                }
-            } elseif (preg_match('/^(\d+)\.\s*(.+)/', $line, $lm)) {
-                $idx = (int) $lm[1] - 1;
-                if (isset($batch[$idx])) {
-                    $batch[$idx]['text'] = $this->extractDelivery(trim($lm[2]), $batch[$idx]);
+                    $batch[$idx]['speaker'] = 'M1';
+                    $batch[$idx]['text']    = $this->extractDelivery(trim($lm[2]), $batch[$idx]);
                 }
             }
         }

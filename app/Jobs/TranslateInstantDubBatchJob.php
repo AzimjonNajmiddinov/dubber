@@ -862,15 +862,14 @@ class TranslateInstantDubBatchJob implements ShouldQueue
             . "4. Keep the character's voice consistent — if someone speaks formally, keep formal. If street slang, use {$toLang} slang.\n"
             . "5. Emotional delivery through punctuation (TTS reads these):\n"
             . "   ! = shouting/emphasis, ... = hesitation/trailing off, — = pause/interruption, ? = question\n"
-            . "6. Use the character analysis to assign speaker tags [M1], [F1], etc.\n"
-            . "7. Cultural references: adapt to {$toLang} culture, don't translate literally. A joke must be funny in {$toLang}.\n"
-            . "6. Preserve interruptions, hesitations, and conversational flow.\n"
-            . "7. Cultural adaptation: if a joke, idiom, or reference won't land in {$toLang}, adapt it to an equivalent that carries the same meaning and humor — don't translate it literally.\n"
-            . "\n" . 'Format: "1. [M1] translated text {emotion|pace}"' . "\n"
+            . "6. Cultural references: adapt to {$toLang} culture, don't translate literally. A joke must be funny in {$toLang}.\n"
+            . "7. Preserve interruptions, hesitations, and conversational flow.\n"
+            . "8. Cultural adaptation: if a joke, idiom, or reference won't land in {$toLang}, adapt it to an equivalent that carries the same meaning and humor — don't translate it literally.\n"
+            . "\n" . 'Format: "1. translated text {emotion|pace}"' . "\n"
             . "After each line append a delivery hint in curly braces:\n"
             . "- emotion: neutral angry happy sad fearful excited calm whisper\n"
             . "- pace: normal fast slow\n"
-            . "Example: \"3. [M1] Qo'ying! {angry|fast}\"\n"
+            . "Example: \"3. Qo'ying! {angry|fast}\"\n"
             . "Do not include timing info. Do not skip or merge lines. Keep exact numbering.";
 
         return [
@@ -883,16 +882,11 @@ class TranslateInstantDubBatchJob implements ShouldQueue
     {
         $translated = trim($content);
         foreach (preg_split('/\n+/', $translated) as $line) {
-            if (preg_match('/^(\d+)\.\s*\[([MFC]\d+)\]\s*(.+)/', $line, $lm)) {
+            if (preg_match('/^(\d+)\.\s*(?:\[[MFC]\d+\]\s*)?(.+)/', $line, $lm)) {
                 $idx = (int) $lm[1] - 1;
                 if (isset($batch[$idx])) {
-                    $batch[$idx]['speaker']  = $lm[2];
-                    $batch[$idx]['text']     = $this->extractDelivery($lm[3], $batch[$idx]);
-                }
-            } elseif (preg_match('/^(\d+)\.\s*(.+)/', $line, $lm)) {
-                $idx = (int) $lm[1] - 1;
-                if (isset($batch[$idx])) {
-                    $batch[$idx]['text'] = $this->extractDelivery($lm[2], $batch[$idx]);
+                    $batch[$idx]['speaker'] = 'M1';
+                    $batch[$idx]['text']    = $this->extractDelivery(trim($lm[2]), $batch[$idx]);
                 }
             }
         }

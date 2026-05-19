@@ -86,6 +86,12 @@ class InstantDubController extends Controller
         $forceVoice = $request->input('voice_id') ?: null;
         $ttsDriver  = $quality === 'premium' ? 'elevenlabs' : config('dubber.tts.default', 'edge');
 
+        // OpenAI: if no voice selected, pick one randomly for this session
+        if ($ttsDriver === 'openai' && !$forceVoice) {
+            $openaiVoices = ['cedar','onyx','echo','verse','ash','alloy','sage','nova','shimmer','coral','marin','fable','ballad'];
+            $forceVoice   = $openaiVoices[array_rand($openaiVoices)];
+        }
+
         // Parse video URL components for HLS
         $urlWithoutQuery = strtok($videoUrl, '?');
         $videoBaseUrl = $videoUrl ? preg_replace('#/[^/]+$#', '/', $urlWithoutQuery) : '';
