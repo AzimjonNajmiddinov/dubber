@@ -219,6 +219,9 @@ class PrepareInstantDubJob implements ShouldQueue
 
         // 6. Dispatch full translation chain (batch 0 starts from segment offset after micro-batch)
         if ($totalBatches > 0) {
+            // Initialize counter so the last batch to finish can do cleanup
+            Redis::setex("instant-dub:{$this->sessionId}:batches-remaining", DubSession::TTL, $totalBatches);
+
             TranslateInstantDubBatchJob::dispatch(
                 $this->sessionId,
                 0,

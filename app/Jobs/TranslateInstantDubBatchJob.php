@@ -101,14 +101,22 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         $this->updateSession(['progress' => "Generating audio ({$batchNum}/{$this->totalBatches})..."]);
         $globalOffset = $this->segmentOffset + $this->batchIndex * 15;
 
-        // Peek at next batch's first segment to get slotEnd for this batch's last segment
+        // Peek at next batch's first segment start time for slotEnd of this batch's last segment.
+        // With parallel dispatch, next batch key may already be consumed — fall back to allSegments.
         $nextBatchFirstStart = null;
         $nextBatchIdx = $this->batchIndex + 1;
         if ($nextBatchIdx < $this->totalBatches) {
             $nextBatchJson = Redis::get(DubSession::batchKey($this->sessionId, $nextBatchIdx));
             if ($nextBatchJson) {
-                $nextBatch = json_decode($nextBatchJson, true);
-                $nextBatchFirstStart = (float) ($nextBatch[0]['start'] ?? 0);
+                $nb = json_decode($nextBatchJson, true);
+                $nextBatchFirstStart = (float) ($nb[0]['start'] ?? 0);
+            } else {
+                $allSegsJson = Redis::get(DubSession::allSegmentsKey($this->sessionId));
+                if ($allSegsJson) {
+                    $allSegs = json_decode($allSegsJson, true);
+                    $nextGlobalIdx = $this->segmentOffset + ($nextBatchIdx * 15);
+                    $nextBatchFirstStart = (float) ($allSegs[$nextGlobalIdx]['start'] ?? 0) ?: null;
+                }
             }
         }
 
@@ -141,22 +149,24 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         // Clean up batch key
         Redis::del($batchKey);
 
-        // Chain next batch — ALWAYS chains, even if this batch had errors
-        $nextBatch = $this->batchIndex + 1;
-        if ($nextBatch < $this->totalBatches) {
-            self::dispatch(
-                $this->sessionId,
-                $nextBatch,
-                $this->totalBatches,
-                $this->language,
-                $this->translateFrom,
-                $this->segmentOffset,
-            )->onQueue('default');
-        } else {
-            // Last batch — clean up
+        if ($this->batchIndex === 0 && $this->totalBatches > 1) {
+            // Batch 0 has written character context to Redis — dispatch ALL remaining
+            // batches in parallel now. Sequential chaining would add N×5s latency.
+            for ($i = 1; $i < $this->totalBatches; $i++) {
+                self::dispatch(
+                    $this->sessionId, $i, $this->totalBatches,
+                    $this->language, $this->translateFrom, $this->segmentOffset,
+                )->onQueue('default');
+            }
+        }
+
+        // Atomic counter: last batch to finish does cleanup (non-deterministic with parallel dispatch)
+        $remaining = Redis::decr("instant-dub:{$this->sessionId}:batches-remaining");
+        if ($remaining <= 0) {
             Redis::del(
                 DubSession::fullDialogueKey($this->sessionId),
                 DubSession::allSegmentsKey($this->sessionId),
+                "instant-dub:{$this->sessionId}:batches-remaining",
             );
             Log::info("[DUB] [{$this->title}] All {$this->totalBatches} translation batches complete", [
                 'session' => $this->sessionId,
