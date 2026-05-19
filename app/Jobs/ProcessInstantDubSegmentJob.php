@@ -74,9 +74,11 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             $speakerEntry = $voiceMap[$this->speaker] ?? [];
             $driver = $speakerEntry['driver'] ?? ($session['tts_driver'] ?? config('dubber.tts.default', 'edge'));
 
-            // force_voice_id was pre-registered in PrepareInstantDubJob (single worker, no race).
-            // Inject it into speakerEntry so generateWithMms uses it directly — no per-job pool lookup.
-            if (!empty($session['force_voice_id'])) {
+            // OpenAI driver: force_voice is the OpenAI voice name (onyx, nova, etc.)
+            if ($driver === 'openai' && !empty($session['force_voice'])) {
+                $speakerEntry['openai_voice'] = $session['force_voice'];
+            } elseif (!empty($session['force_voice_id'])) {
+                // MMS: force_voice_id was pre-registered in PrepareInstantDubJob (single worker, no race).
                 $fv     = $session['force_voice'] ?? null;
                 $fvG    = $fv ? (str_starts_with($fv, 'F') ? 'female' : (str_starts_with($fv, 'C') ? 'child' : 'male')) : ($speakerEntry['gender'] ?? 'male');
                 $speakerEntry['driver']        = 'mms';
@@ -85,7 +87,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                 $speakerEntry['speed'] = $speakerEntry['speed'] ?? \App\Http\Controllers\AdminVoicePoolController::getSpeed($fvG, $fv ?? '');
                 $driver = 'mms';
             } elseif ($driver === 'mms' && empty($speakerEntry['pool_name']) && !empty($session['force_voice'])) {
-                // Fallback: voice map expired from Redis, reconstruct from session
+                // MMS fallback: voice map expired from Redis, reconstruct from session
                 $fv = $session['force_voice'];
                 $fvG = str_starts_with($fv, 'F') ? 'female' : (str_starts_with($fv, 'C') ? 'child' : 'male');
                 $speakerEntry['driver']    = 'mms';
@@ -103,6 +105,8 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                 // MMS outputs WAV directly — no MP3 encoding to avoid quality loss
                 $this->generateWithMms($rawWav, $tmpDir, $speakerEntry);
                 $rawMp3 = $rawWav;
+            } elseif ($driver === 'openai') {
+                $this->generateWithOpenAi($rawMp3, $speakerEntry);
             } else {
                 $this->generateWithEdgeTts($rawMp3, $tmpDir, $speakerEntry);
             }
@@ -228,6 +232,53 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         Log::error("[DUB] Segment #{$this->index} killed by worker: " . Str::limit($exception->getMessage(), 100), [
             'session' => $this->sessionId,
         ]);
+    }
+
+    private function generateWithOpenAi(string $outputMp3, array $speakerEntry = []): void
+    {
+        $text = TextNormalizer::normalize($this->text, $this->language);
+
+        $gender  = strtolower($speakerEntry['gender'] ?? (str_starts_with($this->speaker, 'F') ? 'female' : (str_starts_with($this->speaker, 'C') ? 'child' : 'male')));
+        $default = match($gender) { 'female' => 'nova', 'child' => 'shimmer', default => 'onyx' };
+        $voice   = $speakerEntry['openai_voice'] ?? $default;
+        $model   = config('services.openai.tts_model', 'tts-1');
+        $apiKey  = config('services.openai.key');
+
+        if (!$apiKey) {
+            throw new \RuntimeException('OpenAI API key not configured — set OPENAI_API_KEY in .env');
+        }
+
+        $lastError = '';
+        for ($attempt = 1; $attempt <= 3; $attempt++) {
+            if ($attempt > 1) usleep(($attempt - 1) * 1500 * 1000);
+
+            $response = \Illuminate\Support\Facades\Http::withToken($apiKey)
+                ->timeout(30)
+                ->post('https://api.openai.com/v1/audio/speech', [
+                    'model'           => $model,
+                    'input'           => $text,
+                    'voice'           => $voice,
+                    'response_format' => 'mp3',
+                ]);
+
+            if ($response->successful()) {
+                file_put_contents($outputMp3, $response->body());
+                if (file_exists($outputMp3) && filesize($outputMp3) >= 200) {
+                    return;
+                }
+                $lastError = 'Empty response body';
+            } else {
+                $lastError = $response->status() . ': ' . Str::limit($response->body(), 200);
+                // 429 rate-limit or 5xx → retry; 4xx auth errors → fail immediately
+                if ($response->status() === 401 || $response->status() === 403) break;
+            }
+
+            Log::warning("[DUB] Segment #{$this->index} OpenAI TTS attempt {$attempt} failed: {$lastError}", [
+                'session' => $this->sessionId,
+            ]);
+        }
+
+        throw new \RuntimeException("OpenAI TTS failed after 3 attempts: {$lastError}");
     }
 
     private function generateWithEdgeTts(string $outputMp3, string $tmpDir, array $speakerEntry = []): void

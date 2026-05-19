@@ -20,6 +20,20 @@ class InstantDubController extends Controller
 {
     public function voices(): JsonResponse
     {
+        $driver = config('dubber.tts.default', 'edge');
+
+        // OpenAI TTS has 6 fixed voices — no voice pool files needed
+        if ($driver === 'openai') {
+            return response()->json([
+                ['voice_id' => 'onyx',    'name' => 'Onyx (Erkak)',    'gender' => 'male',   'language' => 'uz'],
+                ['voice_id' => 'echo',    'name' => 'Echo (Erkak)',    'gender' => 'male',   'language' => 'uz'],
+                ['voice_id' => 'alloy',   'name' => 'Alloy (Neytral)', 'gender' => 'male',   'language' => 'uz'],
+                ['voice_id' => 'nova',    'name' => 'Nova (Ayol)',     'gender' => 'female', 'language' => 'uz'],
+                ['voice_id' => 'shimmer', 'name' => 'Shimmer (Ayol)',  'gender' => 'female', 'language' => 'uz'],
+                ['voice_id' => 'fable',   'name' => 'Fable (Neytral)', 'gender' => 'female', 'language' => 'uz'],
+            ]);
+        }
+
         $voices = [];
         foreach (['male', 'female', 'child'] as $gender) {
             $dir   = storage_path("app/voice-pool/{$gender}");
@@ -63,7 +77,7 @@ class InstantDubController extends Controller
         $title    = $request->input('title', 'Untitled');
         $quality    = $request->input('quality', 'standard');
         $forceVoice = $request->input('voice_id') ?: null;
-        $ttsDriver  = $quality === 'premium' ? 'elevenlabs' : 'mms';
+        $ttsDriver  = $quality === 'premium' ? 'elevenlabs' : config('dubber.tts.default', 'edge');
 
         // Parse video URL components for HLS
         $urlWithoutQuery = strtok($videoUrl, '?');

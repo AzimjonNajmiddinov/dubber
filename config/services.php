@@ -35,7 +35,8 @@ return [
         ],
     ],
     'openai' => [
-        'key' => env('OPENAI_API_KEY'),
+        'key'       => env('OPENAI_API_KEY'),
+        'tts_model' => env('OPENAI_TTS_MODEL', 'tts-1'),
     ],
 
     'anthropic' => [
