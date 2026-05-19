@@ -612,15 +612,20 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         $forceVoice = $sessionData['force_voice'] ?? null;
         $driver = $sessionData['tts_driver'] ?? config('dubber.tts.default', 'edge');
 
-        // Flow 3: force_voice set — assign same voice to all speakers
+        // force_voice set — assign same voice to all speakers
         if ($forceVoice) {
-            $gender = str_starts_with($forceVoice, 'F') ? 'female'
-                    : (str_starts_with($forceVoice, 'C') ? 'child' : 'male');
+            if ($driver === 'openai') {
+                $gender = in_array($forceVoice, ['nova','shimmer','fable','coral','marin','ballad']) ? 'female' : 'male';
+                $entry  = ['driver' => 'openai', 'gender' => $gender, 'openai_voice' => $forceVoice];
+            } else {
+                $gender = str_starts_with($forceVoice, 'F') ? 'female' : (str_starts_with($forceVoice, 'C') ? 'child' : 'male');
+                $entry  = ['driver' => 'mms', 'gender' => $gender, 'pool_name' => $forceVoice, 'tau' => 1.0];
+            }
             $lock = Cache::lock($lockKey, 5);
-            $lock->block(5, function () use ($voiceKey, $newSpeakers, $forceVoice, $gender) {
+            $lock->block(5, function () use ($voiceKey, $newSpeakers, $entry) {
                 $voiceMap = json_decode(Redis::get($voiceKey) ?? '{}', true) ?: [];
                 foreach (array_keys($newSpeakers) as $tag) {
-                    $voiceMap[$tag] = ['driver' => 'mms', 'gender' => $gender, 'pool_name' => $forceVoice, 'tau' => 1.0];
+                    $voiceMap[$tag] = $entry;
                 }
                 Redis::setex($voiceKey, DubSession::TTL, json_encode($voiceMap));
             });
