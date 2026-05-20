@@ -107,7 +107,16 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                 $this->generateWithMms($rawWav, $tmpDir, $speakerEntry);
                 $rawMp3 = $rawWav;
             } elseif ($driver === 'openai') {
-                $this->generateWithOpenAi($rawMp3, $speakerEntry);
+                try {
+                    $this->generateWithOpenAi($rawMp3, $speakerEntry);
+                } catch (\RuntimeException $e) {
+                    if (str_starts_with($e->getMessage(), 'openai_billing:')) {
+                        Log::warning("[DUB] OpenAI billing/quota error, falling back to Edge TTS — seg #{$this->index}", ['session' => $this->sessionId]);
+                        $this->generateWithEdgeTts($rawMp3, $tmpDir, $speakerEntry);
+                    } else {
+                        throw $e;
+                    }
+                }
             } else {
                 $this->generateWithEdgeTts($rawMp3, $tmpDir, $speakerEntry);
             }
@@ -303,7 +312,12 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                 $lastError = 'Empty response body';
             } else {
                 $lastError = $response->status() . ': ' . Str::limit($response->body(), 200);
-                if ($response->status() === 401 || $response->status() === 403) break;
+                $status    = $response->status();
+                if ($status === 401 || $status === 403) break;
+                // Billing/quota errors — no point retrying
+                if ($status === 402 || ($status === 429 && str_contains($response->body(), 'quota'))) {
+                    throw new \RuntimeException("openai_billing: {$lastError}");
+                }
             }
 
             Log::warning("[DUB] Segment #{$this->index} OpenAI TTS attempt {$attempt} failed: {$lastError}", [
