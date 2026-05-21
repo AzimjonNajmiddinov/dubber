@@ -622,71 +622,20 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         $forceVoice = $sessionData['force_voice'] ?? null;
         $driver = $sessionData['tts_driver'] ?? config('dubber.tts.default', 'edge');
 
-        // force_voice set — assign same voice to all speakers (only for drivers that use it)
-        if ($forceVoice && ($driver === 'openai' || $driver === 'mms')) {
-            if ($driver === 'openai') {
-                $gender = in_array($forceVoice, ['nova','shimmer','fable','coral','marin','ballad']) ? 'female' : 'male';
-                $entry  = ['driver' => 'openai', 'gender' => $gender, 'openai_voice' => $forceVoice];
-            } else {
-                $gender = str_starts_with($forceVoice, 'F') ? 'female' : (str_starts_with($forceVoice, 'C') ? 'child' : 'male');
-                $entry  = ['driver' => 'mms', 'gender' => $gender, 'pool_name' => $forceVoice, 'tau' => 1.0];
-            }
-            $lock = Cache::lock($lockKey, 5);
-            $lock->block(5, function () use ($voiceKey, $newSpeakers, $entry) {
-                $voiceMap = json_decode(Redis::get($voiceKey) ?? '{}', true) ?: [];
-                foreach (array_keys($newSpeakers) as $tag) {
-                    $voiceMap[$tag] = $entry;
-                }
-                Redis::setex($voiceKey, DubSession::TTL, json_encode($voiceMap));
-            });
-            return;
-        }
+        $forceEntry = $forceVoice ? \App\Services\VoiceMapBuilder::forceVoiceEntry($driver, $forceVoice) : null;
+        $variants   = $forceEntry ? null : \App\Services\VoiceMapBuilder::variantsForDriver($driver, $this->language);
 
-        if ($driver === 'mms') {
-            $maleVariants   = $this->mmsPoolVariants('male');
-            $femaleVariants = $this->mmsPoolVariants('female');
-            $childVariants  = $this->mmsPoolVariants('child') ?: $this->mmsPoolVariants('male');
-        } elseif ($driver === 'aisha') {
-            $variants = \App\Services\VoiceVariants::forAisha();
-            $maleVariants = $variants['male']; $femaleVariants = $variants['female']; $childVariants = $variants['child'];
-        } else {
-            $variants = \App\Services\VoiceVariants::forLanguage($this->language);
-            $maleVariants = $variants['male']; $femaleVariants = $variants['female']; $childVariants = $variants['child'];
-        }
-
-        // Use Redis lock to prevent race condition with micro-batch's mergeVoiceMap
         $lock = Cache::lock($lockKey, 5);
         $voiceMap = [];
-        $lock->block(5, function () use ($voiceKey, $newSpeakers, $maleVariants, $femaleVariants, $childVariants, &$voiceMap) {
-            $existingJson = Redis::get($voiceKey);
-            $voiceMap = $existingJson ? json_decode($existingJson, true) : [];
-
-            // Count already-assigned variants per gender
-            $maleIdx = 0;
-            $femaleIdx = 0;
-            $childIdx = 0;
-            foreach ($voiceMap as $tag => $voice) {
-                if (str_starts_with($tag, 'C')) $childIdx++;
-                elseif (str_starts_with($tag, 'M')) $maleIdx++;
-                else $femaleIdx++;
-            }
-
-            // Only assign new speakers
-            foreach (array_keys($newSpeakers) as $tag) {
-                if (isset($voiceMap[$tag])) continue;
-
-                if (str_starts_with($tag, 'C')) {
-                    $voiceMap[$tag] = $childVariants[$childIdx % count($childVariants)];
-                    $childIdx++;
-                } elseif (str_starts_with($tag, 'M')) {
-                    $voiceMap[$tag] = $maleVariants[$maleIdx % count($maleVariants)];
-                    $maleIdx++;
-                } else {
-                    $voiceMap[$tag] = $femaleVariants[$femaleIdx % count($femaleVariants)];
-                    $femaleIdx++;
+        $lock->block(5, function () use ($voiceKey, $newSpeakers, $forceEntry, $variants, &$voiceMap) {
+            $voiceMap = json_decode(Redis::get($voiceKey) ?? '{}', true) ?: [];
+            if ($forceEntry) {
+                foreach (array_keys($newSpeakers) as $tag) {
+                    $voiceMap[$tag] = $forceEntry;
                 }
+            } else {
+                $voiceMap = \App\Services\VoiceMapBuilder::assignSpeakers($voiceMap, $newSpeakers, $variants);
             }
-
             Redis::setex($voiceKey, DubSession::TTL, json_encode($voiceMap));
         });
 
@@ -961,17 +910,6 @@ class TranslateInstantDubBatchJob implements ShouldQueue
             $text = trim(substr($text, 0, -strlen($m[0])));
         }
         return $text;
-    }
-
-    private function mmsPoolVariants(string $gender): array
-    {
-        $dir   = storage_path("app/voice-pool/{$gender}");
-        $files = is_dir($dir) ? glob("{$dir}/*.{wav,mp3,m4a}", GLOB_BRACE) : [];
-        return array_map(fn($f) => [
-            'driver'    => 'mms',
-            'gender'    => $gender,
-            'pool_name' => pathinfo($f, PATHINFO_FILENAME),
-        ], $files);
     }
 
     private function updateSession(array $data): void

@@ -296,41 +296,9 @@ class PrepareInstantDubJob implements ShouldQueue
     {
         $session    = DubSession::get($this->sessionId) ?? [];
         $forceVoice = $session['force_voice'] ?? null;
+        $driver     = $session['tts_driver'] ?? config('dubber.tts.default', 'edge');
 
-        // Flow 3 (Chrome Extension): user picked a specific voice — assign it to ALL speakers.
-        // Gender-based cycling (old approach) is DISABLED when force_voice is set.
-        if ($forceVoice) {
-            $ttsDriver = $session['tts_driver'] ?? config('dubber.tts.default', 'edge');
-            $voiceMap  = [];
-
-            if ($ttsDriver === 'openai') {
-                // OpenAI voices: nova/shimmer/fable/coral/marin/ballad = female, rest = male
-                $gender = in_array($forceVoice, ['nova', 'shimmer', 'fable', 'coral', 'marin', 'ballad']) ? 'female' : 'male';
-                foreach (array_keys($speakers) as $tag) {
-                    $voiceMap[$tag] = ['driver' => 'openai', 'gender' => $gender, 'openai_voice' => $forceVoice];
-                }
-            } elseif ($ttsDriver === 'mms') {
-                // MMS voice pool: force_voice is a pool file name (M1, F1, etc.)
-                $gender = str_starts_with($forceVoice, 'F') ? 'female'
-                        : (str_starts_with($forceVoice, 'C') ? 'child' : 'male');
-                $tau   = \App\Http\Controllers\AdminVoicePoolController::getTau($gender, $forceVoice);
-                $speed = \App\Http\Controllers\AdminVoicePoolController::getSpeed($gender, $forceVoice);
-                foreach (array_keys($speakers) as $tag) {
-                    $voiceMap[$tag] = ['driver' => 'mms', 'gender' => $gender, 'pool_name' => $forceVoice, 'tau' => $tau, 'speed' => $speed];
-                }
-            }
-            // else: edge/aisha — force_voice is ignored; normal gender-based voice map built below
-
-            if (!empty($voiceMap)) {
-                Redis::setex(DubSession::voicesKey($this->sessionId), DubSession::TTL, json_encode($voiceMap));
-                Log::info("[DUB] Voice map built (force_voice={$forceVoice}, driver={$ttsDriver}): " . implode(', ', array_keys($speakers)), [
-                    'session' => $this->sessionId,
-                ]);
-                return;
-            }
-        }
-
-        // 1. Load saved voice map from DB (admin may have customised it)
+        // Load saved voice map from DB (admin may have customised it)
         $voiceMap = [];
         if ($this->cachedDubId) {
             $saved = \App\Models\InstantDubVoiceMap::where('instant_dub_id', $this->cachedDubId)->get();
@@ -341,37 +309,22 @@ class PrepareInstantDubJob implements ShouldQueue
             }
         }
 
-        // 2. For any speaker not in saved map, assign a default based on driver
-        $driver = $session['tts_driver'] ?? config('dubber.tts.default', 'edge');
-
-        if ($driver === 'mms') {
-            $maleFiles   = glob(storage_path('app/voice-pool/male/*.{wav,mp3,m4a}'), GLOB_BRACE) ?: [];
-            $femaleFiles = glob(storage_path('app/voice-pool/female/*.{wav,mp3,m4a}'), GLOB_BRACE) ?: [];
-            $childFiles  = glob(storage_path('app/voice-pool/child/*.{wav,mp3,m4a}'), GLOB_BRACE) ?: $maleFiles;
-            $toVariant = fn($f, $g) => ['driver' => 'mms', 'gender' => $g, 'pool_name' => pathinfo($f, PATHINFO_FILENAME)];
-            $maleVariants   = array_map(fn($f) => $toVariant($f, 'male'),   $maleFiles);
-            $femaleVariants = array_map(fn($f) => $toVariant($f, 'female'), $femaleFiles);
-            $childVariants  = array_map(fn($f) => $toVariant($f, 'child'),  $childFiles);
-        } else {
-            $variants = \App\Services\VoiceVariants::forLanguage($this->language);
-            $maleVariants = $variants['male']; $femaleVariants = $variants['female']; $childVariants = $variants['child'];
-        }
-
-        $maleIdx = $femaleIdx = $childIdx = 0;
-        foreach (array_keys($speakers) as $tag) {
-            if (isset($voiceMap[$tag])) continue; // already assigned from DB
-
-            if (str_starts_with($tag, 'C') && !empty($childVariants)) {
-                $voiceMap[$tag] = $childVariants[$childIdx % count($childVariants)];
-                $childIdx++;
-            } elseif (str_starts_with($tag, 'M') && !empty($maleVariants)) {
-                $voiceMap[$tag] = $maleVariants[$maleIdx % count($maleVariants)];
-                $maleIdx++;
-            } elseif (!empty($femaleVariants)) {
-                $voiceMap[$tag] = $femaleVariants[$femaleIdx % count($femaleVariants)];
-                $femaleIdx++;
+        if ($forceVoice) {
+            $entry = \App\Services\VoiceMapBuilder::forceVoiceEntry($driver, $forceVoice);
+            if ($entry) {
+                foreach (array_keys($speakers) as $tag) {
+                    $voiceMap[$tag] = $entry;
+                }
+                Redis::setex(DubSession::voicesKey($this->sessionId), DubSession::TTL, json_encode($voiceMap));
+                Log::info("[DUB] Voice map built (force_voice={$forceVoice}, driver={$driver}): " . implode(', ', array_keys($speakers)), [
+                    'session' => $this->sessionId,
+                ]);
+                return;
             }
         }
+
+        $variants = \App\Services\VoiceMapBuilder::variantsForDriver($driver, $this->language);
+        $voiceMap = \App\Services\VoiceMapBuilder::assignSpeakers($voiceMap, $speakers, $variants);
 
         Redis::setex(DubSession::voicesKey($this->sessionId), DubSession::TTL, json_encode($voiceMap));
 
