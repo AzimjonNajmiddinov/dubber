@@ -318,8 +318,8 @@ async function doPoll() {
             }
         }
 
-        // Auto-play once 10% segments are ready
-        if (data.playable && dubState._waitingToPlay) {
+        // Auto-play once first 3 segments are ready
+        if (dubState._waitingToPlay && ready >= 3) {
             dubState._waitingToPlay = false;
             const video = dubState._video;
             if (video) video.play().catch(() => {});
