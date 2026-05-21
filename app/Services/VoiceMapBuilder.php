@@ -80,26 +80,12 @@ class VoiceMapBuilder
      */
     public static function assignSpeakers(array $voiceMap, array $speakers, array $variants): array
     {
-        $maleIdx = $femaleIdx = $childIdx = 0;
-        foreach ($voiceMap as $tag => $_) {
-            if (str_starts_with($tag, 'C'))      $childIdx++;
-            elseif (str_starts_with($tag, 'M'))  $maleIdx++;
-            else                                  $femaleIdx++;
-        }
+        $pool = $variants['male'] ?: $variants['female'] ?: [];
+        if (empty($pool)) return $voiceMap;
 
         foreach (array_keys($speakers) as $tag) {
             if (isset($voiceMap[$tag])) continue;
-
-            if (str_starts_with($tag, 'C') && !empty($variants['child'])) {
-                $voiceMap[$tag] = $variants['child'][$childIdx % count($variants['child'])];
-                $childIdx++;
-            } elseif (str_starts_with($tag, 'M') && !empty($variants['male'])) {
-                $voiceMap[$tag] = $variants['male'][$maleIdx % count($variants['male'])];
-                $maleIdx++;
-            } elseif (!empty($variants['female'])) {
-                $voiceMap[$tag] = $variants['female'][$femaleIdx % count($variants['female'])];
-                $femaleIdx++;
-            }
+            $voiceMap[$tag] = $pool[0];
         }
 
         return $voiceMap;
