@@ -7,6 +7,16 @@ use App\Http\Controllers\AdminVoicePoolController;
 class VoiceMapBuilder
 {
     /**
+     * Infer gender from a speaker tag or pool name (M1→male, F1→female, C1→child).
+     */
+    public static function genderFromTag(string $tag): string
+    {
+        if (str_starts_with($tag, 'F')) return 'female';
+        if (str_starts_with($tag, 'C')) return 'child';
+        return 'male';
+    }
+
+    /**
      * Build a voice entry for a forced voice selection.
      * Returns null for drivers that don't use force_voice (edge, aisha use default variants).
      */
@@ -19,8 +29,7 @@ class VoiceMapBuilder
         }
 
         if ($driver === 'mms') {
-            $gender = str_starts_with($forceVoice, 'F') ? 'female'
-                    : (str_starts_with($forceVoice, 'C') ? 'child' : 'male');
+            $gender = self::genderFromTag($forceVoice);
             return [
                 'driver'    => 'mms',
                 'gender'    => $gender,

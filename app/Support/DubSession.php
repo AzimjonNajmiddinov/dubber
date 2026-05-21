@@ -147,9 +147,7 @@ class DubSession
     /** Infer gender from speaker tag (M→male, F→female, C→child). */
     public static function genderFromTag(string $tag): string
     {
-        if (str_starts_with($tag, 'F')) return 'female';
-        if (str_starts_with($tag, 'C')) return 'child';
-        return 'male';
+        return \App\Services\VoiceMapBuilder::genderFromTag($tag);
     }
 
     public static function aacDir(string $id, ?array $session = null): string

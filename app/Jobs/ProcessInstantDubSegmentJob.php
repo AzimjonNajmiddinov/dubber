@@ -70,30 +70,24 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             $rawMp3 = "{$tmpDir}/seg_{$this->index}.mp3";
             $rawWav = "{$tmpDir}/seg_{$this->index}.wav";
 
-            // Read per-speaker driver from voice map
-            $voiceMap = json_decode(Redis::get(DubSession::voicesKey($this->sessionId)), true) ?? [];
+            // Read per-speaker voice entry from voice map
+            $voiceMap     = json_decode(Redis::get(DubSession::voicesKey($this->sessionId)), true) ?? [];
             $speakerEntry = $voiceMap[$this->speaker] ?? [];
-            $driver = $speakerEntry['driver'] ?? ($session['tts_driver'] ?? config('dubber.tts.default', 'edge'));
+            $driver       = $speakerEntry['driver'] ?? ($session['tts_driver'] ?? config('dubber.tts.default', 'edge'));
 
-            // Driver overrides — only apply when the session driver actually matches
-            if ($driver === 'openai' && !empty($session['force_voice'])) {
-                // OpenAI: force_voice is the OpenAI voice name (onyx, nova, etc.)
-                $speakerEntry['openai_voice'] = $session['force_voice'];
-            } elseif ($driver === 'mms' && !empty($session['force_voice_id'])) {
-                // MMS: force_voice_id was pre-registered in PrepareInstantDubJob
-                $fv     = $session['force_voice'] ?? null;
-                $fvG    = $fv ? (str_starts_with($fv, 'F') ? 'female' : (str_starts_with($fv, 'C') ? 'child' : 'male')) : ($speakerEntry['gender'] ?? 'male');
-                $speakerEntry['mms_voice_id']  = $session['force_voice_id'];
-                $speakerEntry['tau']   = $speakerEntry['tau'] ?? \App\Http\Controllers\AdminVoicePoolController::getTau($fvG, $fv ?? '');
-                $speakerEntry['speed'] = $speakerEntry['speed'] ?? \App\Http\Controllers\AdminVoicePoolController::getSpeed($fvG, $fv ?? '');
-            } elseif ($driver === 'mms' && empty($speakerEntry['pool_name']) && !empty($session['force_voice'])) {
-                // MMS fallback: voice map expired from Redis, reconstruct from session
-                $fv = $session['force_voice'];
-                $fvG = str_starts_with($fv, 'F') ? 'female' : (str_starts_with($fv, 'C') ? 'child' : 'male');
-                $speakerEntry['pool_name'] = $fv;
-                $speakerEntry['gender']    = $fvG;
-                $speakerEntry['tau']       = \App\Http\Controllers\AdminVoicePoolController::getTau($fvG, $fv);
-                $speakerEntry['speed']     = \App\Http\Controllers\AdminVoicePoolController::getSpeed($fvG, $fv);
+            // Voice map expired from Redis — reconstruct from session force_voice
+            if (empty($speakerEntry) && !empty($session['force_voice'])) {
+                $entry = \App\Services\VoiceMapBuilder::forceVoiceEntry($driver, $session['force_voice']);
+                if ($entry) $speakerEntry = $entry;
+            }
+
+            // Inject pre-registered MMS voice ID to skip /add_voice API call per segment
+            if ($driver === 'mms' && !empty($session['force_voice_id']) && empty($speakerEntry['mms_voice_id'])) {
+                $fv  = $session['force_voice'] ?? null;
+                $fvG = $fv ? \App\Services\VoiceMapBuilder::genderFromTag($fv) : ($speakerEntry['gender'] ?? 'male');
+                $speakerEntry['mms_voice_id'] = $session['force_voice_id'];
+                $speakerEntry['tau']   ??= \App\Http\Controllers\AdminVoicePoolController::getTau($fvG, $fv ?? '');
+                $speakerEntry['speed'] ??= \App\Http\Controllers\AdminVoicePoolController::getSpeed($fvG, $fv ?? '');
             }
 
             try {
@@ -256,7 +250,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
     private function generateWithOpenAi(string $outputMp3, array $speakerEntry = []): void
     {
         $text   = TextNormalizer::normalize($this->text, $this->language);
-        $gender = strtolower($speakerEntry['gender'] ?? (str_starts_with($this->speaker, 'F') ? 'female' : (str_starts_with($this->speaker, 'C') ? 'child' : 'male')));
+        $gender = strtolower($speakerEntry['gender'] ?? \App\Services\VoiceMapBuilder::genderFromTag($this->speaker));
 
         // Voice: user-selected or gender default
         $defaultVoice = match($gender) { 'female' => 'nova', 'child' => 'shimmer', default => 'onyx' };
@@ -554,9 +548,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                 $seed = $speakerEntry['seed'] ?? null;
             }
         } else {
-            $gender = $speakerEntry['gender']
-                ?? (str_starts_with($this->speaker, 'F') ? 'female'
-                    : (str_starts_with($this->speaker, 'C') ? 'child' : 'male'));
+            $gender = $speakerEntry['gender'] ?? \App\Services\VoiceMapBuilder::genderFromTag($this->speaker);
             $poolName   = $speakerEntry['pool_name'] ?? null;
             $speakerIdx = (int) preg_replace('/\D/', '', $this->speaker) ?: 0;
 

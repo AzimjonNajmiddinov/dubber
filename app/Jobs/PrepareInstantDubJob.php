@@ -44,8 +44,7 @@ class PrepareInstantDubJob implements ShouldQueue
 
         $sessionDriver = $session['tts_driver'] ?? config('dubber.tts.default', 'edge');
         if ($forceVoice && empty($session['force_voice_id']) && $sessionDriver === 'mms') {
-            $fvGender = str_starts_with($forceVoice, 'F') ? 'female'
-                      : (str_starts_with($forceVoice, 'C') ? 'child' : 'male');
+            $fvGender = \App\Services\VoiceMapBuilder::genderFromTag($forceVoice);
             $voiceFile = null;
             foreach (['wav', 'mp3', 'm4a'] as $ext) {
                 $p = storage_path("app/voice-pool/{$fvGender}/{$forceVoice}.{$ext}");
