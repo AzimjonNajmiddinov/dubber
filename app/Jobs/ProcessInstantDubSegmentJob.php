@@ -48,6 +48,9 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             return;
         }
 
+        // Strip delivery hints that may have leaked through translation ({calm|slow} or {emotion:calm|pace:slow})
+        $this->text = trim(preg_replace('/\s*\{(?:emotion:)?[a-z]+\|(?:pace:)?[a-z]+\}\s*$/i', '', trim($this->text)));
+
         $title = $session['title'] ?? 'Untitled';
 
         try {
