@@ -622,8 +622,8 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         $forceVoice = $sessionData['force_voice'] ?? null;
         $driver = $sessionData['tts_driver'] ?? config('dubber.tts.default', 'edge');
 
-        // force_voice set — assign same voice to all speakers
-        if ($forceVoice) {
+        // force_voice set — assign same voice to all speakers (only for drivers that use it)
+        if ($forceVoice && ($driver === 'openai' || $driver === 'mms')) {
             if ($driver === 'openai') {
                 $gender = in_array($forceVoice, ['nova','shimmer','fable','coral','marin','ballad']) ? 'female' : 'male';
                 $entry  = ['driver' => 'openai', 'gender' => $gender, 'openai_voice' => $forceVoice];
