@@ -75,23 +75,21 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             $speakerEntry = $voiceMap[$this->speaker] ?? [];
             $driver = $speakerEntry['driver'] ?? ($session['tts_driver'] ?? config('dubber.tts.default', 'edge'));
 
-            // OpenAI driver: force_voice is the OpenAI voice name (onyx, nova, etc.)
+            // Driver overrides — only apply when the session driver actually matches
             if ($driver === 'openai' && !empty($session['force_voice'])) {
+                // OpenAI: force_voice is the OpenAI voice name (onyx, nova, etc.)
                 $speakerEntry['openai_voice'] = $session['force_voice'];
-            } elseif (!empty($session['force_voice_id'])) {
-                // MMS: force_voice_id was pre-registered in PrepareInstantDubJob (single worker, no race).
+            } elseif ($driver === 'mms' && !empty($session['force_voice_id'])) {
+                // MMS: force_voice_id was pre-registered in PrepareInstantDubJob
                 $fv     = $session['force_voice'] ?? null;
                 $fvG    = $fv ? (str_starts_with($fv, 'F') ? 'female' : (str_starts_with($fv, 'C') ? 'child' : 'male')) : ($speakerEntry['gender'] ?? 'male');
-                $speakerEntry['driver']        = 'mms';
                 $speakerEntry['mms_voice_id']  = $session['force_voice_id'];
                 $speakerEntry['tau']   = $speakerEntry['tau'] ?? \App\Http\Controllers\AdminVoicePoolController::getTau($fvG, $fv ?? '');
                 $speakerEntry['speed'] = $speakerEntry['speed'] ?? \App\Http\Controllers\AdminVoicePoolController::getSpeed($fvG, $fv ?? '');
-                $driver = 'mms';
             } elseif ($driver === 'mms' && empty($speakerEntry['pool_name']) && !empty($session['force_voice'])) {
                 // MMS fallback: voice map expired from Redis, reconstruct from session
                 $fv = $session['force_voice'];
                 $fvG = str_starts_with($fv, 'F') ? 'female' : (str_starts_with($fv, 'C') ? 'child' : 'male');
-                $speakerEntry['driver']    = 'mms';
                 $speakerEntry['pool_name'] = $fv;
                 $speakerEntry['gender']    = $fvG;
                 $speakerEntry['tau']       = \App\Http\Controllers\AdminVoicePoolController::getTau($fvG, $fv);

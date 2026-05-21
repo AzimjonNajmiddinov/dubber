@@ -42,7 +42,8 @@ class PrepareInstantDubJob implements ShouldQueue
             $this->updateSession(['disable_prosody' => true]);
         }
 
-        if ($forceVoice && empty($session['force_voice_id'])) {
+        $sessionDriver = $session['tts_driver'] ?? config('dubber.tts.default', 'edge');
+        if ($forceVoice && empty($session['force_voice_id']) && $sessionDriver === 'mms') {
             $fvGender = str_starts_with($forceVoice, 'F') ? 'female'
                       : (str_starts_with($forceVoice, 'C') ? 'child' : 'male');
             $voiceFile = null;
