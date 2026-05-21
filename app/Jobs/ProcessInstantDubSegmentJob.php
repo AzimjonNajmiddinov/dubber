@@ -98,27 +98,36 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                 $speakerEntry['speed']     = \App\Http\Controllers\AdminVoicePoolController::getSpeed($fvG, $fv);
             }
 
-            if ($driver === 'elevenlabs' && !empty($speakerEntry['voice_id'])) {
-                $this->generateWithElevenLabs($rawMp3, $speakerEntry['voice_id']);
-            } elseif ($driver === 'aisha') {
-                $this->generateWithAisha($rawMp3, $speakerEntry);
-            } elseif ($driver === 'mms') {
-                // MMS outputs WAV directly — no MP3 encoding to avoid quality loss
-                $this->generateWithMms($rawWav, $tmpDir, $speakerEntry);
-                $rawMp3 = $rawWav;
-            } elseif ($driver === 'openai') {
-                try {
-                    $this->generateWithOpenAi($rawMp3, $speakerEntry);
-                } catch (\RuntimeException $e) {
-                    if (str_starts_with($e->getMessage(), 'openai_billing:')) {
-                        Log::warning("[DUB] OpenAI billing/quota error, falling back to Edge TTS — seg #{$this->index}", ['session' => $this->sessionId]);
-                        $this->generateWithEdgeTts($rawMp3, $tmpDir, $speakerEntry);
-                    } else {
-                        throw $e;
+            try {
+                if ($driver === 'elevenlabs' && !empty($speakerEntry['voice_id'])) {
+                    $this->generateWithElevenLabs($rawMp3, $speakerEntry['voice_id']);
+                } elseif ($driver === 'aisha') {
+                    $this->generateWithAisha($rawMp3, $speakerEntry);
+                } elseif ($driver === 'mms') {
+                    // MMS outputs WAV directly — no MP3 encoding to avoid quality loss
+                    $this->generateWithMms($rawWav, $tmpDir, $speakerEntry);
+                    $rawMp3 = $rawWav;
+                } elseif ($driver === 'openai') {
+                    try {
+                        $this->generateWithOpenAi($rawMp3, $speakerEntry);
+                    } catch (\RuntimeException $e) {
+                        if (str_starts_with($e->getMessage(), 'openai_billing:')) {
+                            Log::warning("[DUB] OpenAI billing/quota, falling back to Edge TTS — seg #{$this->index}", ['session' => $this->sessionId]);
+                            $this->generateWithEdgeTts($rawMp3, $tmpDir, $speakerEntry);
+                        } else {
+                            throw $e;
+                        }
                     }
+                } else {
+                    $this->generateWithEdgeTts($rawMp3, $tmpDir, $speakerEntry);
                 }
-            } else {
-                $this->generateWithEdgeTts($rawMp3, $tmpDir, $speakerEntry);
+            } catch (\Throwable $ttsEx) {
+                Log::warning("[DUB] [{$title}] TTS unavailable for seg #{$this->index} ({$driver}), using background-only: " . $ttsEx->getMessage(), [
+                    'session' => $this->sessionId,
+                ]);
+                $this->generateBackgroundOnlyAac($session);
+                $this->incrementReady();
+                return;
             }
 
             // 2. Adjust tempo so TTS fills the timeslot naturally
