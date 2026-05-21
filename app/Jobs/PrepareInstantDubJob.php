@@ -308,7 +308,7 @@ class PrepareInstantDubJob implements ShouldQueue
                 foreach (array_keys($speakers) as $tag) {
                     $voiceMap[$tag] = ['driver' => 'openai', 'gender' => $gender, 'openai_voice' => $forceVoice];
                 }
-            } else {
+            } elseif ($ttsDriver === 'mms') {
                 // MMS voice pool: force_voice is a pool file name (M1, F1, etc.)
                 $gender = str_starts_with($forceVoice, 'F') ? 'female'
                         : (str_starts_with($forceVoice, 'C') ? 'child' : 'male');
@@ -318,12 +318,15 @@ class PrepareInstantDubJob implements ShouldQueue
                     $voiceMap[$tag] = ['driver' => 'mms', 'gender' => $gender, 'pool_name' => $forceVoice, 'tau' => $tau, 'speed' => $speed];
                 }
             }
+            // else: edge/aisha — force_voice is ignored; normal gender-based voice map built below
 
-            Redis::setex(DubSession::voicesKey($this->sessionId), DubSession::TTL, json_encode($voiceMap));
-            Log::info("[DUB] Voice map built (force_voice={$forceVoice}, driver={$ttsDriver}): " . implode(', ', array_keys($speakers)), [
-                'session' => $this->sessionId,
-            ]);
-            return;
+            if (!empty($voiceMap)) {
+                Redis::setex(DubSession::voicesKey($this->sessionId), DubSession::TTL, json_encode($voiceMap));
+                Log::info("[DUB] Voice map built (force_voice={$forceVoice}, driver={$ttsDriver}): " . implode(', ', array_keys($speakers)), [
+                    'session' => $this->sessionId,
+                ]);
+                return;
+            }
         }
 
         // 1. Load saved voice map from DB (admin may have customised it)
