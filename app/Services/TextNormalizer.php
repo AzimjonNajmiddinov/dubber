@@ -14,6 +14,9 @@ class TextNormalizer
     {
         $lang = strtolower($language);
 
+        // Strip delivery hints ({emotion:calm|pace:slow} or {calm|slow}) before any TTS processing
+        $text = preg_replace('/\s*\{(?:emotion:)?[a-z]+\|(?:pace:)?[a-z]+\}\s*$/i', '', $text);
+
         // Expand Uzbek dates/ordinals BEFORE abbreviation expansion
         if (in_array($lang, ['uz', 'uzbek'])) {
             $text = self::expandUzbekDates($text);

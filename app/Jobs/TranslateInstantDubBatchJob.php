@@ -905,8 +905,9 @@ class TranslateInstantDubBatchJob implements ShouldQueue
     private function extractDelivery(string $text, array &$seg): string
     {
         $text = trim($text);
-        if (preg_match('/\{([a-z]+)\|([a-z]+)\}\s*$/', $text, $m)) {
-            $seg['delivery'] = $m[1] . '|' . $m[2];
+        // Matches both {calm|slow} and {emotion:calm|pace:slow}
+        if (preg_match('/\{(?:emotion:)?([a-z]+)\|(?:pace:)?([a-z]+)\}\s*$/i', $text, $m)) {
+            $seg['delivery'] = strtolower($m[1]) . '|' . strtolower($m[2]);
             $text = trim(substr($text, 0, -strlen($m[0])));
         }
         return $text;
