@@ -318,8 +318,9 @@ async function doPoll() {
             }
         }
 
-        // Auto-play once first 3 segments are ready
-        if (dubState._waitingToPlay && ready >= 3) {
+        // Auto-play once 6 segments are locally decoded (not just server-ready)
+        const decoded = dubState.chunks.filter(c => c && c._audioBuffer).length;
+        if (dubState._waitingToPlay && decoded >= 6) {
             dubState._waitingToPlay = false;
             const video = dubState._video;
             if (video) video.play().catch(() => {});
