@@ -258,7 +258,7 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
                 'anthropic-version' => '2023-06-01',
                 'content-type' => 'application/json',
             ])->timeout(30)->post('https://api.anthropic.com/v1/messages', [
-                'model' => 'claude-sonnet-4-6',
+                'model' => 'claude-3-5-sonnet-latest',
                 'max_tokens' => 1024,
                 'system' => $system,
                 'messages' => $anthropicMessages,

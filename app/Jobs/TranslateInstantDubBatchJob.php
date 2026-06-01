@@ -217,7 +217,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
                     ])
                     ->timeout(60)
                     ->post('https://api.anthropic.com/v1/messages', [
-                        'model' => 'claude-sonnet-4-6',
+                        'model' => 'claude-3-5-sonnet-latest',
                         'max_tokens' => 4096,
                         'system' => $analysisSystem,
                         'messages' => $analysisUserMessages,
@@ -231,7 +231,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
                     ])
                     ->timeout(60)
                     ->post('https://api.anthropic.com/v1/messages', [
-                        'model' => 'claude-sonnet-4-6',
+                        'model' => 'claude-3-5-sonnet-latest',
                         'max_tokens' => 4096,
                         'system' => $translationSystem,
                         'messages' => $translationUserMessages,
@@ -325,7 +325,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
                 'anthropic-version' => '2023-06-01',
                 'content-type' => 'application/json',
             ])->timeout(60)->post('https://api.anthropic.com/v1/messages', [
-                'model' => 'claude-sonnet-4-6',
+                'model' => 'claude-3-5-sonnet-latest',
                 'max_tokens' => 4096,
                 'system' => $system,
                 'messages' => $anthropicMessages,
@@ -935,7 +935,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
             $total = (int) ($session['total_segments'] ?? 0);
 
             foreach ($batch as $i => $seg) {
-                $globalIdx = $this->segmentOffset + $i;
+                $globalIdx = $this->segmentOffset + ($this->batchIndex * 15) + $i;
                 $startTime = (float) ($seg['start'] ?? 0);
                 $endTime = (float) ($seg['end'] ?? 0);
 
