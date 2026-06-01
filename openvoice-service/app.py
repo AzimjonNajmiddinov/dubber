@@ -240,10 +240,11 @@ async def convert(
         converter = load_converter()
         target_se = get_se(speaker_key)
 
-        # Save input audio to temp file
-        input_hash = hashlib.md5(speaker_key.encode()).hexdigest()[:8]
-        tmp_input = CACHE_PATH / f"tmp_input_{input_hash}.wav"
-        tmp_output = CACHE_PATH / f"tmp_output_{input_hash}.wav"
+        # Save input audio to temp file (using unique UUID to prevent parallel request race conditions)
+        import uuid
+        unique_id = uuid.uuid4().hex[:12]
+        tmp_input = CACHE_PATH / f"tmp_input_{unique_id}.wav"
+        tmp_output = CACHE_PATH / f"tmp_output_{unique_id}.wav"
 
         audio_bytes = await audio.read()
 
