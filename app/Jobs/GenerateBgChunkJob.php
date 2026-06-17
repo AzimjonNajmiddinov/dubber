@@ -169,11 +169,36 @@ class GenerateBgChunkJob implements ShouldQueue, ShouldBeUnique
 
     private function checkPlayable(string $aacDir): void
     {
-        // bg-0 + bg-1 ready = ~60s buffer. Single authoritative place for playable=true.
-        for ($bi = 0; $bi <= 1; $bi++) {
-            $f = "{$aacDir}/bg-{$bi}.aac";
+        $session = DubSession::get($this->sessionId);
+        if (!$session) return;
+
+        // First two mixed chunks at/after the HLS dub start = enough buffer to switch.
+        $dubStartTime = max(0.0, (float) ($session['hls_dub_start_time'] ?? 0.0));
+        $bgHashData = Redis::hgetall(DubSession::bgChunksKey($this->sessionId)) ?? [];
+        ksort($bgHashData, SORT_NUMERIC);
+
+        $buffered = 0;
+        $lastIdx = null;
+        foreach ($bgHashData as $bgIdx => $bgJson) {
+            $bgIdx = (int) $bgIdx;
+            $bg = json_decode($bgJson, true);
+            $start = (float) ($bg['start'] ?? ($bgIdx * 30.0));
+            $end = (float) ($bg['end'] ?? (($bgIdx + 1) * 30.0));
+            if ($end <= $dubStartTime) continue;
+            if ($lastIdx === null) {
+                if ($dubStartTime <= 0.25 && $bgIdx !== 0) return;
+                if ($dubStartTime > 0.25 && $start > $dubStartTime + 0.05) return;
+            }
+            if ($lastIdx !== null && $bgIdx !== $lastIdx + 1) return;
+
+            $f = "{$aacDir}/bg-{$bgIdx}.aac";
             if (!file_exists($f) || filesize($f) <= 10) return;
+
+            $buffered++;
+            $lastIdx = $bgIdx;
+            if ($buffered >= 2) break;
         }
+        if ($buffered < 2) return;
 
         $ttl = DubSession::TTL;
         $lua = <<<LUA

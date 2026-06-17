@@ -188,6 +188,16 @@ class DownloadOriginalAudioJob implements ShouldQueue
         // Pre-write total_bg_chunks so hlsAudioPlaylist / checkPlayable never sees 0
         $totalBgChunks = (int) ceil($totalDuration / DownloadYouTubeWindowJob::CHUNK_SIZE);
         DubSession::patch($this->sessionId, ['total_bg_chunks' => $totalBgChunks]);
+        for ($idx = 0; $idx < $totalBgChunks; $idx++) {
+            $start = $idx * DownloadYouTubeWindowJob::CHUNK_SIZE;
+            $end = min($start + DownloadYouTubeWindowJob::CHUNK_SIZE, $totalDuration);
+            Redis::hset(DubSession::bgChunksKey($this->sessionId), (string) $idx, json_encode([
+                'start'   => $start,
+                'end'     => $end,
+                'planned' => true,
+            ]));
+        }
+        Redis::expire(DubSession::bgChunksKey($this->sessionId), DubSession::TTL);
 
         // Dispatch one window job per 5-minute slice (FIFO: window 0 starts TTS immediately)
         $windowSize  = 300.0; // 5 minutes
@@ -287,6 +297,14 @@ class DownloadOriginalAudioJob implements ShouldQueue
 
         // Write total BEFORE dispatching so hlsAudioPlaylist sees it immediately
         DubSession::patch($this->sessionId, ['total_bg_chunks' => $chunkIndex]);
+        foreach ($pendingChunks as [$idx, $start, $end]) {
+            Redis::hset(DubSession::bgChunksKey($this->sessionId), (string) $idx, json_encode([
+                'start'   => $start,
+                'end'     => $end,
+                'planned' => true,
+            ]));
+        }
+        Redis::expire(DubSession::bgChunksKey($this->sessionId), DubSession::TTL);
 
         foreach ($pendingChunks as [$idx, $start, $end]) {
             $dispatch($idx, $start, $end);

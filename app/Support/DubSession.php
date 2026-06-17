@@ -104,6 +104,23 @@ class DubSession
         return "instant-dub:{$id}:voices-lock";
     }
 
+    // ── Wave keys (batch pipeline for large movies) ───────────────────────────
+
+    public static function waveKey(string $id, int $waveIndex): string
+    {
+        return "instant-dub:{$id}:wave:{$waveIndex}";
+    }
+
+    public static function waveProgressKey(string $id, int $waveIndex): string
+    {
+        return "instant-dub:{$id}:wave-progress:{$waveIndex}";
+    }
+
+    public static function wavesDispatchedKey(string $id): string
+    {
+        return "instant-dub:{$id}:waves-dispatched";
+    }
+
     // ── Session CRUD ──────────────────────────────────────────────────────────
 
     public static function get(string $id): ?array
@@ -173,12 +190,19 @@ class DubSession
             static::allSegmentsKey($id),
             static::characterContextKey($id),
             static::bgChunksKey($id),
+            static::wavesDispatchedKey($id),
         ];
         for ($i = 0; $i < $totalBatches; $i++) {
             $keys[] = static::batchKey($id, $i);
         }
         for ($i = 0; $i < $totalSegments; $i++) {
             $keys[] = static::chunkKey($id, $i);
+        }
+        // Clean up wave keys (generous upper bound — max ~50 waves for a 4h movie)
+        $totalWaves = (int) ceil($totalSegments / 85); // ~85 segments per 5min wave
+        for ($i = 0; $i < max($totalWaves, 50); $i++) {
+            $keys[] = static::waveKey($id, $i);
+            $keys[] = static::waveProgressKey($id, $i);
         }
         return $keys;
     }

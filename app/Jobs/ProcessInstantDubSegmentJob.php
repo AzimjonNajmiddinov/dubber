@@ -8,6 +8,7 @@ use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use App\Http\Controllers\AdminVoicePoolController;
+use App\Jobs\DispatchWaveJob;
 use App\Jobs\GenerateBgChunkJob;
 use App\Jobs\PersistDubCacheJob;
 use App\Services\ElevenLabs\ElevenLabsClient;
@@ -855,5 +856,70 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         LUA;
 
         Redis::eval($lua, 1, $sessionKey, now()->timestamp);
+
+        // Trigger next wave dispatch if this segment's wave is nearly done
+        $this->dispatchNextWaveIfReady();
+    }
+
+    /**
+     * Wave waterfall trigger: when 80% of a wave's segments are ready,
+     * dispatch the next wave. This keeps the pipeline ahead of playback.
+     */
+    private function dispatchNextWaveIfReady(): void
+    {
+        $session = DubSession::get($this->sessionId);
+        if (!$session) return;
+
+        $totalWaves = (int) ($session['total_waves'] ?? 0);
+        if ($totalWaves <= 1) return; // single wave — nothing to dispatch
+
+        // Determine which wave this segment belongs to
+        $WAVE_DURATION = 300.0;
+        $waveIndex = (int) floor($this->startTime / $WAVE_DURATION);
+
+        // Read wave progress
+        $progressKey = DubSession::waveProgressKey($this->sessionId, $waveIndex);
+        $progressJson = Redis::get($progressKey);
+        if (!$progressJson) return;
+
+        $progress = json_decode($progressJson, true);
+        $waveTotal = (int) ($progress['total'] ?? 0);
+        if ($waveTotal === 0) return;
+
+        // Atomic increment wave ready count
+        $newReady = (int) Redis::incr($progressKey . ':ready');
+        Redis::expire($progressKey . ':ready', DubSession::TTL);
+
+        // Check if 80% threshold reached
+        $threshold = (int) ceil($waveTotal * 0.8);
+        if ($newReady < $threshold) return;
+
+        // Only trigger once — check if next wave is already dispatched
+        $nextWave = $waveIndex + 1;
+        if ($nextWave >= $totalWaves) return;
+
+        // Atomic check-and-set: only dispatch if not already dispatched
+        $dispatched = (int) Redis::get(DubSession::wavesDispatchedKey($this->sessionId));
+        if ($dispatched > $nextWave) return; // already dispatched
+
+        // Try to claim this dispatch (atomic increment prevents double dispatch)
+        $newDispatched = (int) Redis::incr(DubSession::wavesDispatchedKey($this->sessionId));
+        Redis::expire(DubSession::wavesDispatchedKey($this->sessionId), DubSession::TTL);
+        if ($newDispatched !== $nextWave + 1) return; // another segment already claimed it
+
+        // Read wave offset
+        $waveOffset = (int) Redis::get(DubSession::waveKey($this->sessionId, $nextWave) . ':offset');
+
+        // Read language info from session
+        $language = $session['language'] ?? 'uz';
+        $translateFrom = $session['translate_from'] ?? '';
+
+        DispatchWaveJob::dispatch(
+            $this->sessionId, $nextWave, $language, $translateFrom, $waveOffset,
+        )->onQueue('segment-generation');
+
+        Log::info("[DUB] Wave {$waveIndex} at {$newReady}/{$waveTotal} ({$threshold} threshold) — dispatched wave {$nextWave}", [
+            'session' => $this->sessionId,
+        ]);
     }
 }

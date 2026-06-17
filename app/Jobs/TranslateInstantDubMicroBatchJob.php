@@ -89,8 +89,13 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
             'uz' => 'Uzbek', 'ru' => 'Russian', 'en' => 'English', 'tr' => 'Turkish',
             'es' => 'Spanish', 'fr' => 'French', 'de' => 'German', 'ar' => 'Arabic',
             'zh' => 'Chinese', 'ja' => 'Japanese', 'ko' => 'Korean',
+            'it' => 'Italian', 'pt' => 'Portuguese', 'hi' => 'Hindi', 'fa' => 'Persian',
+            'uk' => 'Ukrainian', 'kk' => 'Kazakh', 'ky' => 'Kyrgyz', 'az' => 'Azerbaijani',
         ];
         $toLang = $langNames[$this->language] ?? $this->language;
+        $fromLang = $this->translateFrom && $this->translateFrom !== 'auto'
+            ? ($langNames[$this->translateFrom] ?? $this->translateFrom)
+            : 'auto-detected / mixed';
 
         $sessionData = DubSession::get($this->sessionId) ?? [];
         $forceVoice = !empty($sessionData['force_voice']);
@@ -107,34 +112,40 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
             }
         }
 
-        $uzbekRules = '';
-        if ($this->language === 'uz') {
-            $uzbekRules = "\nUZBEK RULES: Use natural spoken Uzbek. Colloquial forms (qilyapman not qilayotirman). Match emotional register. SCRIPT: ONLY Latin alphabet — NEVER use Cyrillic (а,б,в...), no mixed scripts. SPELLING: fe'l negizi unli bilan tugasa, shaxs qo'shimchasi qo'shganda u unli tushib qolmaydi (tani→taniyman, NOT tanyman).\nDATES & NUMBERS: Expand all dates and numbers to spoken Uzbek words (e.g. '2021-yil' → 'ikki ming yigirma bir yil', '19-sentabr' → 'o'n to'qqizinchi sentabr', '500' → 'besh yuz').\nEMPHASIS: Wrap words that carry the main stress/emphasis of the sentence in *asterisks* (e.g. *muhim* so'z). Mirror the emphasis pattern of the original.\nFOREIGN NAMES/WORDS: Transliterate to Uzbek phonetics — the letter 'c' does NOT exist in Uzbek:\n- c before e/i/y → s: Barcelona→Barselona, France→Fransiya, concert→konsert\n- c before a/o/u → k: Monaco→Monako, Cuba→Kuba, music→muzik\n- ch stays ch: Chicago→Chikago\n- w → v: Washington→Vashington\n- ph → f: Philip→Filip\n- th → t: Thomas→Tomas\n- Uzbek/Arabic names stay unchanged (Toshkent, Muhammad...)\n";
-        }
+        $targetRules = $this->targetLanguageRules($toLang);
+        $universalRules = "\nSOURCE HANDLING (works for ANY source language):\n"
+            . "- Source language is {$fromLang}. If a line is in another language, silently detect that line's language and translate it too.\n"
+            . "- If subtitles are romanized, badly OCR'd, or lightly mistranscribed, restore the intended spoken sentence from context before translating.\n"
+            . "- Do not copy source-language words into {$toLang} unless they are names, brands, places, titles, or intentionally foreign words.\n"
+            . "- Preserve meaning, intent, emotion, and who is speaking. Do not summarize. Do not add new facts.\n"
+            . "\nTTS-READY OUTPUT:\n"
+            . "- Output only words the actor should say. Remove [music], [laughing], captions, sound effects, speaker labels, HTML, hashtags, URLs, and subtitle artifacts.\n"
+            . "- Expand numbers, dates, times, currency, units, and abbreviations into normal spoken {$toLang} words when possible.\n"
+            . "- No Markdown, no asterisks, no emojis, no stage directions, no timing text, no original-language explanation.\n"
+            . "- Keep punctuation simple for TTS: . , ! ? ... and dashes for pauses only.\n"
+            . $targetRules;
 
         if ($forceVoice) {
             $systemPrompt = "You are a professional translator. Translate the following dialogue into {$toLang}.\n"
                 . "\nCRITICAL: Translate EVERYTHING completely. Do NOT shorten, omit, or summarize any words. Timing is shown for context only — never cut content to fit the slot.\n"
                 . "\nSCENE DIALOGUE (context):\n{$fullDialogue}\n"
-                . $uzbekRules
+                . $universalRules
                 . "\nRULES:\n"
                 . "1. Translate every word faithfully — omitting words is not allowed.\n"
-                . "2. Strip annotations [music], [laughing] — write only spoken words.\n"
+                . "2. Keep names/titles recognizable, but transliterate them to the target language's normal pronunciation when needed for TTS.\n"
                 . "3. Punctuation = emotion: ! anger, ... hesitation, — pause, ? question.\n"
-                . "4. Text inside quotation marks \" \" or « » is a name, title, or label — do NOT translate it. Keep it verbatim.\n"
                 . "\n" . 'Format: "1. text {emotion|pace}"' . "\n"
                 . "Append delivery hint: emotion=neutral/angry/happy/sad/fearful/excited/calm/whisper, pace=normal/fast/slow";
         } else {
             $systemPrompt = "You are a dubbing voice director writing dialogue for a film in {$toLang}. You watch the scene, understand the story and emotions, then write what the characters would ACTUALLY SAY in {$toLang} — not a translation, but a re-creation.\n"
                 . "\nCRITICAL: Each line has a TIME SLOT [Ns]. Your text must be speakable within that duration. Short slot = concise. Long slot = natural phrasing. Never write more than fits.\n"
                 . "\nSCENE DIALOGUE (context):\n{$fullDialogue}\n"
-                . $uzbekRules
+                . $universalRules
                 . "\nRULES:\n"
                 . "1. Read the scene. Understand WHY each character says what they say.\n"
-                . "2. Write what a {$toLang} speaker would ACTUALLY SAY in that moment — not a word-for-word translation.\n"
-                . "3. Strip annotations [music], [laughing] — write only spoken words.\n"
+                . "2. Translate the meaning first, then make it natural spoken {$toLang}; never leave untranslated source text behind.\n"
+                . "3. Keep names/titles recognizable, but transliterate them to the target language's normal pronunciation when needed for TTS.\n"
                 . "4. Punctuation = emotion: ! anger, ... hesitation, — pause, ? question.\n"
-                . "5. Text inside quotation marks \" \" or « » is a name, title, or label — do NOT translate it. Keep it verbatim.\n"
                 . "\n" . 'Format: "1. text {emotion|pace}"' . "\n"
                 . "Append delivery hint: emotion=neutral/angry/happy/sad/fearful/excited/calm/whisper, pace=normal/fast/slow";
         }
@@ -282,7 +293,9 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
                 $idx = (int) $lm[1] - 1;
                 if (isset($batch[$idx])) {
                     $batch[$idx]['speaker'] = 'M1';
-                    $batch[$idx]['text']    = $this->extractDelivery(trim($lm[2]), $batch[$idx]);
+                    $batch[$idx]['text']    = $this->sanitizeForTts(
+                        $this->extractDelivery(trim($lm[2]), $batch[$idx])
+                    );
                 }
             }
         }
@@ -314,6 +327,48 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
         }
 
         return $batch;
+    }
+
+    private function targetLanguageRules(string $toLang): string
+    {
+        return match ($this->language) {
+            'uz' => "\nTARGET LANGUAGE RULES — Uzbek Latin:\n"
+                . "- Output must be ONLY Uzbek Latin. Never use Cyrillic. No mixed script.\n"
+                . "- Use natural spoken Uzbek: qilyapman, ketyapman, bor, yo'q.\n"
+                . "- Preserve verb-stem vowels: taniyman, taniysan, taniydi; never tanyman.\n"
+                . "- Expand numbers/dates into spoken Uzbek words.\n"
+                . "- Transliterate foreign names for Uzbek TTS: c→s/k, w→v, ph→f, th→t.\n",
+            'ru' => "\nTARGET LANGUAGE RULES — Russian:\n"
+                . "- Output must be natural spoken Russian in Cyrillic. Do not use Latin transliteration except unavoidable brand names.\n"
+                . "- Match ты/Вы formality from the scene context.\n",
+            'ar' => "\nTARGET LANGUAGE RULES — Arabic:\n"
+                . "- Output natural spoken Arabic in Arabic script. Prefer clear MSA/neutral conversational phrasing suitable for TTS.\n",
+            'zh' => "\nTARGET LANGUAGE RULES — Chinese:\n"
+                . "- Output natural spoken Chinese using Chinese characters. Avoid pinyin except for foreign names that have no common Chinese form.\n",
+            'ja' => "\nTARGET LANGUAGE RULES — Japanese:\n"
+                . "- Output natural spoken Japanese using Japanese script. Use kana/kanji normally; avoid romaji.\n",
+            'ko' => "\nTARGET LANGUAGE RULES — Korean:\n"
+                . "- Output natural spoken Korean using Hangul. Avoid romanization.\n",
+            default => "\nTARGET LANGUAGE RULES — {$toLang}:\n"
+                . "- Output natural spoken {$toLang} in its normal script. Use romanization only if that is standard for the target language.\n",
+        };
+    }
+
+    private function sanitizeForTts(string $text): string
+    {
+        $text = html_entity_decode($text, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        $text = strip_tags($text);
+        $text = preg_replace('/\s*\{(?:emotion:)?[a-z]+\|(?:pace:)?[a-z]+\}\s*$/i', '', $text);
+        $text = preg_replace('/^\s*(?:[-–—]\s*)?(?:[A-ZА-ЯЁЎҚҒҲ][\p{L}\p{N}_ -]{0,24}:)\s*/u', '', $text);
+        $text = preg_replace('/\[[^\]]*]/u', '', $text);
+        $text = preg_replace('/\((?:music|laughs?|laughing|sighs?|gasps?|coughs?|applause|door|phone|noise|silence|whispering|speaking|inaudible)[^)]*\)/iu', '', $text);
+        $text = preg_replace('/[♪♫]+/u', '', $text);
+        $text = preg_replace('/\*([^*]+)\*/u', '$1', $text);
+        $text = preg_replace('/[`_#~<>]+/u', '', $text);
+        $text = preg_replace('/https?:\/\/\S+/iu', '', $text);
+        $text = preg_replace('/\s+/u', ' ', $text);
+
+        return trim($text, " \t\n\r\0\x0B\"“”«»");
     }
 
     private function extractDelivery(string $text, array &$seg): string

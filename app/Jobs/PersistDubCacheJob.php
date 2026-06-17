@@ -2,6 +2,8 @@
 
 namespace App\Jobs;
 
+use App\Jobs\CleanupSessionStorageJob;
+
 use App\Models\InstantDub;
 use App\Models\InstantDubSegment;
 use App\Models\InstantDubVoiceMap;
@@ -96,6 +98,11 @@ class PersistDubCacheJob implements ShouldQueue
             DubSession::patch($this->sessionId, ['cached_dub_id' => $dub->id]);
 
             Log::info("[DUB] Persisted dub #{$dub->id} ({$total} segments) for: {$videoUrl}");
+
+            // Schedule storage cleanup — delay 5 minutes to let HLS clients finish buffering
+            CleanupSessionStorageJob::dispatch($this->sessionId)
+                ->onQueue('default')
+                ->delay(now()->addMinutes(5));
 
         } catch (\Throwable $e) {
             Log::error("[DUB] PersistDubCacheJob failed: " . $e->getMessage(), ['session' => $this->sessionId]);

@@ -733,8 +733,13 @@ class TranslateInstantDubBatchJob implements ShouldQueue
             'uz' => 'Uzbek', 'ru' => 'Russian', 'en' => 'English', 'tr' => 'Turkish',
             'es' => 'Spanish', 'fr' => 'French', 'de' => 'German', 'ar' => 'Arabic',
             'zh' => 'Chinese', 'ja' => 'Japanese', 'ko' => 'Korean',
+            'it' => 'Italian', 'pt' => 'Portuguese', 'hi' => 'Hindi', 'fa' => 'Persian',
+            'uk' => 'Ukrainian', 'kk' => 'Kazakh', 'ky' => 'Kyrgyz', 'az' => 'Azerbaijani',
         ];
         $toLang = $langNames[$this->language] ?? $this->language;
+        $fromLang = $this->translateFrom && $this->translateFrom !== 'auto'
+            ? ($langNames[$this->translateFrom] ?? $this->translateFrom)
+            : 'auto-detected / mixed';
 
         $lines = [];
         foreach ($batch as $i => $seg) {
@@ -806,10 +811,20 @@ class TranslateInstantDubBatchJob implements ShouldQueue
             . "Write the dialogue as if you've watched this film 10 times and know every character intimately.\n"
             : '';
 
-        $systemPrompt = "You are a professional dubbing voice director. You watch a film scene, deeply understand what is happening — the story, relationships, emotions, subtext — and then write the dialogue in {$toLang} exactly as actors would say it if this film was ORIGINALLY MADE in {$toLang}.\n"
-            . "\nYou are NOT a translator. You are a WRITER who re-creates dialogue. The difference:\n"
-            . "- Translator: converts words from one language to another (sounds foreign, unnatural)\n"
-            . "- You: watch the scene, understand what the character MEANS and FEELS, then write what a {$toLang}-speaking person would ACTUALLY SAY in that moment\n"
+        $universalRules = "\nSOURCE HANDLING (works for ANY source language):\n"
+            . "- Source language is {$fromLang}. If a line is in another language, silently detect that line's language and translate it too.\n"
+            . "- If subtitles are romanized, badly OCR'd, mistranscribed, or missing accents, restore the intended spoken sentence from context before translating.\n"
+            . "- Do not copy source-language words into {$toLang} unless they are names, brands, places, titles, or intentionally foreign words.\n"
+            . "- Preserve meaning, intent, emotion, and who is speaking. Do not summarize. Do not add new facts.\n"
+            . "\nTTS-READY OUTPUT:\n"
+            . "- Output only words the actor should say. Remove [music], [laughing], captions, sound effects, speaker labels, HTML, hashtags, URLs, and subtitle artifacts.\n"
+            . "- Expand numbers, dates, times, currency, units, and abbreviations into normal spoken {$toLang} words when possible.\n"
+            . "- No Markdown, no asterisks, no emojis, no stage directions, no timing text, no original-language explanation.\n"
+            . "- Keep punctuation simple for TTS: . , ! ? ... and dashes for pauses only.\n"
+            . $this->targetLanguageRules($toLang);
+
+        $systemPrompt = "You are a professional film dubbing translator and voice director. First understand the source line, even if it is in an unexpected or mixed language; then write natural spoken {$toLang} that keeps the same meaning, intent, emotion, and timing.\n"
+            . "\nYou are not doing literal subtitles. You are producing TTS-ready dubbing dialogue: accurate translation, natural speech, clean pronunciation, correct target script.\n"
             . "\nCRITICAL: Each line has a TIME SLOT [Ns]. The dubbed speech will be synthesized by TTS and must FIT within that exact duration. If the original line is 3 seconds, your {$toLang} version must also be speakable in ~3 seconds. This means:\n"
             . "- Short time slots → be concise, use shorter words\n"
             . "- Long time slots → you have room for natural phrasing\n"
@@ -818,11 +833,12 @@ class TranslateInstantDubBatchJob implements ShouldQueue
             . $titleHint
             . "\nCHARACTER ANALYSIS:\n{$characterContext}\n"
             . "\nSCENE DIALOGUE (for understanding context — do NOT translate this literally):\n{$fullDialogue}\n"
+            . $universalRules
             . "{$uzbekRules}\n"
             . "\nRULES:\n"
             . "1. Read the ENTIRE scene dialogue above first. Understand the story, who is talking to whom, what just happened, what is about to happen.\n"
-            . "2. For each line: think about WHY the character says this. What do they want? How do they feel? Then write what a {$toLang} speaker would say in that exact emotional state.\n"
-            . "3. Lines with annotations like [music], [laughing], [door opens] — use these to understand the mood but translate only the spoken words.\n"
+            . "2. For each line: translate the meaning first, then make it natural spoken {$toLang}; never leave untranslated source text behind.\n"
+            . "3. Keep names/titles recognizable, but transliterate them to the target language's normal pronunciation when needed for TTS.\n"
             . "4. Keep the character's voice consistent — if someone speaks formally, keep formal. If street slang, use {$toLang} slang.\n"
             . "5. Emotional delivery through punctuation (TTS reads these):\n"
             . "   ! = shouting/emphasis, ... = hesitation/trailing off, — = pause/interruption, ? = question\n"
@@ -850,7 +866,9 @@ class TranslateInstantDubBatchJob implements ShouldQueue
                 $idx = (int) $lm[1] - 1;
                 if (isset($batch[$idx])) {
                     $batch[$idx]['speaker'] = 'M1';
-                    $batch[$idx]['text']    = $this->extractDelivery(trim($lm[2]), $batch[$idx]);
+                    $batch[$idx]['text']    = $this->sanitizeForTts(
+                        $this->extractDelivery(trim($lm[2]), $batch[$idx])
+                    );
                 }
             }
         }
@@ -899,6 +917,48 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         }
 
         return $batch;
+    }
+
+    private function targetLanguageRules(string $toLang): string
+    {
+        return match ($this->language) {
+            'uz' => "\nTARGET LANGUAGE RULES — Uzbek Latin:\n"
+                . "- Output must be ONLY Uzbek Latin. Never use Cyrillic. No mixed script.\n"
+                . "- Use natural spoken Uzbek: qilyapman, ketyapman, bor, yo'q.\n"
+                . "- Preserve verb-stem vowels: taniyman, taniysan, taniydi; never tanyman.\n"
+                . "- Expand numbers/dates into spoken Uzbek words.\n"
+                . "- Transliterate foreign names for Uzbek TTS: c→s/k, w→v, ph→f, th→t.\n",
+            'ru' => "\nTARGET LANGUAGE RULES — Russian:\n"
+                . "- Output must be natural spoken Russian in Cyrillic. Do not use Latin transliteration except unavoidable brand names.\n"
+                . "- Match ты/Вы formality from the scene context.\n",
+            'ar' => "\nTARGET LANGUAGE RULES — Arabic:\n"
+                . "- Output natural spoken Arabic in Arabic script. Prefer clear MSA/neutral conversational phrasing suitable for TTS.\n",
+            'zh' => "\nTARGET LANGUAGE RULES — Chinese:\n"
+                . "- Output natural spoken Chinese using Chinese characters. Avoid pinyin except for foreign names that have no common Chinese form.\n",
+            'ja' => "\nTARGET LANGUAGE RULES — Japanese:\n"
+                . "- Output natural spoken Japanese using Japanese script. Use kana/kanji normally; avoid romaji.\n",
+            'ko' => "\nTARGET LANGUAGE RULES — Korean:\n"
+                . "- Output natural spoken Korean using Hangul. Avoid romanization.\n",
+            default => "\nTARGET LANGUAGE RULES — {$toLang}:\n"
+                . "- Output natural spoken {$toLang} in its normal script. Use romanization only if that is standard for the target language.\n",
+        };
+    }
+
+    private function sanitizeForTts(string $text): string
+    {
+        $text = html_entity_decode($text, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        $text = strip_tags($text);
+        $text = preg_replace('/\s*\{(?:emotion:)?[a-z]+\|(?:pace:)?[a-z]+\}\s*$/i', '', $text);
+        $text = preg_replace('/^\s*(?:[-–—]\s*)?(?:[A-ZА-ЯЁЎҚҒҲ][\p{L}\p{N}_ -]{0,24}:)\s*/u', '', $text);
+        $text = preg_replace('/\[[^\]]*]/u', '', $text);
+        $text = preg_replace('/\((?:music|laughs?|laughing|sighs?|gasps?|coughs?|applause|door|phone|noise|silence|whispering|speaking|inaudible)[^)]*\)/iu', '', $text);
+        $text = preg_replace('/[♪♫]+/u', '', $text);
+        $text = preg_replace('/\*([^*]+)\*/u', '$1', $text);
+        $text = preg_replace('/[`_#~<>]+/u', '', $text);
+        $text = preg_replace('/https?:\/\/\S+/iu', '', $text);
+        $text = preg_replace('/\s+/u', ' ', $text);
+
+        return trim($text, " \t\n\r\0\x0B\"“”«»");
     }
 
     /** Extract {emotion|pace} delivery hint from end of translated text. Mutates $seg. */
