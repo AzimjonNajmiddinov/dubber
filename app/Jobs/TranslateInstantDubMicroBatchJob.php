@@ -41,10 +41,14 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
         try {
             $translated = $this->translateMicroBatch($this->segments, $fullDialogueText);
         } catch (\Throwable $e) {
-            Log::warning("[DUB] [{$title}] Micro-batch translation failed, using original text: " . Str::limit($e->getMessage(), 100), [
+            DubSession::patch($this->sessionId, [
+                'status' => 'error',
+                'error' => 'Translation failed: ' . Str::limit($e->getMessage(), 120),
+            ]);
+            Log::error("[DUB] [{$title}] Micro-batch translation failed; stopping session: " . Str::limit($e->getMessage(), 200), [
                 'session' => $this->sessionId,
             ]);
-            $translated = $this->segments;
+            return;
         }
 
         // Merge voice map for these speakers
@@ -173,10 +177,7 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
         }
 
         if ($localTranslator->enabled() && !$localTranslator->allowPaidFallback()) {
-            Log::warning("[DUB] Local translation failed; paid fallback disabled, using original micro-batch text", [
-                'session' => $this->sessionId,
-            ]);
-            return $segments;
+            throw new \RuntimeException('Local translation returned no usable micro-batch output.');
         }
 
         // Try Claude
@@ -199,7 +200,7 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
             }
         }
 
-        return $segments;
+        throw new \RuntimeException('No translation provider returned usable micro-batch output.');
     }
 
     /**
@@ -304,6 +305,8 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
     private function parseTranslationResponse(array $batch, string $content): array
     {
         $translated = trim($content);
+        $parsedCount = 0;
+        $parsedIndexes = [];
         foreach (preg_split('/\n+/', $translated) as $line) {
             if (preg_match('/^(\d+)\.\s*(?:\[[MFC]\d+\]\s*)?(.+)/', $line, $lm)) {
                 $idx = (int) $lm[1] - 1;
@@ -312,9 +315,22 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
                     $batch[$idx]['text']    = $this->sanitizeForTts(
                         $this->extractDelivery(trim($lm[2]), $batch[$idx])
                     );
+                    $parsedCount++;
+                    $parsedIndexes[$idx] = true;
                 }
             }
         }
+
+        if ($parsedCount === 0) {
+            throw new \RuntimeException('Translation response did not contain numbered lines.');
+        }
+
+        foreach ($batch as $idx => &$seg) {
+            if (!isset($parsedIndexes[$idx])) {
+                $seg['text'] = '';
+            }
+        }
+        unset($seg);
 
         // Replace stray Cyrillic characters with Latin equivalents
         if ($this->language === 'uz') {

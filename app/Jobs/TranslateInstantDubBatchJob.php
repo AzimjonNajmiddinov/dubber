@@ -87,12 +87,14 @@ class TranslateInstantDubBatchJob implements ShouldQueue
                 $this->cloneVoicesWithElevenLabs($batch);
             }
         } catch (\Throwable $e) {
-            // Translation failed — dispatch segments with original (untranslated) text
-            // This is better than no audio at all
-            Log::error("[DUB] [{$this->title}] Batch {$this->batchIndex} translation failed, using original text: " . Str::limit($e->getMessage(), 100), [
+            $this->updateSession([
+                'status' => 'error',
+                'error' => 'Translation failed: ' . Str::limit($e->getMessage(), 120),
+            ]);
+            Log::error("[DUB] [{$this->title}] Batch {$this->batchIndex} translation failed; stopping session: " . Str::limit($e->getMessage(), 200), [
                 'session' => $this->sessionId,
             ]);
-            $this->updateSession(['last_warning' => "Batch {$batchNum} translation failed, using original text"]);
+            return;
         }
 
         // Dispatch TTS for this batch's segments — ALWAYS runs, even if translation failed
@@ -223,10 +225,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
 
             if (!$localTranslator->allowPaidFallback()) {
                 Redis::setex(DubSession::characterContextKey($this->sessionId), DubSession::TTL, $characterContext);
-                Log::warning("[DUB] [{$this->title}] Local batch 0 translation failed; paid fallback disabled", [
-                    'session' => $this->sessionId,
-                ]);
-                return $batch;
+                throw new \RuntimeException('Local translation returned no usable batch 0 output.');
             }
         }
 
@@ -322,10 +321,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
             }
 
             if (!$localTranslator->allowPaidFallback()) {
-                Log::warning("[DUB] [{$this->title}] Batch {$this->batchIndex} local translation failed; paid fallback disabled", [
-                    'session' => $this->sessionId,
-                ]);
-                return $batch;
+                throw new \RuntimeException("Local translation returned no usable output for batch {$this->batchIndex}.");
             }
         }
 
@@ -393,7 +389,9 @@ class TranslateInstantDubBatchJob implements ShouldQueue
     private function callOpenAiWithRetry(array $batch, array $messages): array
     {
         $apiKey = config('services.openai.key');
-        if (!$apiKey) return $batch;
+        if (!$apiKey) {
+            throw new \RuntimeException('OpenAI API key missing and no translation provider succeeded.');
+        }
 
         for ($attempt = 1; $attempt <= 4; $attempt++) {
             try {
@@ -434,7 +432,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
             }
         }
 
-        return $batch;
+        throw new \RuntimeException('OpenAI translation failed after retries.');
     }
 
     private function cloneVoicesWithElevenLabs(array $batch): void
@@ -903,6 +901,8 @@ class TranslateInstantDubBatchJob implements ShouldQueue
     private function parseTranslationResponse(array $batch, string $content): array
     {
         $translated = trim($content);
+        $parsedCount = 0;
+        $parsedIndexes = [];
         foreach (preg_split('/\n+/', $translated) as $line) {
             if (preg_match('/^(\d+)\.\s*(?:\[[MFC]\d+\]\s*)?(.+)/', $line, $lm)) {
                 $idx = (int) $lm[1] - 1;
@@ -911,9 +911,22 @@ class TranslateInstantDubBatchJob implements ShouldQueue
                     $batch[$idx]['text']    = $this->sanitizeForTts(
                         $this->extractDelivery(trim($lm[2]), $batch[$idx])
                     );
+                    $parsedCount++;
+                    $parsedIndexes[$idx] = true;
                 }
             }
         }
+
+        if ($parsedCount === 0) {
+            throw new \RuntimeException('Translation response did not contain numbered lines.');
+        }
+
+        foreach ($batch as $idx => &$seg) {
+            if (!isset($parsedIndexes[$idx])) {
+                $seg['text'] = '';
+            }
+        }
+        unset($seg);
 
         // Post-process: replace any stray Cyrillic characters with Latin equivalents
         if ($this->language === 'uz') {

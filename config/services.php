@@ -86,7 +86,7 @@ return [
         'driver' => env('LOCAL_TRANSLATION_DRIVER', 'ollama'),
         'url' => env('LOCAL_TRANSLATION_URL', 'http://localhost:11434'),
         'model' => env('LOCAL_TRANSLATION_MODEL', 'qwen2.5:7b-instruct'),
-        'allow_paid_fallback' => env('LOCAL_TRANSLATION_ALLOW_PAID_FALLBACK', false),
+        'allow_paid_fallback' => env('LOCAL_TRANSLATION_ALLOW_PAID_FALLBACK', true),
     ],
 
     'prosody_transfer' => [

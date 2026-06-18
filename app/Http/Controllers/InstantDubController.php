@@ -389,14 +389,18 @@ class InstantDubController extends Controller
             return response('No video URL in session', 400);
         }
 
-        // Cache the fully rewritten master playlist — deterministic, no need to recompute
-        $rewrittenKey = DubSession::rewrittenMasterKey($sessionId);
+        $dubPlayable = !empty($session['playable']);
+        $dubDefault = $dubPlayable ? 'YES' : 'NO';
+        $dubAutoselect = $dubPlayable ? 'YES' : 'NO';
+
+        // The rewritten master changes once the dubbed audio has enough buffered chunks.
+        $rewrittenKey = DubSession::rewrittenMasterKey($sessionId) . ($dubPlayable ? ':playable' : ':waiting');
         $cached = Redis::get($rewrittenKey);
         if ($cached) {
             return response($cached, 200, [
                 'Content-Type' => 'application/vnd.apple.mpegurl',
                 'Access-Control-Allow-Origin' => '*',
-                'Cache-Control' => 'max-age=300',
+                'Cache-Control' => $dubPlayable ? 'max-age=300' : 'max-age=3',
             ]);
         }
 
@@ -462,16 +466,18 @@ class InstantDubController extends Controller
 
             // Inject dub audio track BEFORE existing audio tracks so iOS picks it first
             if (!$dubInjected && str_starts_with($trimmed, '#EXT-X-MEDIA') && str_contains($trimmed, 'TYPE=AUDIO')) {
-                $output[] = "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"{$groupId}\",NAME=\"{$dubName}\",LANGUAGE=\"{$lang}\",URI=\"dub-audio.m3u8\",DEFAULT=YES,AUTOSELECT=YES,CHANNELS=\"1\"";
+                $output[] = "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"{$groupId}\",NAME=\"{$dubName}\",LANGUAGE=\"{$lang}\",URI=\"dub-audio.m3u8\",DEFAULT={$dubDefault},AUTOSELECT={$dubAutoselect},CHANNELS=\"1\"";
                 $dubInjected = true;
             }
 
             // Inject before STREAM-INF if no existing audio tracks
             if (!$dubInjected && str_starts_with($trimmed, '#EXT-X-STREAM-INF')) {
                 if (!$existingAudioGroup) {
-                    $output[] = "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"{$groupId}\",NAME=\"Original\",DEFAULT=NO,AUTOSELECT=NO";
+                    $originalDefault = $dubPlayable ? 'NO' : 'YES';
+                    $originalAutoselect = $dubPlayable ? 'NO' : 'YES';
+                    $output[] = "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"{$groupId}\",NAME=\"Original\",DEFAULT={$originalDefault},AUTOSELECT={$originalAutoselect}";
                 }
-                $output[] = "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"{$groupId}\",NAME=\"{$dubName}\",LANGUAGE=\"{$lang}\",URI=\"dub-audio.m3u8\",DEFAULT=YES,AUTOSELECT=YES,CHANNELS=\"1\"";
+                $output[] = "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"{$groupId}\",NAME=\"{$dubName}\",LANGUAGE=\"{$lang}\",URI=\"dub-audio.m3u8\",DEFAULT={$dubDefault},AUTOSELECT={$dubAutoselect},CHANNELS=\"1\"";
                 $output[] = "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"{$subsGroupId}\",NAME=\"{$subName}\",LANGUAGE=\"{$lang}\",URI=\"dub-subtitles.m3u8\",DEFAULT=YES,AUTOSELECT=YES,FORCED=NO";
                 $dubInjected = true;
             }
@@ -481,8 +487,8 @@ class InstantDubController extends Controller
                 $output[] = "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"{$subsGroupId}\",NAME=\"{$subName}\",LANGUAGE=\"{$lang}\",URI=\"dub-subtitles.m3u8\",DEFAULT=YES,AUTOSELECT=YES,FORCED=NO";
             }
 
-            // Set existing audio and subtitle tracks to DEFAULT=NO/AUTOSELECT=NO (ours takes priority)
-            if (str_starts_with($trimmed, '#EXT-X-MEDIA') && !str_contains($trimmed, 'dub-audio') && !str_contains($trimmed, 'dub-subtitles')) {
+            // Once dub is playable, demote existing audio/subtitle tracks so ours takes priority.
+            if ($dubPlayable && str_starts_with($trimmed, '#EXT-X-MEDIA') && !str_contains($trimmed, 'dub-audio') && !str_contains($trimmed, 'dub-subtitles')) {
                 $line = preg_replace('/DEFAULT=YES/', 'DEFAULT=NO', $line);
                 $line = preg_replace('/AUTOSELECT=YES/', 'AUTOSELECT=NO', $line);
             }
@@ -534,7 +540,7 @@ class InstantDubController extends Controller
         return response($result, 200, [
             'Content-Type' => 'application/vnd.apple.mpegurl',
             'Access-Control-Allow-Origin' => '*',
-            'Cache-Control' => 'max-age=300',
+            'Cache-Control' => $dubPlayable ? 'max-age=300' : 'max-age=3',
         ]);
     }
 
@@ -548,11 +554,13 @@ class InstantDubController extends Controller
         $dubStartTime = max(0.0, (float) ($session['hls_dub_start_time'] ?? 0.0));
 
         // Build the online-style planned audio timeline. Segment endpoints return
-        // dubbed audio when ready and original source audio while dubbing catches up.
+        // original audio before dub start, then only real dubbed chunks after dub start.
         $totalBg    = (int) ($session['total_bg_chunks'] ?? 0);
+        $aacDir     = $this->aacDir($sessionId, $session);
         $entries    = [];
         $startedDub = false;
         $lastPlannedBgIdx = -1;
+        $lastReadyDubBgIdx = -1;
 
         $bgHashData = Redis::hgetall(DubSession::bgChunksKey($sessionId)) ?? [];
         ksort($bgHashData, SORT_NUMERIC);
@@ -586,17 +594,27 @@ class InstantDubController extends Controller
                 $offsetMs = (int) round(($dubStartTime - $cs) * 1000);
                 $sourceDur = round($this->frameAlignedDuration($cs, $dubStartTime), 6);
                 $entries[] = ['uri' => "dub-segment/source-bg-{$bgIdx}-to-{$offsetMs}.aac", 'duration' => $sourceDur];
+                $aacFile = "{$aacDir}/bg-{$bgIdx}.aac";
+                if (!file_exists($aacFile) || filesize($aacFile) <= 10) {
+                    break;
+                }
                 $dur = round($this->frameAlignedDuration($dubStartTime, $ce), 6);
                 $entries[] = ['uri' => "dub-segment/bg-{$bgIdx}-from-{$offsetMs}.aac", 'duration' => $dur];
+                $lastReadyDubBgIdx = $bgIdx;
             } else {
+                $aacFile = "{$aacDir}/bg-{$bgIdx}.aac";
+                if (!file_exists($aacFile) || filesize($aacFile) <= 10) {
+                    break;
+                }
                 $dur = round($this->frameAlignedDuration($cs, $ce), 6);
                 $entries[] = ['uri' => "dub-segment/bg-{$bgIdx}.aac", 'duration' => $dur];
+                $lastReadyDubBgIdx = $bgIdx;
             }
 
             $lastPlannedBgIdx = $bgIdx;
         }
 
-        $timelinePlanned = $totalBg > 0 && $lastPlannedBgIdx >= $totalBg - 1;
+        $timelinePlanned = $totalBg > 0 && $lastReadyDubBgIdx >= $totalBg - 1;
 
         // Calculate TARGETDURATION
         $maxDur = 10;
@@ -751,15 +769,7 @@ class InstantDubController extends Controller
             ]);
         }
 
-        // Dub mix not ready yet — keep playback moving with the original audio chunk.
-        if ($rawFile && file_exists($rawFile) && filesize($rawFile) > 10) {
-            return response()->file($rawFile, [
-                'Content-Type' => 'audio/aac',
-                'Access-Control-Allow-Origin' => '*',
-                'Cache-Control' => 'no-store',
-            ]);
-        }
-
+        // Never serve original audio under a dubbed URL after dub start; players cache it.
         return $this->silentAacOfDuration($dur);
     }
 
@@ -800,10 +810,6 @@ class InstantDubController extends Controller
 
         $hasDub = file_exists($aacFile) && filesize($aacFile) > 10;
         if (!$hasDub) {
-            $rawFile = $bgChunk['path'] ?? null;
-            if ($rawFile && file_exists($rawFile) && filesize($rawFile) > 10) {
-                return $this->uncachedAacSliceResponse($rawFile, $offset, $duration);
-            }
             return $this->silentAacOfDuration($duration);
         }
 
