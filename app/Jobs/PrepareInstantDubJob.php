@@ -488,23 +488,34 @@ class PrepareInstantDubJob implements ShouldQueue
                 }
             }
 
-            // Collect candidate tracks: text + (timing if different) + fallback unknown
-            $needed = array_unique(array_filter([$textTarget, $timingTarget, 'unknown']));
+            // Collect candidate tracks: text + timing. Some HLS masters expose multiple
+            // tracks for the same language (full, forced, SDH, broken CDN variant).
+            // Fetch candidates per language and keep the largest usable one.
+            $needed = array_values(array_unique(array_filter([$textTarget, $timingTarget])));
 
-            foreach ($tracks as $track) {
-                $lang = $track['langCode'];
-                if (!in_array($lang, $needed) && $lang !== 'unknown') continue;
-                if (isset($byLang[$lang])) continue; // already have one for this language
+            foreach ($needed as $lang) {
+                $candidates = array_values(array_filter(
+                    $tracks,
+                    fn($track) => ($track['langCode'] ?? 'unknown') === $lang
+                ));
 
-                $result = $this->fetchSubtitleTrack($track, $baseUrl, $resolve);
+                $result = $this->fetchBestSubtitleTrack($candidates, $baseUrl, $resolve, $lang);
                 if ($result['cues'] > 0 && $result['srt'] !== '') {
                     $byLang[$lang] = $result;
                 }
+            }
 
-                // Early exit: stop once we have all needed languages
-                $have = array_keys($byLang);
-                $stillNeed = array_filter($needed, fn($l) => !in_array($l, $have) && $l !== 'unknown');
-                if (empty($stillNeed)) break;
+            // Fallback: if preferred language tracks were broken, try unknown tracks too.
+            if (empty($byLang)) {
+                $unknownCandidates = array_values(array_filter(
+                    $tracks,
+                    fn($track) => ($track['langCode'] ?? 'unknown') === 'unknown'
+                ));
+
+                $result = $this->fetchBestSubtitleTrack($unknownCandidates, $baseUrl, $resolve, 'unknown');
+                if ($result['cues'] > 0 && $result['srt'] !== '') {
+                    $byLang['unknown'] = $result;
+                }
             }
 
             if (empty($byLang)) return null;
@@ -586,11 +597,11 @@ class PrepareInstantDubJob implements ShouldQueue
     {
         $subsUrl = $resolve($baseUrl, $track['uri']);
         $subsResp = Http::timeout(10)->get($subsUrl);
-        if ($subsResp->failed()) return ['srt' => '', 'cues' => 0];
+        if ($subsResp->failed()) return ['srt' => '', 'cues' => 0, 'bytes' => 0, 'uri' => $track['uri'] ?? ''];
 
         $subsBase = preg_replace('#/[^/]+$#', '/', $subsUrl);
         preg_match_all('/^(\S+\.vtt)$/m', $subsResp->body(), $vttFiles);
-        if (empty($vttFiles[1])) return ['srt' => '', 'cues' => 0];
+        if (empty($vttFiles[1])) return ['srt' => '', 'cues' => 0, 'bytes' => 0, 'uri' => $track['uri'] ?? ''];
 
         Log::debug("[DUB] VTT playlist: " . count($vttFiles[1]) . " files, first URL: " . $resolve($subsBase, $vttFiles[1][0]), [
             'session' => $this->sessionId,
@@ -653,7 +664,35 @@ class PrepareInstantDubJob implements ShouldQueue
             $srt .= "{$num}\n" . str_replace('.', ',', $m[1]) . ' --> ' . str_replace('.', ',', $m[2]) . "\n{$text}\n\n";
         }
 
-        return ['srt' => $srt, 'cues' => $num];
+        return ['srt' => $srt, 'cues' => $num, 'bytes' => strlen($allVtt), 'uri' => $track['uri'] ?? ''];
+    }
+
+    private function fetchBestSubtitleTrack(array $candidates, string $baseUrl, callable $resolve, string $lang): array
+    {
+        $best = ['srt' => '', 'cues' => 0, 'bytes' => 0, 'uri' => ''];
+        foreach ($candidates as $track) {
+            $result = $this->fetchSubtitleTrack($track, $baseUrl, $resolve);
+            if ($result['cues'] <= 0 || $result['srt'] === '') {
+                continue;
+            }
+
+            $isBetter = $result['cues'] > $best['cues']
+                || ($result['cues'] === $best['cues'] && ($result['bytes'] ?? 0) > ($best['bytes'] ?? 0));
+
+            if ($isBetter) {
+                $best = $result;
+            }
+        }
+
+        if ($best['cues'] > 0) {
+            Log::info("[DUB] Best subtitle track selected for {$lang}: {$best['cues']} cues, {$best['bytes']} bytes", [
+                'session' => $this->sessionId,
+                'uri' => $best['uri'],
+                'candidates' => count($candidates),
+            ]);
+        }
+
+        return $best;
     }
 
     private function updateStatus(string $status, string $error = ''): void
@@ -697,10 +736,23 @@ class PrepareInstantDubJob implements ShouldQueue
                 // Find any .srt file written
                 $files = glob($tmpDir . '/*.srt') ?: [];
                 if (!empty($files)) {
-                    $srt = file_get_contents($files[0]);
+                    usort($files, function ($a, $b) {
+                        $cueDiff = $this->countSubtitleCues($b) <=> $this->countSubtitleCues($a);
+                        return $cueDiff !== 0 ? $cueDiff : (filesize($b) ?: 0) <=> (filesize($a) ?: 0);
+                    });
+                    $selected = $files[0];
+                    $srt = file_get_contents($selected);
+                    $selectedCues = $this->countSubtitleCues($selected);
+                    $selectedBytes = strlen($srt ?: '');
                     array_map('unlink', glob($tmpDir . '/*'));
                     @rmdir($tmpDir);
-                    Log::info("[DUB] YouTube SRT fetched via yt-dlp ({$subFlag})", ['session' => $this->sessionId]);
+                    Log::info("[DUB] YouTube SRT fetched via yt-dlp ({$subFlag})", [
+                        'session' => $this->sessionId,
+                        'file' => basename($selected),
+                        'cues' => $selectedCues,
+                        'bytes' => $selectedBytes,
+                        'candidates' => count($files),
+                    ]);
                     return $srt ?: '';
                 }
             }
@@ -711,6 +763,12 @@ class PrepareInstantDubJob implements ShouldQueue
         }
 
         return '';
+    }
+
+    private function countSubtitleCues(string $path): int
+    {
+        $content = is_file($path) ? (file_get_contents($path) ?: '') : '';
+        return preg_match_all('/-->/u', $content);
     }
 
     public function failed(\Throwable $exception): void

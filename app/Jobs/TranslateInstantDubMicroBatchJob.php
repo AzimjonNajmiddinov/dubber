@@ -7,6 +7,7 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use App\Services\LocalTranslationClient;
 use App\Support\DubSession;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
@@ -155,12 +156,27 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
             ['role' => 'user', 'content' => "Translate:\n\n" . implode("\n", $lines)],
         ];
 
-        // Try uzbekTranslator local service first (only uz target, en/ru source)
+        $localTranslator = app(LocalTranslationClient::class);
+        if ($localTranslator->enabled()) {
+            $result = $localTranslator->chat($messages, timeout: 60, maxTokens: 2048);
+            if ($result !== null) {
+                return $this->parseTranslationResponse($segments, $result);
+            }
+        }
+
+        // Try uzbekTranslator local service (only uz target, en/ru source)
         if ($this->language === 'uz' && in_array($this->translateFrom, ['en', 'ru'])) {
             $uzResult = $this->callUzbekTranslator($segments);
             if ($uzResult !== null) {
                 return $uzResult;
             }
+        }
+
+        if ($localTranslator->enabled() && !$localTranslator->allowPaidFallback()) {
+            Log::warning("[DUB] Local translation failed; paid fallback disabled, using original micro-batch text", [
+                'session' => $this->sessionId,
+            ]);
+            return $segments;
         }
 
         // Try Claude

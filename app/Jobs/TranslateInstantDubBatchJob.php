@@ -4,6 +4,7 @@ namespace App\Jobs;
 
 use App\Services\ElevenLabs\ElevenLabsClient;
 use App\Services\ElevenLabs\SpeakerSampleExtractor;
+use App\Services\LocalTranslationClient;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -205,6 +206,29 @@ class TranslateInstantDubBatchJob implements ShouldQueue
 
         $characterContext = '';
         $translationResult = null;
+        $localTranslator = app(LocalTranslationClient::class);
+
+        if ($localTranslator->enabled()) {
+            $characterContext = $localTranslator->chat($analysisPrompt, timeout: 60, maxTokens: 2048) ?? '';
+            if ($characterContext) {
+                $this->extractAndStoreTitle($characterContext);
+                Log::info("[DUB] [{$this->title}] Character analysis (local): " . Str::limit($characterContext, 200), ['session' => $this->sessionId]);
+            }
+
+            $translationResult = $localTranslator->chat($translationMessages, timeout: 90, maxTokens: 4096);
+            if ($translationResult) {
+                Redis::setex(DubSession::characterContextKey($this->sessionId), DubSession::TTL, $characterContext);
+                return $this->parseTranslationResponse($batch, $translationResult);
+            }
+
+            if (!$localTranslator->allowPaidFallback()) {
+                Redis::setex(DubSession::characterContextKey($this->sessionId), DubSession::TTL, $characterContext);
+                Log::warning("[DUB] [{$this->title}] Local batch 0 translation failed; paid fallback disabled", [
+                    'session' => $this->sessionId,
+                ]);
+                return $batch;
+            }
+        }
 
         if ($anthropicKey) {
             // Fire both requests to Claude in parallel
@@ -286,6 +310,24 @@ class TranslateInstantDubBatchJob implements ShouldQueue
     {
         $characterContext = Redis::get(DubSession::characterContextKey($this->sessionId)) ?? '';
         $messages = $this->buildTranslationMessages($batch, $characterContext, $fullDialogueText);
+        $localTranslator = app(LocalTranslationClient::class);
+
+        if ($localTranslator->enabled()) {
+            $result = $localTranslator->chat($messages, timeout: 90, maxTokens: 4096);
+            if ($result !== null) {
+                Log::debug("[DUB] [{$this->title}] Batch {$this->batchIndex} local response: " . Str::limit($result, 300), [
+                    'session' => $this->sessionId,
+                ]);
+                return $this->parseTranslationResponse($batch, $result);
+            }
+
+            if (!$localTranslator->allowPaidFallback()) {
+                Log::warning("[DUB] [{$this->title}] Batch {$this->batchIndex} local translation failed; paid fallback disabled", [
+                    'session' => $this->sessionId,
+                ]);
+                return $batch;
+            }
+        }
 
         // Try Claude Sonnet first
         $result = $this->callAnthropic($messages);

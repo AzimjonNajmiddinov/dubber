@@ -81,6 +81,14 @@ return [
         'url' => env('UZBEKTRANSLATOR_SERVICE_URL'),
     ],
 
+    'local_translation' => [
+        'enabled' => env('LOCAL_TRANSLATION_ENABLED', false),
+        'driver' => env('LOCAL_TRANSLATION_DRIVER', 'ollama'),
+        'url' => env('LOCAL_TRANSLATION_URL', 'http://localhost:11434'),
+        'model' => env('LOCAL_TRANSLATION_MODEL', 'qwen2.5:7b-instruct'),
+        'allow_paid_fallback' => env('LOCAL_TRANSLATION_ALLOW_PAID_FALLBACK', false),
+    ],
+
     'prosody_transfer' => [
         'url' => env('PROSODY_TRANSFER_SERVICE_URL'),
     ],
