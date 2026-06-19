@@ -21,7 +21,7 @@ use Illuminate\Support\Facades\Redis;
  * Deletes:
  * - TTS audio files (storage/app/instant-dub/{sessionId}/audio/)
  * - AAC HLS chunks (storage/app/instant-dub/{sessionId}/aac/)
- * - Background audio chunks (storage/app/instant-dub/{sessionId}/bg_chunk_*.aac)
+ * - Background audio chunks (storage/app/instant-dub/{sessionId}/bg_chunk_*.ts)
  * - YouTube window downloads (storage/app/instant-dub/{sessionId}/yt_window_*.*)
  * - Source audio (storage/app/instant-dub/{sessionId}/source_audio.m4a)
  * - Temp directory (/tmp/instant-dub-{sessionId}/)

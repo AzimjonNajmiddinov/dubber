@@ -202,6 +202,9 @@
     let firstChunksPlayed = false;
     let currentDubIndex = -1;
     let currentSource = null;
+    let isHlsFlow = false;
+    let hlsSwitchedToDub = false;
+    let hlsSwitchInProgress = false;
     let decodeSuccessCount = 0;
     let decodeFailCount = 0;
 
@@ -248,20 +251,41 @@
     });
 
     // HLS Video Loading — returns a promise that resolves when video is ready to play
-    function loadVideo(url) {
+    function loadVideo(url, preferDub = false, resumeAt = null) {
         return new Promise((resolve, reject) => {
             if (!url) { reject('No URL'); return; }
             if (hlsInstance) { hlsInstance.destroy(); hlsInstance = null; }
 
+            const finish = () => {
+                if (resumeAt !== null && Number.isFinite(resumeAt)) {
+                    video.currentTime = Math.max(0, resumeAt);
+                }
+                if (preferDub) selectDubAudioTrack();
+                resolve();
+            };
+
             if (url.includes('.m3u8')) {
                 if (video.canPlayType('application/vnd.apple.mpegurl')) {
                     video.src = url;
-                    video.addEventListener('loadedmetadata', () => resolve(), { once: true });
+                    video.addEventListener('loadedmetadata', finish, { once: true });
                 } else if (typeof Hls !== 'undefined' && Hls.isSupported()) {
                     hlsInstance = new Hls({ enableWorker: false });
                     hlsInstance.loadSource(url);
                     hlsInstance.attachMedia(video);
-                    hlsInstance.on(Hls.Events.MANIFEST_PARSED, () => resolve());
+                    hlsInstance.on(Hls.Events.MANIFEST_PARSED, finish);
+                    hlsInstance.on(Hls.Events.AUDIO_TRACKS_UPDATED, () => {
+                        if (preferDub) selectDubAudioTrack();
+                    });
+                    hlsInstance.on(Hls.Events.AUDIO_TRACK_SWITCHED, (_, data) => {
+                        if (!preferDub || !hlsInstance || !Array.isArray(hlsInstance.audioTracks)) return;
+                        const activeTrack = hlsInstance.audioTracks[data.id];
+                        if (!isDubAudioTrack(activeTrack)) {
+                            setTimeout(selectDubAudioTrack, 0);
+                        }
+                    });
+                    hlsInstance.on(Hls.Events.LEVEL_SWITCHED, () => {
+                        if (preferDub) setTimeout(selectDubAudioTrack, 0);
+                    });
                     hlsInstance.on(Hls.Events.ERROR, (_, d) => { if (d.fatal) reject(d.type); });
                 } else {
                     reject('HLS not supported'); return;
@@ -270,14 +294,93 @@
                 video.src = url;
                 video.addEventListener('loadedmetadata', () => resolve(), { once: true });
             }
-            video.volume = 0.2;
+            video.volume = url.includes('.m3u8') ? 1.0 : 0.2;
         });
+    }
+
+    function isDubAudioTrack(track) {
+        const name = `${track?.name || track?.label || ''}`.toLowerCase();
+        const lang = `${track?.lang || track?.language || ''}`.toLowerCase();
+        const label = `${name} ${lang}`;
+        const uri = `${track?.url || track?.uri || ''}`.toLowerCase();
+        if (uri.includes('dub-audio')) return true;
+
+        const hasDubName = label.includes('dublyaj') || label.includes('дубляж') || label.includes('dub');
+        if (!hasDubName) return false;
+
+        const target = `${language?.value || ''}`.toLowerCase();
+        if (target === 'uz') return lang === 'uz' || label.includes('uzbek') || label.includes("o'zbek") || label.includes('o‘zbek');
+        if (target === 'ru') return lang === 'ru' || label.includes('russian') || label.includes('рус');
+        if (target === 'en') return lang === 'en' || label.includes('english');
+
+        return lang === target;
+    }
+
+    function selectDubAudioTrack() {
+        if (hlsInstance && Array.isArray(hlsInstance.audioTracks)) {
+            const idx = hlsInstance.audioTracks.findIndex(track => `${track?.url || track?.uri || ''}`.toLowerCase().includes('dub-audio'));
+            const fallbackIdx = idx >= 0 ? idx : hlsInstance.audioTracks.findIndex(isDubAudioTrack);
+            if (fallbackIdx >= 0) {
+                hlsInstance.audioTrack = fallbackIdx;
+                return true;
+            }
+        }
+
+        const tracks = video.audioTracks;
+        if (tracks && tracks.length) {
+            for (let i = 0; i < tracks.length; i++) {
+                tracks[i].enabled = isDubAudioTrack(tracks[i]);
+            }
+            return true;
+        }
+
+        return false;
+    }
+
+    function hasDubRunwayForCurrentPlayback(hls) {
+        if (!hls || !hls.playable) return false;
+
+        const current = Number.isFinite(video.currentTime) ? video.currentTime : 0;
+        const dubStart = Number(hls.dub_start_time || 0);
+        const continuousUntil = Number(hls.continuous_until || 0);
+
+        if (current < dubStart - 2) {
+            return true;
+        }
+
+        const duration = Number.isFinite(video.duration) ? video.duration : 0;
+        const minAhead = duration >= 7200 ? 180 : (duration >= 3600 ? 120 : 60);
+
+        return continuousUntil >= current + minAhead;
+    }
+
+    async function switchToDubHls(masterUrl) {
+        if (!masterUrl || hlsSwitchedToDub || hlsSwitchInProgress) return;
+        hlsSwitchInProgress = true;
+        const resumeAt = video.currentTime || 0;
+        const wasPaused = video.paused;
+        statusText.textContent = 'Dubbed HLS ready — switching audio track...';
+        try {
+            await loadVideo(masterUrl, true, resumeAt);
+            hlsSwitchedToDub = true;
+            selectDubAudioTrack();
+            if (!wasPaused) {
+                try { await video.play(); } catch (e) { console.warn('Dub switch play failed:', e); }
+            }
+        } catch (e) {
+            hlsSwitchedToDub = false;
+            console.warn('Dubbed HLS switch failed, will retry:', e);
+        } finally {
+            hlsSwitchInProgress = false;
+        }
     }
 
     // Start Dubbing — one button does everything
     btnStart.addEventListener('click', async () => {
         const url = videoUrl.value.trim();
         if (!url) { alert('Enter a video URL'); return; }
+        isHlsFlow = url.includes('.m3u8');
+        hlsSwitchedToDub = false;
 
         // Create AudioContext immediately in click handler — Chrome requires user gesture
         if (!audioCtx) {
@@ -291,15 +394,23 @@
         statusText.textContent = 'Loading video...';
         progressFill.style.width = '0%';
 
-        // Load video but DON'T auto-play — wait for first audio chunks
+        // HLS Flow 1 plays the original immediately, then switches to the
+        // verified dubbed rendition. Non-HLS keeps the old WebAudio flow.
         try {
             await loadVideo(url);
-            video.pause();
             video.currentTime = 0;
+            if (isHlsFlow) {
+                video.volume = 1.0;
+                try { await video.play(); } catch (e) { console.warn('Auto-play failed:', e); }
+            } else {
+                video.pause();
+            }
         } catch (e) {
             console.warn('Video load failed:', e);
         }
-        statusText.textContent = 'Fetching subtitles & translating — video will start when ready...';
+        statusText.textContent = isHlsFlow
+            ? 'Playing original while dubbed HLS runway is prepared...'
+            : 'Fetching subtitles & translating — video will start when ready...';
 
         try {
             const body = {
@@ -329,6 +440,7 @@
             lastChunkIndex = -1;
             chunks = [];
             firstChunksPlayed = false;
+            hlsSwitchedToDub = false;
 
             statusText.textContent = `0 / ${totalSegments} segments ready`;
             updateSegmentList();
@@ -381,6 +493,15 @@
                 return;
             }
 
+            if (isHlsFlow && data.hls && data.hls.playable && !hlsSwitchedToDub) {
+                if (!hasDubRunwayForCurrentPlayback(data.hls)) {
+                    const until = Math.max(0, Number(data.hls.continuous_until || 0));
+                    statusText.textContent = `Dubbed HLS ready until ${formatTime(until)} — preparing more runway...`;
+                } else {
+                    await switchToDubHls(data.hls.hls_url || data.hls.master_url || data.hls_url || data.master_url);
+                }
+            }
+
             // Update total when server reports it
             if (total > 0 && total !== totalSegments) {
                 totalSegments = total;
@@ -397,7 +518,7 @@
             statusText.textContent = statusStr;
             progressFill.style.width = (total > 0 ? Math.round((ready / total) * 100) : 0) + '%';
 
-            if (data.chunks && data.chunks.length > 0) {
+            if (!isHlsFlow && data.chunks && data.chunks.length > 0) {
                 for (const chunk of data.chunks) {
                     if (chunk.index > lastChunkIndex) lastChunkIndex = chunk.index;
                     if (chunk.error) {
@@ -428,9 +549,11 @@
 
             if (data.status === 'complete') {
                 stopPolling();
-                statusText.textContent = `Done! ${total} / ${total} segments | ${decodeSuccessCount} audio OK`;
-                if (decodeFailCount > 0) statusText.textContent += ` | ${decodeFailCount} decode fail`;
-                if (errorCount > 0) statusText.textContent += ` | ${errorCount} TTS errors`;
+                statusText.textContent = isHlsFlow
+                    ? `Done! ${total} / ${total} segments | HLS dubbed track ready`
+                    : `Done! ${total} / ${total} segments | ${decodeSuccessCount} audio OK`;
+                if (!isHlsFlow && decodeFailCount > 0) statusText.textContent += ` | ${decodeFailCount} decode fail`;
+                if (!isHlsFlow && errorCount > 0) statusText.textContent += ` | ${errorCount} TTS errors`;
                 progressFill.style.width = '100%';
             }
         } catch (err) { console.error('Poll error:', err); }
@@ -438,6 +561,7 @@
 
     // Dub audio playback — plays one chunk at a time, driven by timeupdate
     function updateDubAudio() {
+        if (isHlsFlow) return;
         if (!audioCtx || !video || video.paused) return;
         if (audioCtx.state === 'suspended') audioCtx.resume();
 

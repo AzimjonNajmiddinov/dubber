@@ -50,7 +50,15 @@ Route::prefix('instant-dub')->group(function () {
     Route::get('/{sessionId}/master.m3u8', [InstantDubController::class, 'hlsMaster'])->where('sessionId', $uuid)->name('api.instant-dub.master');
     Route::get('/{sessionId}/dub-audio.m3u8', [InstantDubController::class, 'hlsAudioPlaylist'])->where('sessionId', $uuid)->name('api.instant-dub.dub-audio');
     Route::get('/{sessionId}/dub-segment/init.mp4', [InstantDubController::class, 'hlsInitSegment'])->where('sessionId', $uuid)->name('api.instant-dub.dub-init');
+    Route::get('/{sessionId}/dub-segment/lead.ts', [InstantDubController::class, 'hlsLeadSegment'])->where('sessionId', $uuid)->name('api.instant-dub.dub-lead-ts');
+    Route::get('/{sessionId}/dub-segment/source-bg-{index}.ts', [InstantDubController::class, 'hlsBgSourceSegment'])->where('sessionId', $uuid)->whereNumber('index')->name('api.instant-dub.dub-bg-source-ts');
+    Route::get('/{sessionId}/dub-segment/source-bg-{index}-to-{offsetMs}.ts', [InstantDubController::class, 'hlsBgSourceSliceSegment'])->where('sessionId', $uuid)->whereNumber('index')->whereNumber('offsetMs')->name('api.instant-dub.dub-bg-source-slice-ts');
+    Route::get('/{sessionId}/dub-segment/bg-{index}-from-{offsetMs}.ts', [InstantDubController::class, 'hlsBgSliceSegment'])->where('sessionId', $uuid)->whereNumber('index')->whereNumber('offsetMs')->name('api.instant-dub.dub-bg-slice-ts');
+    Route::get('/{sessionId}/dub-segment/bg-{index}.ts', [InstantDubController::class, 'hlsBgSegment'])->where('sessionId', $uuid)->whereNumber('index')->name('api.instant-dub.dub-bg-ts');
+    Route::get('/{sessionId}/dub-segment/tail.ts', [InstantDubController::class, 'hlsTailSegment'])->where('sessionId', $uuid)->name('api.instant-dub.dub-tail-ts');
+    Route::get('/{sessionId}/dub-segment/gap-{index}.ts', [InstantDubController::class, 'hlsGapSegment'])->where('sessionId', $uuid)->whereNumber('index')->name('api.instant-dub.dub-gap-ts');
     Route::get('/{sessionId}/dub-segment/lead.aac', [InstantDubController::class, 'hlsLeadSegment'])->where('sessionId', $uuid)->name('api.instant-dub.dub-lead');
+    Route::get('/{sessionId}/dub-segment/source-bg-{index}.aac', [InstantDubController::class, 'hlsBgSourceSegment'])->where('sessionId', $uuid)->whereNumber('index')->name('api.instant-dub.dub-bg-source');
     Route::get('/{sessionId}/dub-segment/source-bg-{index}-to-{offsetMs}.aac', [InstantDubController::class, 'hlsBgSourceSliceSegment'])->where('sessionId', $uuid)->whereNumber('index')->whereNumber('offsetMs')->name('api.instant-dub.dub-bg-source-slice');
     Route::get('/{sessionId}/dub-segment/bg-{index}-from-{offsetMs}.aac', [InstantDubController::class, 'hlsBgSliceSegment'])->where('sessionId', $uuid)->whereNumber('index')->whereNumber('offsetMs')->name('api.instant-dub.dub-bg-slice');
     Route::get('/{sessionId}/dub-segment/bg-{index}.aac', [InstantDubController::class, 'hlsBgSegment'])->where('sessionId', $uuid)->whereNumber('index')->name('api.instant-dub.dub-bg');

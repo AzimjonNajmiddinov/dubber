@@ -81,6 +81,13 @@ return [
         'delete_after_dubbing' => env('DELETE_AFTER_DUBBING', true),
     ],
 
+    'instant_dub' => [
+        // Number of 5-minute translation waves claimed immediately for HLS Flow 1.
+        // More lookahead keeps long movies ahead of playback without dispatching
+        // the whole title at once.
+        'initial_wave_lookahead' => (int) env('INSTANT_DUB_INITIAL_WAVE_LOOKAHEAD', 4),
+    ],
+
     // Safety clamps (reduced to avoid ultrasound-like high pitches)
     'clamp' => [
         'gain_db_min' => -6.0,

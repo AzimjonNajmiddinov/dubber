@@ -39,20 +39,22 @@ class DownloadAudioChunkJob implements ShouldQueue
         $workDir = storage_path("app/instant-dub/{$this->sessionId}");
         @mkdir($workDir, 0755, true);
 
-        $chunkFile = "{$workDir}/bg_chunk_{$this->chunkIndex}.aac";
+        $chunkFile = "{$workDir}/bg_chunk_{$this->chunkIndex}.ts";
 
         $result = $this->localAudioPath
             ? $this->cutFromLocal($chunkFile)
             : $this->cutFromHls($chunkFile, $session);
 
-        if ($result === null) return; // silent early exit already logged
+        if ($result === null) {
+            throw new \RuntimeException("No HLS source segments found for bg chunk {$this->chunkIndex}");
+        }
 
         if (!$result->successful() || !file_exists($chunkFile) || filesize($chunkFile) < 100) {
             Log::warning("[DUB] Audio chunk {$this->chunkIndex} download failed", [
                 'session' => $this->sessionId,
                 'error'   => Str::limit($result->errorOutput(), 200),
             ]);
-            return;
+            throw new \RuntimeException("Audio chunk {$this->chunkIndex} download failed: " . Str::limit($result->errorOutput(), 200));
         }
 
         $this->storeBgChunk($chunkFile);
@@ -69,7 +71,7 @@ class DownloadAudioChunkJob implements ShouldQueue
             ->delay(now()->addSeconds(2));
 
         $this->applyEnergyTransferToOverlappingSegments($chunkFile);
-        $this->checkAndSetComplete();
+        $this->refreshHasBackgroundState();
     }
 
     // ── Private: audio extraction ─────────────────────────────────────────────
@@ -85,7 +87,9 @@ class DownloadAudioChunkJob implements ShouldQueue
             '-t',  (string) $duration,
             '-i',  $this->localAudioPath,
             '-vn', '-ar', '44100',
-            '-c:a', 'aac', '-b:a', '96k', '-f', 'adts', $chunkFile,
+            '-c:a', 'aac', '-b:a', '96k',
+            '-muxdelay', '0', '-muxpreload', '0',
+            '-f', 'mpegts', $chunkFile,
         ]);
     }
 
@@ -95,73 +99,118 @@ class DownloadAudioChunkJob implements ShouldQueue
         if (!$segmentsJson) return null;
 
         $allSegments = json_decode($segmentsJson, true);
-        $tsUrls      = [];
-        $currentTime = 0;
+        $selection = $this->selectHlsSegmentsForRange($allSegments);
 
-        foreach ($allSegments as $seg) {
-            $segEnd = $currentTime + $seg['duration'];
-            if ($segEnd > $this->startTime && $currentTime < $this->endTime) {
-                $tsUrls[] = $seg['url'];
-            }
-            $currentTime = $segEnd;
-            if ($currentTime >= $this->endTime) break;
-        }
-
-        if (empty($tsUrls)) return null;
+        if (empty($selection['segments'])) return null;
 
         $workDir     = storage_path("app/instant-dub/{$this->sessionId}");
         $tmpPlaylist = "{$workDir}/chunk_{$this->chunkIndex}.m3u8";
 
-        $m3u8 = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n#EXT-X-MEDIA-SEQUENCE:0\n";
-        foreach ($tsUrls as $url) {
-            $m3u8 .= "#EXTINF:10.0,\n{$url}\n";
-        }
-        $m3u8 .= "#EXT-X-ENDLIST\n";
-        file_put_contents($tmpPlaylist, $m3u8);
+        file_put_contents($tmpPlaylist, $this->buildHlsChunkPlaylist($selection['segments']));
 
+        $duration = max(0.1, round($this->endTime - $this->startTime, 3));
+        $seek = max(0.0, round((float) $selection['seek_offset'], 3));
         $result = Process::timeout(90)->run([
             'ffmpeg', '-y',
             '-protocol_whitelist', 'file,http,https,tcp,tls,crypto',
             '-i', $tmpPlaylist,
+            '-ss', (string) $seek,
+            '-t', (string) $duration,
             '-vn', '-ar', '44100',
-            '-c:a', 'aac', '-b:a', '96k', '-f', 'adts', $chunkFile,
+            '-c:a', 'aac', '-b:a', '96k',
+            '-muxdelay', '0', '-muxpreload', '0',
+            '-f', 'mpegts', $chunkFile,
         ]);
 
         @unlink($tmpPlaylist);
         return $result;
     }
 
+    private function selectHlsSegmentsForRange(array $allSegments): array
+    {
+        $selected = [];
+        $currentTime = 0.0;
+        $firstStart = null;
+
+        foreach ($allSegments as $seg) {
+            $duration = (float) ($seg['duration'] ?? 0.0);
+            $segStart = array_key_exists('start', $seg) ? (float) $seg['start'] : $currentTime;
+            $segEnd = array_key_exists('end', $seg) ? (float) $seg['end'] : $segStart + $duration;
+
+            if ($segEnd > $this->startTime && $segStart < $this->endTime) {
+                $selected[] = array_merge($seg, [
+                    'start' => $segStart,
+                    'end' => $segEnd,
+                    'duration' => $duration > 0 ? $duration : max(0.0, $segEnd - $segStart),
+                ]);
+                $firstStart ??= $segStart;
+            }
+
+            $currentTime = $segEnd;
+            if ($segStart >= $this->endTime) break;
+        }
+
+        return [
+            'segments' => $selected,
+            'seek_offset' => $firstStart === null ? 0.0 : max(0.0, $this->startTime - $firstStart),
+        ];
+    }
+
+    private function buildHlsChunkPlaylist(array $segments): string
+    {
+        $targetDuration = 1;
+        foreach ($segments as $seg) {
+            $targetDuration = max($targetDuration, (int) ceil((float) ($seg['duration'] ?? 0.0)));
+        }
+
+        $m3u8 = "#EXTM3U\n#EXT-X-VERSION:6\n#EXT-X-TARGETDURATION:{$targetDuration}\n#EXT-X-MEDIA-SEQUENCE:0\n";
+        $lastKey = null;
+        $lastMap = null;
+
+        foreach ($segments as $seg) {
+            $key = $seg['key'] ?? null;
+            if ($key && $key !== $lastKey) {
+                $m3u8 .= "{$key}\n";
+                $lastKey = $key;
+            }
+
+            $map = $seg['map'] ?? null;
+            if ($map && $map !== $lastMap) {
+                $m3u8 .= "{$map}\n";
+                $lastMap = $map;
+            }
+
+            $duration = max(0.001, (float) ($seg['duration'] ?? 0.0));
+            $m3u8 .= '#EXTINF:' . rtrim(rtrim(sprintf('%.6F', $duration), '0'), '.') . ",\n";
+            $m3u8 .= ($seg['url'] ?? '') . "\n";
+        }
+
+        return $m3u8 . "#EXT-X-ENDLIST\n";
+    }
+
     private function storeBgChunk(string $chunkFile): void
     {
-        $bgChunkData = json_encode([
+        DubSession::mergeBgChunk($this->sessionId, $this->chunkIndex, [
             'path'  => $chunkFile,
             'start' => $this->startTime,
             'end'   => $this->endTime,
         ]);
-
-        Redis::hset(DubSession::bgChunksKey($this->sessionId), (string) $this->chunkIndex, $bgChunkData);
-        Redis::expire(DubSession::bgChunksKey($this->sessionId), DubSession::TTL);
 
         Cache::lock(DubSession::bgLockKey($this->sessionId), 10)->block(5, function () {
             DubSession::patch($this->sessionId, ['has_bg' => true]);
         });
     }
 
-    private function checkAndSetComplete(): void
+    private function refreshHasBackgroundState(): void
     {
         $ttl = DubSession::TTL;
         $lua = <<<LUA
             local data = redis.call('GET', KEYS[1])
             if not data then return 0 end
             local session = cjson.decode(data)
-            local ready  = session['segments_ready'] or 0
-            local total  = session['total_segments'] or 999999
-            local hasBg  = session['has_bg'] == true
-            if ready >= total and hasBg and session['status'] ~= 'complete' then
-                session['status'] = 'complete'
-                redis.call('SETEX', KEYS[1], {$ttl}, cjson.encode(session))
-            end
-            return ready
+            session['has_bg'] = true
+            redis.call('SETEX', KEYS[1], {$ttl}, cjson.encode(session))
+            return 1
         LUA;
 
         Redis::eval($lua, 1, DubSession::key($this->sessionId));
@@ -292,6 +341,11 @@ class DownloadAudioChunkJob implements ShouldQueue
 
     public function failed(\Throwable $exception): void
     {
+        DubSession::patch($this->sessionId, [
+            'status' => 'error',
+            'error' => 'Background audio chunk failed: ' . Str::limit($exception->getMessage(), 120),
+        ]);
+
         Log::warning("[DUB] DownloadAudioChunkJob {$this->chunkIndex} failed", [
             'session' => $this->sessionId,
             'error'   => $exception->getMessage(),

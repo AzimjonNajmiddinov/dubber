@@ -99,13 +99,29 @@ class PersistDubCacheJob implements ShouldQueue
 
             Log::info("[DUB] Persisted dub #{$dub->id} ({$total} segments) for: {$videoUrl}");
 
-            // Schedule storage cleanup — delay 5 minutes to let HLS clients finish buffering
+            // Keep HLS assets long enough for users to finish watching after the
+            // processing pipeline completes. A fixed 5-minute cleanup deletes
+            // dubbed audio while long movies are still playing.
             CleanupSessionStorageJob::dispatch($this->sessionId)
                 ->onQueue('default')
-                ->delay(now()->addMinutes(5));
+                ->delay(now()->addMinutes($this->cleanupDelayMinutes($session)));
 
         } catch (\Throwable $e) {
             Log::error("[DUB] PersistDubCacheJob failed: " . $e->getMessage(), ['session' => $this->sessionId]);
         }
+    }
+
+    private function cleanupDelayMinutes(array $session): int
+    {
+        $durationSeconds = max(
+            (float) ($session['video_duration'] ?? 0),
+            (int) ($session['total_bg_chunks'] ?? 0) * 30.0,
+        );
+
+        if ($durationSeconds <= 0) {
+            return 360;
+        }
+
+        return min(1440, max(360, (int) ceil($durationSeconds / 60) + 120));
     }
 }

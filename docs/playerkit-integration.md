@@ -2,7 +2,7 @@
 
 ## Overview
 
-The dubbing server exposes an HLS proxy API that serves a **modified master playlist** with a dubbed audio track and subtitle track injected as `#EXT-X-MEDIA` alternate renditions. AVPlayer / PlayerKit auto-discovers these tracks and shows them in the audio/subtitle selection menus.
+The dubbing server exposes an HLS proxy API that serves a **modified master playlist**. Before the dub runway is verified it preserves the original audio; after `playable=true` it injects the dubbed audio track and subtitle track as `#EXT-X-MEDIA` alternate renditions. AVPlayer / PlayerKit auto-discovers these tracks and shows them in the audio/subtitle selection menus.
 
 Video segments are served **directly from the CDN** (not proxied) for optimal performance. Only the dub audio and subtitles go through our server.
 
@@ -18,7 +18,7 @@ Video segments are served **directly from the CDN** (not proxied) for optimal pe
 │    stream  │◄─────── │  → real-time progress + errors       │
 │            │         │                                      │
 │ 3. GET  ───────────► │  /api/instant-dub/{sid}/master.m3u8  │
-│    master  │◄─────── │  → modified playlist + dub track     │
+│    master  │◄─────── │  → modified playlist                 │
 │            │         │                                      │
 │ 4. GET  ──────────►  │  CDN (direct, not proxied)           │
 │    video   │◄──────  │  → video segments from CDN           │
@@ -27,7 +27,7 @@ Video segments are served **directly from the CDN** (not proxied) for optimal pe
 │    dub m3u8│◄─────── │  → audio playlist (EVENT, grows)     │
 │            │         │                                      │
 │ 6. GET  ───────────► │  /api/instant-dub/{sid}/dub-segment/ │
-│    .aac    │◄─────── │  → AAC audio (TTS + background mix)  │
+│    .ts     │◄─────── │  → MPEG-TS audio (TTS + background)  │
 │            │         │                                      │
 │ 7. GET  ───────────► │  /api/instant-dub/{sid}/dub-subtitles│
 │    subs    │◄─────── │  → WebVTT subtitle track             │
@@ -64,7 +64,13 @@ Content-Type: application/json
 
 **Response:**
 ```json
-{ "session_id": "550e8400-e29b-41d4-a716-446655440000" }
+{
+  "session_id": "550e8400-e29b-41d4-a716-446655440000",
+  "hls_url": "https://dubbing.uz/api/instant-dub/550e8400-e29b-41d4-a716-446655440000/master.m3u8",
+  "master_url": "https://dubbing.uz/api/instant-dub/550e8400-e29b-41d4-a716-446655440000/master.m3u8",
+  "dub_audio_url": "https://dubbing.uz/api/instant-dub/550e8400-e29b-41d4-a716-446655440000/dub-audio.m3u8",
+  "subtitles_url": "https://dubbing.uz/api/instant-dub/550e8400-e29b-41d4-a716-446655440000/dub-subtitles.m3u8"
+}
 ```
 
 If the video was previously dubbed and cached, the server returns immediately with the cached result — no re-processing occurs. If an admin edited the translation, only TTS is re-run (no re-translation).
@@ -106,10 +112,13 @@ event: warning
 data: {"message":"OpenAI rate limited, retrying in 4s... (attempt 1/4)"}
 
 event: update
-data: {"status":"processing","progress":"Generating audio (2/5)...","segments_ready":12,"total_segments":75}
+data: {"status":"processing","progress":"Generating audio (2/5)...","segments_ready":12,"total_segments":75,"playable":false}
 
 event: update
-data: {"status":"complete","segments_ready":75,"total_segments":75,"progress":null}
+data: {"status":"processing","segments_ready":24,"total_segments":75,"playable":true,"hls":{"playable":true,"hls_url":"https://dubbing.uz/api/instant-dub/.../master.m3u8","ready_seconds":180,"required_seconds":180,"continuous_until":225}}
+
+event: update
+data: {"status":"complete","segments_ready":75,"total_segments":75,"progress":null,"playable":true}
 
 event: done
 data: {"status":"complete"}
@@ -123,6 +132,8 @@ data: {"status":"complete"}
 | `progress`        | string? | Human-readable description of current activity |
 | `segments_ready`  | int     | Number of TTS segments generated so far        |
 | `total_segments`  | int     | Total segments to generate (0 until known)     |
+| `playable`        | bool    | `true` only after the verified HLS dubbed runway is ready. Switch only on this, never on segment count. |
+| `hls`             | object? | HLS readiness metrics and URLs (`hls_url`, `ready_seconds`, `required_seconds`, `continuous_until`) |
 | `error`           | string? | Error message if status is `error`             |
 
 ### 3. Master playlist (modified HLS)
@@ -133,7 +144,7 @@ GET /api/instant-dub/{session_id}/master.m3u8
 
 Returns the original HLS master playlist with modifications:
 - **Video segment URIs** are rewritten to absolute CDN URLs (direct, not proxied through our server)
-- **Dub audio track** injected as `#EXT-X-MEDIA` in the same `GROUP-ID` as existing audio tracks
+- **Dub audio track** injected as `#EXT-X-MEDIA` only after `playable=true`
 - **Dub subtitle track** injected as `#EXT-X-MEDIA TYPE=SUBTITLES`
 - All existing audio/subtitle tracks are preserved
 
@@ -141,7 +152,7 @@ Example output:
 ```m3u8
 #EXTM3U
 #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio0",NAME="LE-Production",LANGUAGE="ru",URI="https://cdn.example.com/.../index-f1-a1.m3u8?token=..."
-#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio0",NAME="O'zbek dublyaj",LANGUAGE="uz",URI="dub-audio.m3u8",DEFAULT=NO,AUTOSELECT=NO
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio0",NAME="O'zbek dublyaj",LANGUAGE="uz",URI="dub-audio.m3u8",DEFAULT=YES,AUTOSELECT=YES
 #EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs0",NAME="O'zbek",LANGUAGE="uz",URI="dub-subtitles.m3u8",DEFAULT=NO,AUTOSELECT=YES,FORCED=NO
 #EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1280x720,AUDIO="audio0",SUBTITLES="subs0"
 https://cdn.example.com/.../index-f1-v1.m3u8?token=...
@@ -153,46 +164,46 @@ https://cdn.example.com/.../index-f1-v1.m3u8?token=...
 GET /api/instant-dub/{session_id}/dub-audio.m3u8
 ```
 
-Returns an `EVENT`-type playlist that grows as TTS segments finish:
+Returns an `EVENT`-type playlist that grows as verified mixed chunks finish:
 ```m3u8
 #EXTM3U
 #EXT-X-VERSION:3
 #EXT-X-TARGETDURATION:10
 #EXT-X-MEDIA-SEQUENCE:0
 #EXT-X-PLAYLIST-TYPE:EVENT
-#EXTINF:10.000,
-gap/0/10000.aac
-#EXTINF:10.000,
-gap/10000/10000.aac
-#EXTINF:4.200,
-dub-segment/0.aac
-#EXTINF:3.500,
-dub-segment/1.aac
+#EXTINF:30.000,
+dub-segment/bg-0.ts
+#EXTINF:15.000,
+dub-segment/source-bg-1-to-15000.ts
+#EXTINF:15.000,
+dub-segment/bg-1-from-15000.ts
+#EXTINF:30.000,
+dub-segment/bg-2.ts
 ```
 
-- **`dub-segment/{index}.aac`** — TTS voice mixed with original audio at 30% volume
-- **`gap/{startMs}/{durationMs}.aac`** — Original audio at 30% during non-dialogue sections (max 10s per segment)
+- **`dub-segment/bg-{index}.ts`** — timestamped MPEG-TS audio with translated TTS mixed over source background
+- **`dub-segment/source-bg-{index}-to-{offsetMs}.ts`** — original/source audio before the known dub start time
 - When all segments are ready, `#EXT-X-ENDLIST` is appended
 - AVPlayer automatically re-fetches `EVENT` playlists to discover new segments
 
 ### 5. Audio segments
 
 ```
-GET /api/instant-dub/{session_id}/dub-segment/{index}.aac
+GET /api/instant-dub/{session_id}/dub-segment/bg-{index}.ts
 ```
 
-Returns AAC/ADTS audio. Each segment is:
+Returns MPEG-TS audio. Each segment is:
 - Padded/trimmed to exact subtitle slot duration (start_time → end_time)
 - Mixed with original video audio at 30% volume (background)
-- Cached after first generation (14h TTL)
+- Cached after first generation (session TTL)
 
-### 6. Gap segments (background audio between dialogue)
+### 6. Source lead/slice segments
 
 ```
-GET /api/instant-dub/{session_id}/gap/{startMs}/{durationMs}.aac
+GET /api/instant-dub/{session_id}/dub-segment/source-bg-{index}-to-{offsetMs}.ts
 ```
 
-Returns original audio at 30% volume for the specified time range. Falls back to silence if original audio is unavailable. Max 10 seconds per segment. Cached per session (14h TTL).
+Returns source audio for the pre-dub part of a chunk. This keeps the alternate audio timeline aligned before the first translated line starts.
 
 ### 7. Subtitle playlist + VTT
 
@@ -235,12 +246,25 @@ enum DubAPI {
 
     struct StartResponse: Decodable {
         let session_id: String
+        let hls_url: String
+        let master_url: String
     }
 
     struct SessionUpdate: Decodable {
+        struct HlsState: Decodable {
+            let playable: Bool
+            let hls_url: String?
+            let master_url: String?
+            let ready_seconds: Double?
+            let required_seconds: Double?
+            let continuous_until: Double?
+        }
+
         let status: String
         let segments_ready: Int
         let total_segments: Int
+        let playable: Bool?
+        let hls: HlsState?
         let progress: String?
         let error: String?
     }
@@ -256,7 +280,7 @@ enum DubAPI {
         title: String,
         language: String = "uz",
         translateFrom: String = "auto"
-    ) async throws -> String {
+    ) async throws -> StartResponse {
         var request = URLRequest(url: URL(string: "\(baseURL)/start")!)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -270,8 +294,7 @@ enum DubAPI {
         request.httpBody = try JSONEncoder().encode(body)
 
         let (data, _) = try await URLSession.shared.data(for: request)
-        let response = try JSONDecoder().decode(StartResponse.self, from: data)
-        return response.session_id
+        return try JSONDecoder().decode(StartResponse.self, from: data)
     }
 
     // MARK: - HLS URLs
@@ -307,10 +330,9 @@ class DubEventSource {
     var onUpdate: ((DubAPI.SessionUpdate) -> Void)?
     var onWarning: ((String) -> Void)?
     var onDone: ((String) -> Void)?
-    var onReadyToPlay: (() -> Void)?
+    var onReadyToPlay: ((URL) -> Void)?
 
     private var readyFired = false
-    private let minSegmentsToPlay = 3
 
     init(sessionId: String) {
         self.sessionId = sessionId
@@ -367,10 +389,13 @@ class DubEventSource {
                 if let update = try? decoder.decode(DubAPI.SessionUpdate.self, from: jsonData) {
                     onUpdate?(update)
 
-                    // Fire ready-to-play when enough segments are buffered
-                    if !readyFired && update.segments_ready >= minSegmentsToPlay {
+                    // Switch only after backend verifies a continuous HLS dubbed runway.
+                    if !readyFired,
+                       update.playable == true || update.hls?.playable == true,
+                       let rawURL = update.hls?.hls_url ?? update.hls?.master_url,
+                       let url = URL(string: rawURL) {
                         readyFired = true
-                        onReadyToPlay?()
+                        onReadyToPlay?(url)
                     }
                 }
 
@@ -414,7 +439,8 @@ class DubPlayerViewModel: ObservableObject {
         Task {
             do {
                 // 1. Create session
-                let sid = try await DubAPI.startSession(videoURL: videoURL, title: "Show Name S01E01")
+                let start = try await DubAPI.startSession(videoURL: videoURL, title: "Show Name S01E01")
+                let sid = start.session_id
                 self.sessionId = sid
 
                 // 2. Connect SSE for real-time updates
@@ -436,10 +462,9 @@ class DubPlayerViewModel: ObservableObject {
                     }
                 }
 
-                events.onReadyToPlay = { [weak self] in
+                events.onReadyToPlay = { [weak self] masterURL in
                     guard let self else { return }
-                    // 3. Start playback when enough segments are ready
-                    let masterURL = DubAPI.masterPlaylistURL(sessionId: sid)
+                    // 3. Switch/start playback only after the backend says HLS is playable.
                     self.player.load(url: masterURL)
                     self.player.play()
                     self.isLoading = false
@@ -487,7 +512,7 @@ POST /start → session_id
        ▼
 Connect SSE /events ◄──── shows progress bar, warnings
        │
-       │ (waits for segments_ready >= 3)
+       │ (waits for playable=true / hls.playable=true)
        │
        ▼
 Load master.m3u8 into AVPlayer
@@ -496,7 +521,7 @@ Load master.m3u8 into AVPlayer
        ├─► Dub audio track appears in menu
        ├─► Subtitle track appears in menu
        │
-       │ (user selects dub audio)
+       │ (dub audio is default after verified HLS runway is ready)
        │
        ▼
 AVPlayer switches to dub audio
@@ -520,9 +545,9 @@ The original audio is downloaded from the HLS audio track specified in the maste
 
 ## Notes
 
-- **Wait for segments before playback**: Don't load `master.m3u8` until at least 3 segments are ready. Use the SSE `update` event to know when.
+- **Wait for HLS readiness before switching**: keep playing original video/audio until SSE or poll returns `playable=true` / `hls.playable=true`, then reload `hls.hls_url` or `hls.master_url` and select the dubbed audio track. Do not switch based on `segments_ready`.
 - **CDN direct**: Video segments go directly to the CDN, not through our server. Only dub audio/subtitles go through `dubbing.uz`.
 - **Subtitle track**: Translated subtitles appear in PlayerKit's subtitle menu alongside any original subtitles from the source video.
 - **Background audio**: Original audio at 30% plays during both dialogue and gaps. Falls back to silence if the source has no separate audio track.
 - **Sessions expire** after 14 hours. Call `POST /stop` to clean up earlier.
-- **The web UI** (`/instant-dub` page) uses the poll+base64 flow and is unaffected by HLS changes.
+- **The web UI** (`/instant-dub` page) uses the HLS readiness switch for `.m3u8` sources and the poll+base64 flow for non-HLS sources.

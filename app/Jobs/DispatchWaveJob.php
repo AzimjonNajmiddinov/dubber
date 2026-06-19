@@ -53,10 +53,6 @@ class DispatchWaveJob implements ShouldQueue
         $segments = json_decode($waveJson, true);
         if (empty($segments)) return;
 
-        // Mark this wave as dispatched (atomic increment)
-        Redis::incr(DubSession::wavesDispatchedKey($this->sessionId));
-        Redis::expire(DubSession::wavesDispatchedKey($this->sessionId), DubSession::TTL);
-
         // Store wave segment count for progress tracking
         Redis::setex(
             DubSession::waveProgressKey($this->sessionId, $this->waveIndex),
@@ -81,6 +77,9 @@ class DispatchWaveJob implements ShouldQueue
                     $seg['start'], $seg['end'], $this->language,
                     $seg['speaker'] ?? 'M1',
                     $slotEnd,
+                    null,
+                    null,
+                    $this->waveIndex,
                 )->onQueue('segment-generation');
             }
 
@@ -103,11 +102,11 @@ class DispatchWaveJob implements ShouldQueue
         // Initialize batch counter for this wave
         Redis::setex("instant-dub:{$this->sessionId}:w{$this->waveIndex}:batches-remaining", DubSession::TTL, $totalBatches);
 
-        // Dispatch translation batches — all parallel (character context from wave 0 already available)
-        for ($i = 0; $i < $totalBatches; $i++) {
+        // Dispatch batch 0 first; it will fan out remaining batches once context is ready.
+        if ($totalBatches > 0) {
             TranslateInstantDubBatchJob::dispatch(
                 $this->sessionId,
-                $i,
+                0,
                 $totalBatches,
                 $this->language,
                 $this->translateFrom,
@@ -168,7 +167,7 @@ class DispatchWaveJob implements ShouldQueue
             $bgChunkExists = Redis::hget(DubSession::bgChunksKey($this->sessionId), (string) $chunkIdx);
             if (!$bgChunkExists) {
                 DownloadAudioChunkJob::dispatch($this->sessionId, $chunkIdx, $chunkStart, $chunkEnd)
-                    ->onQueue('default');
+                    ->onQueue('audio-downloads');
                 $dispatched++;
             }
 

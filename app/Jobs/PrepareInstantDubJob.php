@@ -130,12 +130,6 @@ class PrepareInstantDubJob implements ShouldQueue
             $this->updateSession(['expected_duration' => (float) ($lastSeg['end'] ?? 0)]);
         }
 
-        // 2b. Dispatch background audio download in parallel (non-blocking)
-        // Must go on 'default' queue — NOT 'segment-generation' — so TTS jobs
-        // (which are on segment-generation with higher priority) aren't blocked.
-        DownloadOriginalAudioJob::dispatch($this->sessionId, $this->videoUrl, $this->audioUrl)
-            ->onQueue('default');
-
         // 3. Filter to speakable segments
         $needsTranslation = $this->translateFrom && $this->translateFrom !== $this->language;
 
@@ -156,12 +150,24 @@ class PrepareInstantDubJob implements ShouldQueue
         }
         unset($seg);
         $segments = array_values(array_filter($segments, fn($s) => trim($s['text']) !== ''));
+        if (empty($segments)) {
+            $this->updateStatus('error', 'No speakable subtitle segments found');
+            return;
+        }
 
         $this->updateSession([
             'total_segments'     => count($segments),
             'status'             => 'processing',
             'hls_dub_start_time' => (float) ($segments[0]['start'] ?? 0.0),
         ]);
+
+        $this->storeSegmentPlan($segments, $allSegments, $fullDialogueText);
+
+        // Dispatch background audio only after the speakable segment plan is stored.
+        // Otherwise bg workers can race ahead, see "no expected speech", and mark
+        // original-only chunks as dub_ready.
+        DownloadOriginalAudioJob::dispatch($this->sessionId, $this->videoUrl, $this->audioUrl)
+            ->onQueue('audio-downloads');
 
         // ── Wave-based dispatch ─────────────────────────────────────────────────
         // Split segments into time-based waves (5 minutes each).
@@ -207,7 +213,8 @@ class PrepareInstantDubJob implements ShouldQueue
             );
             $globalOffset += count($waves[$w]);
         }
-        // Initialize dispatched counter (wave 0 is about to dispatch)
+        // Initialize claimed-wave counter. Wave 0 is claimed now; later code
+        // raises this when it queues more waves up front.
         Redis::setex(DubSession::wavesDispatchedKey($this->sessionId), DubSession::TTL, 1);
 
         // Store wave 0 progress tracking
@@ -238,6 +245,9 @@ class PrepareInstantDubJob implements ShouldQueue
                     $seg['start'], $seg['end'], $this->language,
                     $seg['speaker'] ?? 'M1',
                     $slotEnd,
+                    null,
+                    null,
+                    0,
                 )->onQueue('segment-generation');
             }
 
@@ -248,17 +258,14 @@ class PrepareInstantDubJob implements ShouldQueue
                     $this->sessionId, $w, $this->language, $this->translateFrom, $waveOffset,
                 )->onQueue('segment-generation')->delay(now()->addSeconds(15 * $w));
             }
+            Redis::setex(DubSession::wavesDispatchedKey($this->sessionId), DubSession::TTL, $totalWaves);
+            $this->updateSession(['waves_dispatched' => $totalWaves]);
 
             Log::info("[DUB] [{$title}] Prepared (no translation): " . count($segments) . " segments in {$totalWaves} waves", [
                 'session' => $this->sessionId,
             ]);
             return;
         }
-
-        // Store all segments and full dialogue in Redis (avoids duplicating in every job payload)
-        $allSegmentsKey = DubSession::allSegmentsKey($this->sessionId);
-        Redis::setex($allSegmentsKey, DubSession::TTL, json_encode($allSegments));
-        Redis::setex(DubSession::fullDialogueKey($this->sessionId), DubSession::TTL, $fullDialogueText);
 
         // 4. Micro-batch: dispatch first 3 segments of wave 0 for fast translation → immediate TTS
         $microBatchSize = min(3, count($wave0));
@@ -297,14 +304,20 @@ class PrepareInstantDubJob implements ShouldQueue
             )->onQueue('segment-generation');
         }
 
-        // 7. Schedule wave 1 with a short delay (gives wave 0 micro-batch time to start TTS).
-        //    Waves 2+ are dispatched automatically by ProcessInstantDubSegmentJob when
-        //    the previous wave reaches 80% completion (waterfall trigger).
-        if ($totalWaves > 1) {
-            $wave1Offset = count($wave0);
-            DispatchWaveJob::dispatch(
-                $this->sessionId, 1, $this->language, $this->translateFrom, $wave1Offset,
-            )->onQueue('segment-generation')->delay(now()->addSeconds(15));
+        // 7. Schedule several waves ahead with a small stagger. Long movies must
+        // keep processing beyond the initial switch runway; the waterfall trigger
+        // still extends the pipeline once this lookahead is consumed.
+        $initialWaveClaims = $this->initialTranslationWaveClaims($totalWaves);
+        if ($initialWaveClaims > 1) {
+            Redis::setex(DubSession::wavesDispatchedKey($this->sessionId), DubSession::TTL, $initialWaveClaims);
+            $this->updateSession(['waves_dispatched' => $initialWaveClaims]);
+
+            for ($w = 1; $w < $initialWaveClaims; $w++) {
+                $waveOffset = (int) Redis::get(DubSession::waveKey($this->sessionId, $w) . ':offset');
+                DispatchWaveJob::dispatch(
+                    $this->sessionId, $w, $this->language, $this->translateFrom, $waveOffset,
+                )->onQueue('segment-generation')->delay(now()->addSeconds(15 * $w));
+            }
         }
 
         $wave0Count = count($wave0);
@@ -312,6 +325,34 @@ class PrepareInstantDubJob implements ShouldQueue
         Log::info("[DUB] [{$title}] Prepared: wave 0 ({$wave0Count} segs: {$microBatchSize} micro + {$totalBatches} batches) + {$otherCount} in " . ($totalWaves - 1) . " future waves, {$this->translateFrom}->{$this->language}", [
             'session' => $this->sessionId,
         ]);
+    }
+
+    private function initialTranslationWaveClaims(int $totalWaves): int
+    {
+        if ($totalWaves <= 1) {
+            return $totalWaves;
+        }
+
+        return min($totalWaves, max(2, (int) config('dubber.instant_dub.initial_wave_lookahead', 4)));
+    }
+
+    private function storeSegmentPlan(array $segments, array $allSegments, string $fullDialogueText): void
+    {
+        $speakable = [];
+        foreach ($segments as $i => $seg) {
+            $speakable[] = [
+                'index' => $i,
+                'start_time' => (float) ($seg['start'] ?? 0.0),
+                'end_time' => (float) ($seg['end'] ?? 0.0),
+                'text' => (string) ($seg['text'] ?? ''),
+                'speaker' => (string) ($seg['speaker'] ?? 'M1'),
+            ];
+        }
+
+        Redis::setex(DubSession::speakableSegmentsKey($this->sessionId), DubSession::TTL, json_encode($speakable));
+        Redis::setex(DubSession::allSegmentsKey($this->sessionId), DubSession::TTL, json_encode($allSegments));
+        Redis::setex(DubSession::fullDialogueKey($this->sessionId), DubSession::TTL, $fullDialogueText);
+        DubSession::patch($this->sessionId, ['segment_plan_ready' => true]);
     }
 
     private function handleReTts(string $title): void
@@ -343,9 +384,22 @@ class PrepareInstantDubJob implements ShouldQueue
             'hls_dub_start_time' => (float) ($segments->first()->start_time ?? 0.0),
         ]);
 
+        Redis::setex(
+            DubSession::speakableSegmentsKey($this->sessionId),
+            DubSession::TTL,
+            json_encode($segments->map(fn($seg) => [
+                'index' => (int) $seg->segment_index,
+                'start_time' => (float) $seg->start_time,
+                'end_time' => (float) $seg->end_time,
+                'text' => (string) ($seg->translated_text ?? ''),
+                'speaker' => (string) $seg->speaker,
+            ])->values()->all())
+        );
+        DubSession::patch($this->sessionId, ['segment_plan_ready' => true]);
+
         // Download background audio (needed for remix)
         DownloadOriginalAudioJob::dispatch($this->sessionId, $this->videoUrl, $this->audioUrl)
-            ->onQueue('default');
+            ->onQueue('audio-downloads');
 
         // Dispatch TTS for segments that need re-TTS
         $dispatched = 0;
@@ -363,6 +417,8 @@ class PrepareInstantDubJob implements ShouldQueue
                 $seg->speaker,
                 $seg->slot_end,
                 $seg->source_text,
+                null,
+                0,
             )->onQueue('segment-generation');
             $dispatched++;
         }
@@ -428,8 +484,18 @@ class PrepareInstantDubJob implements ShouldQueue
             $query = parse_url($url, PHP_URL_QUERY);
             $resolve = function ($base, $rel) use ($query) {
                 if (str_starts_with($rel, 'http')) return $rel;
-                $r = rtrim($base, '/') . '/' . $rel;
-                return $query ? "{$r}?{$query}" : $r;
+                if (str_starts_with($rel, '//')) return 'https:' . $rel;
+                if (str_starts_with($rel, '/')) {
+                    $parts = parse_url($base);
+                    $origin = ($parts['scheme'] ?? 'https') . '://' . ($parts['host'] ?? '');
+                    if (!empty($parts['port'])) {
+                        $origin .= ':' . $parts['port'];
+                    }
+                    $r = $origin . $rel;
+                } else {
+                    $r = rtrim($base, '/') . '/' . $rel;
+                }
+                return $query ? $r . (str_contains($r, '?') ? '&' : '?') . $query : $r;
             };
 
             // Parse all subtitle tracks
@@ -437,13 +503,14 @@ class PrepareInstantDubJob implements ShouldQueue
             $tracks = [];
             foreach ($subLines[0] ?? [] as $line) {
                 $lang = preg_match('/LANGUAGE="([^"]*)"/', $line, $lm) ? $lm[1] : 'unknown';
+                $name = preg_match('/NAME="([^"]*)"/', $line, $nm) ? $nm[1] : '';
                 $uri = preg_match('/URI="([^"]+)"/', $line, $um) ? $um[1] : null;
-                if ($uri) $tracks[] = ['lang' => $lang, 'uri' => $uri];
+                if ($uri) $tracks[] = ['lang' => $lang, 'name' => $name, 'uri' => $uri];
             }
 
             if (empty($tracks)) {
                 if (!preg_match('/TYPE=SUBTITLES.*?URI="([^"]+)"/', $master, $m)) return null;
-                $tracks = [['lang' => 'unknown', 'uri' => $m[1]]];
+                $tracks = [['lang' => 'unknown', 'name' => '', 'uri' => $m[1]]];
             }
 
             // Timeslots from English (original timing), text from Russian (better translation)
@@ -459,7 +526,7 @@ class PrepareInstantDubJob implements ShouldQueue
             // Classify each track by language code
             foreach ($tracks as &$track) {
                 $track['langCode'] = 'unknown';
-                $rawLang = strtolower($track['lang']);
+                $rawLang = strtolower(($track['lang'] ?? '') . ' ' . ($track['name'] ?? ''));
                 foreach ($langPatterns as $code => $patterns) {
                     foreach ($patterns as $p) {
                         if (str_contains($rawLang, $p)) {
@@ -471,33 +538,29 @@ class PrepareInstantDubJob implements ShouldQueue
             }
             unset($track);
 
-            // Fetch only the tracks we actually need: best text (ru priority) + best timing (en priority).
-            // Downloading all tracks is O(N_tracks × N_vtt_files) — far too slow for long films.
+            // Fetch all available subtitle languages and keep the largest usable
+            // candidate for each. A short/broken high-priority language track must
+            // not beat a complete lower-priority track, otherwise the rest of the
+            // movie is treated as "no speech expected".
             $byLang = [];
-            $textTarget   = null; // first langCode from $langPriority that exists in $tracks
-            $timingTarget = null; // first langCode from $timingPriority that exists in $tracks
+            $availableLangs = array_values(array_unique(array_map(
+                fn($track) => $track['langCode'] ?? 'unknown',
+                $tracks,
+            )));
+            $orderedLangs = array_values(array_unique(array_merge(
+                $langPriority,
+                $timingPriority,
+                $availableLangs,
+            )));
 
-            foreach ($langPriority as $lc) {
-                foreach ($tracks as $t) {
-                    if ($t['langCode'] === $lc) { $textTarget = $lc; break 2; }
-                }
-            }
-            foreach ($timingPriority as $lc) {
-                foreach ($tracks as $t) {
-                    if ($t['langCode'] === $lc) { $timingTarget = $lc; break 2; }
-                }
-            }
-
-            // Collect candidate tracks: text + timing. Some HLS masters expose multiple
-            // tracks for the same language (full, forced, SDH, broken CDN variant).
-            // Fetch candidates per language and keep the largest usable one.
-            $needed = array_values(array_unique(array_filter([$textTarget, $timingTarget])));
-
-            foreach ($needed as $lang) {
+            foreach ($orderedLangs as $lang) {
                 $candidates = array_values(array_filter(
                     $tracks,
                     fn($track) => ($track['langCode'] ?? 'unknown') === $lang
                 ));
+                if (empty($candidates)) {
+                    continue;
+                }
 
                 $result = $this->fetchBestSubtitleTrack($candidates, $baseUrl, $resolve, $lang);
                 if ($result['cues'] > 0 && $result['srt'] !== '') {
@@ -525,31 +588,8 @@ class PrepareInstantDubJob implements ShouldQueue
                 $cueSummary[] = "{$lang}:{$r['cues']}";
             }
 
-            // Pick TEXT track (for translation) — Russian preferred
-            $textResult = null;
-            $textLang = null;
-            foreach ($langPriority as $lang) {
-                if (isset($byLang[$lang])) {
-                    $textResult = $byLang[$lang];
-                    $textLang = $lang;
-                    break;
-                }
-            }
-            if (!$textResult) {
-                $textLang = array_key_first($byLang);
-                $textResult = $byLang[$textLang];
-            }
-
-            // Pick TIMING track (for timeslots) — English preferred
-            $timingResult = null;
-            $timingLang = null;
-            foreach ($timingPriority as $lang) {
-                if (isset($byLang[$lang])) {
-                    $timingResult = $byLang[$lang];
-                    $timingLang = $lang;
-                    break;
-                }
-            }
+            [$textLang, $textResult] = $this->selectSubtitleResult($byLang, $langPriority);
+            [$timingLang, $timingResult] = $this->selectSubtitleResult($byLang, $timingPriority);
 
             // If we have both EN timing and RU text, merge: EN timestamps + RU text
             if ($timingResult && $textResult && $timingLang !== $textLang) {
@@ -557,28 +597,20 @@ class PrepareInstantDubJob implements ShouldQueue
                 $textSegments = \App\Services\SrtParser::parse($textResult['srt']);
 
                 if (count($timingSegments) > 0 && count($textSegments) > 0) {
-                    // Build merged SRT: EN timestamps, RU text (matched by index)
-                    $merged = '';
-                    $count = min(count($timingSegments), count($textSegments));
-                    for ($i = 0; $i < $count; $i++) {
-                        $ts = $timingSegments[$i];
-                        $txt = $textSegments[$i]['text'] ?? $ts['text'];
-                        $startH = floor($ts['start'] / 3600);
-                        $startM = floor(($ts['start'] % 3600) / 60);
-                        $startS = fmod($ts['start'], 60);
-                        $endH = floor($ts['end'] / 3600);
-                        $endM = floor(($ts['end'] % 3600) / 60);
-                        $endS = fmod($ts['end'], 60);
-                        $merged .= ($i + 1) . "\n";
-                        $merged .= sprintf("%02d:%02d:%06.3f --> %02d:%02d:%06.3f\n", $startH, $startM, $startS, $endH, $endM, $endS);
-                        $merged .= $txt . "\n\n";
+                    $ratio = min(count($timingSegments), count($textSegments)) / max(count($timingSegments), count($textSegments));
+                    if ($ratio >= 0.75) {
+                        $merged = $this->mergeSubtitleSegments($timingSegments, $textSegments);
+
+                        Log::info("[DUB] Subtitle tracks merged: timing={$timingLang} text={$textLang} (" . count($timingSegments) . " cues, ratio=" . round($ratio, 2) . ") from [" . implode(', ', $cueSummary) . "]", [
+                            'session' => $this->sessionId,
+                        ]);
+
+                        return ['srt' => $merged, 'language' => $textLang];
                     }
 
-                    Log::info("[DUB] Subtitle tracks merged: timing={$timingLang} text={$textLang} ({$count} cues) from [" . implode(', ', $cueSummary) . "]", [
+                    Log::warning("[DUB] Subtitle merge skipped due cue mismatch: timing={$timingLang}:" . count($timingSegments) . " text={$textLang}:" . count($textSegments), [
                         'session' => $this->sessionId,
                     ]);
-
-                    return ['srt' => $merged, 'language' => $textLang];
                 }
             }
 
@@ -593,24 +625,86 @@ class PrepareInstantDubJob implements ShouldQueue
         }
     }
 
+    private function selectSubtitleResult(array $byLang, array $priority): array
+    {
+        $largestCueCount = 0;
+        foreach ($byLang as $result) {
+            $largestCueCount = max($largestCueCount, (int) ($result['cues'] ?? 0));
+        }
+
+        $minCompleteCueCount = $largestCueCount >= 40
+            ? (int) floor($largestCueCount * 0.8)
+            : 1;
+
+        foreach ($priority as $lang) {
+            if (isset($byLang[$lang]) && (int) ($byLang[$lang]['cues'] ?? 0) >= $minCompleteCueCount) {
+                return [$lang, $byLang[$lang]];
+            }
+        }
+
+        $bestLang = null;
+        $best = null;
+        foreach ($byLang as $lang => $result) {
+            $isBetter = !$best
+                || (int) ($result['cues'] ?? 0) > (int) ($best['cues'] ?? 0)
+                || (
+                    (int) ($result['cues'] ?? 0) === (int) ($best['cues'] ?? 0)
+                    && (int) ($result['bytes'] ?? 0) > (int) ($best['bytes'] ?? 0)
+                );
+
+            if ($isBetter) {
+                $bestLang = $lang;
+                $best = $result;
+            }
+        }
+
+        return [$bestLang, $best];
+    }
+
+    private function mergeSubtitleSegments(array $timingSegments, array $textSegments): string
+    {
+        $merged = '';
+        $count = count($timingSegments);
+
+        for ($i = 0; $i < $count; $i++) {
+            $ts = $timingSegments[$i];
+            $txt = trim((string) ($textSegments[$i]['text'] ?? $ts['text'] ?? ''));
+            if ($txt === '') {
+                $txt = trim((string) ($ts['text'] ?? ''));
+            }
+
+            $merged .= ($i + 1) . "\n";
+            $merged .= $this->formatSrtSeconds((float) ($ts['start'] ?? 0.0))
+                . ' --> '
+                . $this->formatSrtSeconds((float) ($ts['end'] ?? 0.0))
+                . "\n{$txt}\n\n";
+        }
+
+        return $merged;
+    }
+
     private function fetchSubtitleTrack(array $track, string $baseUrl, callable $resolve): array
     {
         $subsUrl = $resolve($baseUrl, $track['uri']);
         $subsResp = Http::timeout(10)->get($subsUrl);
         if ($subsResp->failed()) return ['srt' => '', 'cues' => 0, 'bytes' => 0, 'uri' => $track['uri'] ?? ''];
 
+        $body = $subsResp->body();
         $subsBase = preg_replace('#/[^/]+$#', '/', $subsUrl);
-        preg_match_all('/^(\S+\.vtt)$/m', $subsResp->body(), $vttFiles);
-        if (empty($vttFiles[1])) return ['srt' => '', 'cues' => 0, 'bytes' => 0, 'uri' => $track['uri'] ?? ''];
+        $vttFiles = $this->subtitlePlaylistUris($body);
+        if (empty($vttFiles)) {
+            [$srt, $cues] = $this->vttToSrt($body);
+            return ['srt' => $srt, 'cues' => $cues, 'bytes' => strlen($body), 'uri' => $track['uri'] ?? ''];
+        }
 
-        Log::debug("[DUB] VTT playlist: " . count($vttFiles[1]) . " files, first URL: " . $resolve($subsBase, $vttFiles[1][0]), [
+        Log::debug("[DUB] VTT playlist: " . count($vttFiles) . " files, first URL: " . $resolve($subsBase, $vttFiles[0]), [
             'session' => $this->sessionId,
         ]);
 
         // Download VTT segments in batches of 30 to avoid overwhelming CDN
         $allVtt = '';
         $failed = 0;
-        $batches = array_chunk($vttFiles[1], 30);
+        $batches = array_chunk($vttFiles, 30);
 
         foreach ($batches as $batch) {
             $pool = Http::pool(function ($pool) use ($batch, $subsBase, $resolve) {
@@ -629,42 +723,151 @@ class PrepareInstantDubJob implements ShouldQueue
         }
 
         if ($failed > 0) {
-            Log::debug("[DUB] VTT download: {$failed}/" . count($vttFiles[1]) . " segments failed", [
+            Log::debug("[DUB] VTT download: {$failed}/" . count($vttFiles) . " segments failed", [
                 'session' => $this->sessionId,
             ]);
         }
 
         Log::debug("[DUB] VTT content sample (" . strlen($allVtt) . " bytes): " . substr($allVtt, 0, 500), [
             'session' => $this->sessionId,
-            'vtt_files' => count($vttFiles[1] ?? []),
+            'vtt_files' => count($vttFiles),
         ]);
 
-        // Match VTT cues: optional numeric ID, then timestamp --> timestamp, then text
-        // Supports both "123\n00:00:01.000 --> ..." and "00:00:01.000 --> ..." formats
-        preg_match_all(
-            '/(?:^|\n)(?:\d+\n)?(\d{2}:\d{2}:\d{2}\.\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}\.\d{3})[^\n]*\n((?:(?!\n\n|\nWEBVTT|\n\d{2}:\d{2}:\d{2}\.\d{3}\s*-->).)+)/s',
-            $allVtt, $matches, PREG_SET_ORDER
-        );
+        [$srt, $num] = $this->vttToSrt($allVtt);
 
+        return ['srt' => $srt, 'cues' => $num, 'bytes' => strlen($allVtt), 'uri' => $track['uri'] ?? ''];
+    }
+
+    private function subtitlePlaylistUris(string $body): array
+    {
+        if (str_contains($body, '-->')) {
+            return [];
+        }
+
+        $uris = [];
+        $expectUri = false;
+        foreach (preg_split('/\r\n|\r|\n/', $body) as $line) {
+            $line = trim($line);
+            if ($line === '') {
+                continue;
+            }
+
+            if (str_starts_with($line, '#EXTINF')) {
+                $expectUri = true;
+                continue;
+            }
+
+            if (str_starts_with($line, '#')) {
+                continue;
+            }
+
+            if ($expectUri || preg_match('/\.(?:vtt|webvtt)(?:\?|$)/i', $line)) {
+                $uris[] = $line;
+            }
+            $expectUri = false;
+        }
+
+        return array_values(array_unique($uris));
+    }
+
+    private function vttToSrt(string $vtt): array
+    {
+        $lines = preg_split('/\r\n|\r|\n/', $vtt);
         $seen = [];
         $srt = '';
         $num = 0;
-        foreach ($matches as $m) {
-            $key = "{$m[1]}|{$m[2]}";
-            if (isset($seen[$key])) continue;
+        $count = count($lines);
+
+        for ($i = 0; $i < $count; $i++) {
+            $line = trim((string) $lines[$i]);
+            if ($line === '' || str_starts_with($line, 'WEBVTT')) {
+                continue;
+            }
+
+            if (preg_match('/^(NOTE|STYLE|REGION)\b/i', $line)) {
+                while ($i + 1 < $count && trim((string) $lines[$i + 1]) !== '') {
+                    $i++;
+                }
+                continue;
+            }
+
+            if (!str_contains($line, '-->') && $i + 1 < $count && str_contains((string) $lines[$i + 1], '-->')) {
+                $i++;
+                $line = trim((string) $lines[$i]);
+            }
+
+            if (!preg_match('/^((?:\d{2}:)?\d{2}:\d{2}[\.,]\d{1,3})\s*-->\s*((?:\d{2}:)?\d{2}:\d{2}[\.,]\d{1,3})/', $line, $m)) {
+                continue;
+            }
+
+            $start = $this->normalizeVttTimestampForSrt($m[1]);
+            $end = $this->normalizeVttTimestampForSrt($m[2]);
+            $textLines = [];
+
+            while ($i + 1 < $count) {
+                $i++;
+                $text = trim((string) $lines[$i]);
+                if ($text === '') {
+                    break;
+                }
+                if (str_starts_with($text, 'WEBVTT')) {
+                    continue;
+                }
+                $textLines[] = $text;
+            }
+
+            $text = $this->cleanSubtitleCueText(implode(' ', $textLines));
+            if ($text === '' || preg_match('/^\[.*]$/u', $text) || preg_match('/^♪/u', $text)) {
+                continue;
+            }
+
+            $key = "{$start}|{$end}|{$text}";
+            if (isset($seen[$key])) {
+                continue;
+            }
             $seen[$key] = true;
-            $text = trim($m[3]);
-            // Strip VTT positioning tags like <c> and alignment tags
-            $text = preg_replace('/<[^>]+>/', '', $text);
-            // Strip SSA/ASS override tags like {\an8}
-            $text = preg_replace('/\{\\\\[^}]*\}/', '', $text);
-            $text = trim($text);
-            if ($text === '' || preg_match('/^\[.*\]$/', $text) || preg_match('/^♪/', $text)) continue;
             $num++;
-            $srt .= "{$num}\n" . str_replace('.', ',', $m[1]) . ' --> ' . str_replace('.', ',', $m[2]) . "\n{$text}\n\n";
+            $srt .= "{$num}\n{$start} --> {$end}\n{$text}\n\n";
         }
 
-        return ['srt' => $srt, 'cues' => $num, 'bytes' => strlen($allVtt), 'uri' => $track['uri'] ?? ''];
+        return [$srt, $num];
+    }
+
+    private function cleanSubtitleCueText(string $text): string
+    {
+        $text = html_entity_decode($text, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        $text = preg_replace('/<[^>]+>/', '', $text);
+        $text = preg_replace('/\{\\\\[^}]*\}/', '', $text);
+        $text = preg_replace('/\s+/u', ' ', (string) $text);
+
+        return trim((string) $text);
+    }
+
+    private function normalizeVttTimestampForSrt(string $timestamp): string
+    {
+        $timestamp = str_replace(',', '.', trim($timestamp));
+        if (substr_count($timestamp, ':') === 1) {
+            $timestamp = '00:' . $timestamp;
+        }
+
+        [$h, $m, $sMs] = explode(':', $timestamp);
+        [$s, $ms] = array_pad(explode('.', $sMs, 2), 2, '0');
+        $ms = substr(str_pad($ms, 3, '0'), 0, 3);
+
+        return sprintf('%02d:%02d:%02d,%03d', (int) $h, (int) $m, (int) $s, (int) $ms);
+    }
+
+    private function formatSrtSeconds(float $seconds): string
+    {
+        $milliseconds = (int) round(max(0.0, $seconds) * 1000);
+        $h = intdiv($milliseconds, 3600000);
+        $milliseconds %= 3600000;
+        $m = intdiv($milliseconds, 60000);
+        $milliseconds %= 60000;
+        $s = intdiv($milliseconds, 1000);
+        $ms = $milliseconds % 1000;
+
+        return sprintf('%02d:%02d:%02d,%03d', $h, $m, $s, $ms);
     }
 
     private function fetchBestSubtitleTrack(array $candidates, string $baseUrl, callable $resolve, string $lang): array

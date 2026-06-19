@@ -105,29 +105,49 @@ php artisan queue:restart 2>/dev/null || true
 
 # Kill any lingering queue worker processes
 PID_FILE="$APP_DIR/storage/framework/queue.pid"
-if [ -f "$PID_FILE" ]; then
-    OLD_PID=$(cat "$PID_FILE")
-    if kill -0 "$OLD_PID" 2>/dev/null; then
-        kill "$OLD_PID" 2>/dev/null || true
-        sleep 2
-        kill -9 "$OLD_PID" 2>/dev/null || true
+AUDIO_PID_FILE="$APP_DIR/storage/framework/audio-downloads-queue.pid"
+BG_PID_FILE="$APP_DIR/storage/framework/bg-mix-queue.pid"
+SEGMENT_WORKERS="${SEGMENT_WORKERS:-3}"
+for WORKER_PID_FILE in "$PID_FILE" "$AUDIO_PID_FILE" "$BG_PID_FILE"; do
+    if [ -f "$WORKER_PID_FILE" ]; then
+        OLD_PID=$(cat "$WORKER_PID_FILE")
+        if kill -0 "$OLD_PID" 2>/dev/null; then
+            kill "$OLD_PID" 2>/dev/null || true
+            sleep 2
+            kill -9 "$OLD_PID" 2>/dev/null || true
+        fi
+        rm -f "$WORKER_PID_FILE"
     fi
-    rm -f "$PID_FILE"
-fi
+done
+for i in $(seq 1 "$SEGMENT_WORKERS"); do
+    WORKER_PID_FILE="$APP_DIR/storage/framework/segment-generation-queue-$i.pid"
+    if [ -f "$WORKER_PID_FILE" ]; then
+        OLD_PID=$(cat "$WORKER_PID_FILE")
+        if kill -0 "$OLD_PID" 2>/dev/null; then
+            kill "$OLD_PID" 2>/dev/null || true
+            sleep 2
+            kill -9 "$OLD_PID" 2>/dev/null || true
+        fi
+        rm -f "$WORKER_PID_FILE"
+    fi
+done
 
 # Also kill by process name
 pkill -f "queue:work" 2>/dev/null || true
 sleep 1
 
-# Start fresh queue worker
+# Start fresh queue workers
 LOG_DIR="$HOME/logs"
 LOG_FILE="$LOG_DIR/queue.log"
+SEGMENT_LOG_FILE="$LOG_DIR/segment-generation.log"
+AUDIO_LOG_FILE="$LOG_DIR/audio-downloads.log"
+BG_LOG_FILE="$LOG_DIR/bg-mix.log"
 mkdir -p "$LOG_DIR"
 
-echo "[$(date)] Deploy restart — starting queue worker..." >> "$LOG_FILE"
+echo "[$(date)] Deploy restart — starting main queue worker..." >> "$LOG_FILE"
 
-nohup php -d memory_limit=512M artisan queue:work database \
-    --queue=chunks,segment-processing,segment-generation,default \
+nohup php -d memory_limit=512M artisan queue:work \
+    --queue=chunks,segment-processing,default \
     --sleep=3 \
     --tries=3 \
     --timeout=3600 \
@@ -136,7 +156,52 @@ nohup php -d memory_limit=512M artisan queue:work database \
     >> "$LOG_FILE" 2>&1 &
 
 echo $! > "$PID_FILE"
-echo -e "  Queue worker started (PID: $!) ${GREEN}OK${NC}"
+echo -e "  Main queue worker started (PID: $!) ${GREEN}OK${NC}"
+
+echo "[$(date)] Deploy restart — starting segment-generation workers..." >> "$SEGMENT_LOG_FILE"
+
+for i in $(seq 1 "$SEGMENT_WORKERS"); do
+    SEGMENT_PID_FILE="$APP_DIR/storage/framework/segment-generation-queue-$i.pid"
+    nohup php -d memory_limit=768M artisan queue:work \
+        --queue=segment-generation \
+        --sleep=1 \
+        --tries=3 \
+        --timeout=3600 \
+        --max-jobs=300 \
+        --max-time=3600 \
+        >> "$SEGMENT_LOG_FILE" 2>&1 &
+
+    echo $! > "$SEGMENT_PID_FILE"
+    echo -e "  Segment generation worker #$i started (PID: $!) ${GREEN}OK${NC}"
+done
+
+echo "[$(date)] Deploy restart — starting audio-downloads queue worker..." >> "$AUDIO_LOG_FILE"
+
+nohup php -d memory_limit=512M artisan queue:work \
+    --queue=audio-downloads \
+    --sleep=1 \
+    --tries=3 \
+    --timeout=7200 \
+    --max-jobs=500 \
+    --max-time=7200 \
+    >> "$AUDIO_LOG_FILE" 2>&1 &
+
+echo $! > "$AUDIO_PID_FILE"
+echo -e "  Audio downloads queue worker started (PID: $!) ${GREEN}OK${NC}"
+
+echo "[$(date)] Deploy restart — starting bg-mix queue worker..." >> "$BG_LOG_FILE"
+
+nohup php -d memory_limit=512M artisan queue:work \
+    --queue=bg-mix \
+    --sleep=1 \
+    --tries=3 \
+    --timeout=3600 \
+    --max-jobs=500 \
+    --max-time=3600 \
+    >> "$BG_LOG_FILE" 2>&1 &
+
+echo $! > "$BG_PID_FILE"
+echo -e "  BG mix queue worker started (PID: $!) ${GREEN}OK${NC}"
 
 # ------------------------------------------
 # Maintenance mode OFF & Done
@@ -149,10 +214,19 @@ echo -e "${GREEN}=========================================${NC}"
 echo ""
 echo -e "  Site:       ${CYAN}https://dubbing.uz${NC}"
 echo -e "  Queue log:  ${CYAN}$LOG_FILE${NC}"
+echo -e "  Segment log:${CYAN}$SEGMENT_LOG_FILE${NC}"
+echo -e "  Audio log:  ${CYAN}$AUDIO_LOG_FILE${NC}"
+echo -e "  BG log:     ${CYAN}$BG_LOG_FILE${NC}"
 echo -e "  Queue PID:  ${CYAN}$(cat "$PID_FILE" 2>/dev/null)${NC}"
+echo -e "  Segment PIDs:${CYAN} $(for i in $(seq 1 "$SEGMENT_WORKERS"); do cat "$APP_DIR/storage/framework/segment-generation-queue-$i.pid" 2>/dev/null; printf ' '; done)${NC}"
+echo -e "  Audio PID:  ${CYAN}$(cat "$AUDIO_PID_FILE" 2>/dev/null)${NC}"
+echo -e "  BG PID:     ${CYAN}$(cat "$BG_PID_FILE" 2>/dev/null)${NC}"
 echo ""
 echo -e "${YELLOW}Useful commands:${NC}"
 echo "  tail -f $LOG_FILE            # Watch queue log"
+echo "  tail -f $SEGMENT_LOG_FILE    # Watch translation/TTS log"
+echo "  tail -f $AUDIO_LOG_FILE      # Watch audio download log"
+echo "  tail -f $BG_LOG_FILE         # Watch bg mix log"
 echo "  php artisan queue:failed     # View failed jobs"
 echo "  php artisan queue:retry all  # Retry failed jobs"
 echo ""

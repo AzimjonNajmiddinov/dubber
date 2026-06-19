@@ -4,6 +4,7 @@ namespace App\Jobs;
 
 use App\Support\AudioFrame;
 use App\Support\DubSession;
+use App\Support\InstantDubHlsReadiness;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -67,18 +68,51 @@ class GenerateBgChunkJob implements ShouldQueue, ShouldBeUnique
 
     private function mix(string $bgAudioPath, array $session): void
     {
-        $total    = (int) ($session['total_segments'] ?? 0);
         $aacDir   = DubSession::aacDir($this->sessionId, $session);
 
         if (!is_dir($aacDir)) @mkdir($aacDir, 0755, true);
 
         $chunkDur = round(AudioFrame::alignedDuration($this->startTime, $this->endTime), 6);
-        $outFile  = "{$aacDir}/bg-{$this->chunkIndex}.aac";
+        $outFile  = "{$aacDir}/bg-{$this->chunkIndex}.ts";
         // Write to a temp file, then atomically rename to outFile.
         // This prevents hlsAudioPlaylist from seeing a 0-byte file mid-write
         // (ffmpeg -y truncates the output file before writing), which would
         // cause the HLS EVENT playlist to shrink — a fatal spec violation.
-        $writeFile = "{$aacDir}/bg-{$this->chunkIndex}.aac.tmp";
+        $writeFile = "{$aacDir}/bg-{$this->chunkIndex}.ts.tmp";
+
+        $coverage = InstantDubHlsReadiness::chunkMixCoverage(
+            $this->sessionId,
+            $session,
+            $this->startTime,
+            $this->endTime,
+        );
+
+        if (!$coverage['can_mix']) {
+            if (InstantDubHlsReadiness::chunkHasVerifiedDub($this->sessionId, $session, $this->chunkIndex, null, $aacDir)) {
+                @unlink($writeFile);
+                Log::info("[DUB] bg-{$this->chunkIndex}.ts already verified; ignoring later waiting coverage", [
+                    'session' => $this->sessionId,
+                    'expected_speech' => $coverage['expected_speech'],
+                    'ready_speech' => $coverage['ready_speech'],
+                    'missing_segment_plan' => !empty($coverage['missing_segment_plan']),
+                    'missing' => array_slice($coverage['missing_indexes'] ?? [], 0, 12),
+                ]);
+                $this->checkPlayable($aacDir);
+                return;
+            }
+
+            InstantDubHlsReadiness::markDubChunkWaiting($this->sessionId, $this->chunkIndex, $coverage);
+            @unlink($outFile);
+            @unlink($writeFile);
+            Log::info("[DUB] bg-{$this->chunkIndex}.ts waiting for TTS coverage", [
+                'session' => $this->sessionId,
+                'expected_speech' => $coverage['expected_speech'],
+                'ready_speech' => $coverage['ready_speech'],
+                'missing_segment_plan' => !empty($coverage['missing_segment_plan']),
+                'missing' => array_slice($coverage['missing_indexes'] ?? [], 0, 12),
+            ]);
+            return;
+        }
 
         // Detect channel count of the bg audio chunk
         $chanProbe = Process::timeout(5)->run([
@@ -88,12 +122,7 @@ class GenerateBgChunkJob implements ShouldQueue, ShouldBeUnique
         ]);
         $bgChannels = (int) trim($chanProbe->output());
 
-        // Stereo centre cancellation: dialogue is centre-panned (L≈R), 88% cancellation
-        // removes most of the original speech. Only works with stereo source.
-        // For mono sources, just pass through at normal volume (voice removal impossible).
-        $bgFilter = $bgChannels >= 2
-            ? '[1:a]pan=stereo|c0=c0-0.88*c1|c1=c1-0.88*c0,volume=1.0,aresample=44100[bg]'
-            : '[1:a]volume=1.0,aresample=44100[bg]';
+        $bgFilter = $this->backgroundFilterForMix($bgChannels, (int) ($coverage['expected_speech'] ?? 0));
 
         $cmd = [
             'ffmpeg', '-y',
@@ -104,14 +133,7 @@ class GenerateBgChunkJob implements ShouldQueue, ShouldBeUnique
         $mixInputs = ['[0:a]', '[bg]'];
         $inputIdx  = 2;
 
-        // Fetch all TTS chunks in one Redis pipeline
-        $chunkKeys   = array_map(fn($i) => DubSession::chunkKey($this->sessionId, $i), range(0, max(0, $total - 1)));
-        $chunkValues = $total > 0 ? Redis::mget($chunkKeys) : [];
-
-        foreach ($chunkValues as $i => $chunkJson) {
-            if (!$chunkJson) continue;
-
-            $chunk     = json_decode($chunkJson, true);
+        foreach (($coverage['ready_chunks'] ?? []) as $chunk) {
             $segStart  = (float) ($chunk['start_time'] ?? 0);
             $segEnd    = (float) ($chunk['end_time']   ?? 0);
             $audioPath = $chunk['audio_path']           ?? null;
@@ -138,7 +160,9 @@ class GenerateBgChunkJob implements ShouldQueue, ShouldBeUnique
 
         $cmd = array_merge($cmd, [
             '-filter_complex', $filter,
-            '-ac', '1', '-c:a', 'aac', '-b:a', '96k', '-f', 'adts', $writeFile,
+            '-ac', '1', '-c:a', 'aac', '-b:a', '96k',
+            '-muxdelay', '0', '-muxpreload', '0',
+            '-f', 'mpegts', $writeFile,
         ]);
 
         // Dense-dialogue chunks can have 15+ TTS inputs; give ffmpeg ample time.
@@ -147,7 +171,7 @@ class GenerateBgChunkJob implements ShouldQueue, ShouldBeUnique
 
         if (!$result->successful() || !file_exists($writeFile) || filesize($writeFile) <= 10) {
             @unlink($writeFile);
-            Log::warning("[DUB] bg-{$this->chunkIndex}.aac mix failed", [
+            Log::warning("[DUB] bg-{$this->chunkIndex}.ts mix failed", [
                 'session' => $this->sessionId,
                 'error'   => Str::limit($result->errorOutput(), 300),
             ]);
@@ -156,15 +180,31 @@ class GenerateBgChunkJob implements ShouldQueue, ShouldBeUnique
 
         // Atomic replace: outFile is only visible once fully written
         rename($writeFile, $outFile);
+        $ttsInputs = $inputIdx - 2;
+
+        InstantDubHlsReadiness::markDubChunkReady($this->sessionId, $this->chunkIndex, $coverage, $ttsInputs);
 
         Log::info(
-            "[DUB] bg-{$this->chunkIndex}.aac ready ("
+            "[DUB] bg-{$this->chunkIndex}.ts ready ("
             . round($this->startTime) . '-' . round($this->endTime) . 's'
-            . ', tts=' . ($inputIdx - 2) . ')',
+            . ', tts=' . $ttsInputs . ')',
             ['session' => $this->sessionId]
         );
 
         $this->checkPlayable($aacDir);
+    }
+
+    private function backgroundFilterForMix(int $bgChannels, int $expectedSpeech): string
+    {
+        if ($expectedSpeech <= 0) {
+            return '[1:a]volume=1.0,aresample=44100[bg]';
+        }
+
+        if ($bgChannels >= 2) {
+            return '[1:a]pan=stereo|c0=c0-0.95*c1|c1=c1-0.95*c0,volume=0.18,aresample=44100[bg]';
+        }
+
+        return '[1:a]volume=0.0,aresample=44100[bg]';
     }
 
     private function checkPlayable(string $aacDir): void
@@ -172,33 +212,9 @@ class GenerateBgChunkJob implements ShouldQueue, ShouldBeUnique
         $session = DubSession::get($this->sessionId);
         if (!$session) return;
 
-        // First two mixed chunks at/after the HLS dub start = enough buffer to switch.
-        $dubStartTime = max(0.0, (float) ($session['hls_dub_start_time'] ?? 0.0));
-        $bgHashData = Redis::hgetall(DubSession::bgChunksKey($this->sessionId)) ?? [];
-        ksort($bgHashData, SORT_NUMERIC);
-
-        $buffered = 0;
-        $lastIdx = null;
-        foreach ($bgHashData as $bgIdx => $bgJson) {
-            $bgIdx = (int) $bgIdx;
-            $bg = json_decode($bgJson, true);
-            $start = (float) ($bg['start'] ?? ($bgIdx * 30.0));
-            $end = (float) ($bg['end'] ?? (($bgIdx + 1) * 30.0));
-            if ($end <= $dubStartTime) continue;
-            if ($lastIdx === null) {
-                if ($dubStartTime <= 0.25 && $bgIdx !== 0) return;
-                if ($dubStartTime > 0.25 && $start > $dubStartTime + 0.05) return;
-            }
-            if ($lastIdx !== null && $bgIdx !== $lastIdx + 1) return;
-
-            $f = "{$aacDir}/bg-{$bgIdx}.aac";
-            if (!file_exists($f) || filesize($f) <= 10) return;
-
-            $buffered++;
-            $lastIdx = $bgIdx;
-            if ($buffered >= 2) break;
-        }
-        if ($buffered < 2) return;
+        $window = InstantDubHlsReadiness::readyWindow($this->sessionId, $session, $aacDir);
+        $this->markCompleteIfFullyMixed($session, $window);
+        if (empty($window['ready'])) return;
 
         $ttl = DubSession::TTL;
         $lua = <<<LUA
@@ -207,15 +223,51 @@ class GenerateBgChunkJob implements ShouldQueue, ShouldBeUnique
             local session = cjson.decode(data)
             if not session['playable'] then
                 session['playable'] = true
+                session['hls_switch_verified'] = true
+                session['hls_verified_format'] = 'ts'
                 redis.call('SETEX', KEYS[1], {$ttl}, cjson.encode(session))
                 return 1
             end
+            session['hls_switch_verified'] = true
+            session['hls_verified_format'] = 'ts'
+            redis.call('SETEX', KEYS[1], {$ttl}, cjson.encode(session))
             return 0
         LUA;
 
         $fired = Redis::eval($lua, 1, DubSession::key($this->sessionId));
         if ($fired) {
-            Log::info("[DUB] playable=true (bg-0+bg-1 ready)", ['session' => $this->sessionId]);
+            Log::info("[DUB] playable=true (verified HLS dub runway ready)", [
+                'session' => $this->sessionId,
+                'ready_seconds' => round((float) $window['ready_seconds'], 1),
+                'required_seconds' => round((float) $window['required_seconds'], 1),
+                'last_ready_bg_idx' => $window['last_ready_bg_idx'],
+            ]);
         }
+    }
+
+    private function markCompleteIfFullyMixed(array $session, array $window): void
+    {
+        if (empty($window['complete'])) {
+            return;
+        }
+
+        $ready = (int) ($session['segments_ready'] ?? 0);
+        $total = (int) ($session['total_segments'] ?? 0);
+        if ($total <= 0 || $ready < $total) {
+            return;
+        }
+
+        DubSession::patch($this->sessionId, [
+            'status' => 'complete',
+            'playable' => true,
+            'hls_switch_verified' => true,
+            'hls_verified_format' => 'ts',
+            'hls_ready_seconds' => round((float) $window['ready_seconds'], 3),
+            'hls_required_seconds' => round((float) $window['required_seconds'], 3),
+            'hls_continuous_until' => round((float) $window['continuous_until'], 3),
+            'hls_last_ready_bg_idx' => $window['last_ready_bg_idx'],
+        ]);
+
+        PersistDubCacheJob::dispatch($this->sessionId)->onQueue('default');
     }
 }

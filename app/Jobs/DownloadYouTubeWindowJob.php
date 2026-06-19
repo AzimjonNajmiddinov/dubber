@@ -83,7 +83,7 @@ class DownloadYouTubeWindowJob implements ShouldQueue
                 $chunkEnd,
                 $windowFile,
                 $this->windowStart,
-            )->onQueue('default');
+            )->onQueue('audio-downloads');
 
             $chunkStart = $chunkEnd;
         }

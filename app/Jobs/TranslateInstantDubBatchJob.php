@@ -33,6 +33,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         public string $language,
         public string $translateFrom,
         public int    $segmentOffset = 0,
+        public int    $waveIndex = 0,
     ) {}
 
     public function handle(): void
@@ -48,7 +49,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
 
         $fullDialogueText = Redis::get(DubSession::fullDialogueKey($this->sessionId)) ?? '';
 
-        $batchKey = DubSession::batchKey($this->sessionId, $this->batchIndex);
+        $batchKey = $this->batchKey($this->batchIndex);
         $batchJson = Redis::get($batchKey);
         if (!$batchJson) {
             Log::error("[DUB] [{$this->title}] Batch {$this->batchIndex} data missing from Redis", ['session' => $this->sessionId]);
@@ -67,7 +68,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
 
         try {
             // Translate
-            if ($this->batchIndex === 0) {
+            if ($this->waveIndex === 0 && $this->batchIndex === 0) {
                 $batch = $this->translateBatchZero($batch, $fullDialogueText);
             } else {
                 $batch = $this->translateBatchWithContext($batch, $fullDialogueText);
@@ -83,7 +84,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
 
             // Clone voices with ElevenLabs on batch 0 (first time speakers are identified)
             $sessionTtsDriver = $session['tts_driver'] ?? config('dubber.tts.default', 'edge');
-            if ($this->batchIndex === 0 && $sessionTtsDriver === 'elevenlabs') {
+            if ($this->waveIndex === 0 && $this->batchIndex === 0 && $sessionTtsDriver === 'elevenlabs') {
                 $this->cloneVoicesWithElevenLabs($batch);
             }
         } catch (\Throwable $e) {
@@ -97,7 +98,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
             return;
         }
 
-        // Dispatch TTS for this batch's segments — ALWAYS runs, even if translation failed
+        // Dispatch TTS only after every line produced non-empty translated speech.
         // Post-process: merge rare speakers into nearest common speaker
         $batch = $this->mergeRareSpeakers($batch);
 
@@ -109,22 +110,20 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         $nextBatchFirstStart = null;
         $nextBatchIdx = $this->batchIndex + 1;
         if ($nextBatchIdx < $this->totalBatches) {
-            $nextBatchJson = Redis::get(DubSession::batchKey($this->sessionId, $nextBatchIdx));
+            $nextBatchJson = Redis::get($this->batchKey($nextBatchIdx));
             if ($nextBatchJson) {
                 $nb = json_decode($nextBatchJson, true);
                 $nextBatchFirstStart = (float) ($nb[0]['start'] ?? 0);
             } else {
-                $allSegsJson = Redis::get(DubSession::allSegmentsKey($this->sessionId));
+                $allSegsJson = Redis::get(DubSession::speakableSegmentsKey($this->sessionId));
                 if ($allSegsJson) {
                     $allSegs = json_decode($allSegsJson, true);
                     $nextGlobalIdx = $this->segmentOffset + ($nextBatchIdx * 15);
-                    $nextBatchFirstStart = (float) ($allSegs[$nextGlobalIdx]['start'] ?? 0) ?: null;
+                    $nextBatchFirstStart = (float) ($allSegs[$nextGlobalIdx]['start_time'] ?? 0) ?: null;
                 }
             }
         }
 
-        // Always dispatch — ProcessInstantDubSegmentJob handles empty text via generateBackgroundOnlyAac.
-        // Skipping here would leave segments_ready < total_segments → session never completes.
         foreach ($batch as $localIdx => $seg) {
             $text = trim($seg['text']);
             $text = trim(preg_replace('/\[[^\]]*\]\s*/', '', $text));
@@ -146,6 +145,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
                 $slotEnd,
                 $seg['source_text'] ?? null,
                 $seg['delivery'] ?? null,
+                $this->waveIndex,
             )->onQueue('segment-generation');
         }
 
@@ -158,23 +158,37 @@ class TranslateInstantDubBatchJob implements ShouldQueue
             for ($i = 1; $i < $this->totalBatches; $i++) {
                 self::dispatch(
                     $this->sessionId, $i, $this->totalBatches,
-                    $this->language, $this->translateFrom, $this->segmentOffset,
+                    $this->language, $this->translateFrom, $this->segmentOffset, $this->waveIndex,
                 )->onQueue('segment-generation');
             }
         }
 
         // Atomic counter: last batch to finish does cleanup (non-deterministic with parallel dispatch)
-        $remaining = Redis::decr("instant-dub:{$this->sessionId}:batches-remaining");
+        $remaining = Redis::decr($this->batchesRemainingKey());
         if ($remaining <= 0) {
-            Redis::del(
-                DubSession::fullDialogueKey($this->sessionId),
-                DubSession::allSegmentsKey($this->sessionId),
-                "instant-dub:{$this->sessionId}:batches-remaining",
-            );
-            Log::info("[DUB] [{$this->title}] All {$this->totalBatches} translation batches complete", [
+            Redis::del($this->batchesRemainingKey());
+            Log::info("[DUB] [{$this->title}] Wave {$this->waveIndex} translation batches complete", [
                 'session' => $this->sessionId,
             ]);
         }
+    }
+
+    private function batchKey(int $batchIndex): string
+    {
+        if ($this->waveIndex > 0) {
+            return "instant-dub:{$this->sessionId}:w{$this->waveIndex}:batch:{$batchIndex}";
+        }
+
+        return DubSession::batchKey($this->sessionId, $batchIndex);
+    }
+
+    private function batchesRemainingKey(): string
+    {
+        if ($this->waveIndex > 0) {
+            return "instant-dub:{$this->sessionId}:w{$this->waveIndex}:batches-remaining";
+        }
+
+        return "instant-dub:{$this->sessionId}:batches-remaining";
     }
 
     private function translateBatchZero(array $batch, string $fullDialogueText): array
@@ -903,6 +917,11 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         $translated = trim($content);
         $parsedCount = 0;
         $parsedIndexes = [];
+        $sourceTexts = [];
+        foreach ($batch as $idx => $seg) {
+            $sourceTexts[$idx] = (string) ($seg['raw_text'] ?? ($seg['source_text'] ?? ($seg['text'] ?? '')));
+        }
+
         foreach (preg_split('/\n+/', $translated) as $line) {
             if (preg_match('/^(\d+)\.\s*(?:\[[MFC]\d+\]\s*)?(.+)/', $line, $lm)) {
                 $idx = (int) $lm[1] - 1;
@@ -921,12 +940,30 @@ class TranslateInstantDubBatchJob implements ShouldQueue
             throw new \RuntimeException('Translation response did not contain numbered lines.');
         }
 
+        $missing = [];
         foreach ($batch as $idx => &$seg) {
             if (!isset($parsedIndexes[$idx])) {
-                $seg['text'] = '';
+                $missing[] = $idx + 1;
             }
         }
         unset($seg);
+
+        if (!empty($missing)) {
+            throw new \RuntimeException('Translation response skipped line(s): ' . implode(', ', $missing));
+        }
+
+        $empty = [];
+        foreach ($batch as $idx => $seg) {
+            if (trim((string) ($seg['text'] ?? '')) === '') {
+                $empty[] = $idx + 1;
+            }
+        }
+
+        if (!empty($empty)) {
+            throw new \RuntimeException('Translation response produced empty line(s): ' . implode(', ', $empty));
+        }
+
+        $this->rejectBadTranslationOutput($batch, $sourceTexts);
 
         // Post-process: replace any stray Cyrillic characters with Latin equivalents
         if ($this->language === 'uz') {
@@ -954,24 +991,88 @@ class TranslateInstantDubBatchJob implements ShouldQueue
             unset($seg);
         }
 
-        // Verify translation actually happened — if target is Uzbek (Latin),
-        // check for Cyrillic characters which means text wasn't translated
+        return $batch;
+    }
+
+    private function rejectBadTranslationOutput(array $batch, array $sourceTexts): void
+    {
         if ($this->language === 'uz') {
-            $untranslated = 0;
-            foreach ($batch as $seg) {
-                if (preg_match('/[а-яА-ЯёЁ]{3,}/', $seg['text'] ?? '')) {
-                    $untranslated++;
+            $cyrillic = [];
+            foreach ($batch as $idx => $seg) {
+                if (preg_match('/[а-яА-ЯёЁўқғҳЎҚҒҲ]{3,}/u', $seg['text'] ?? '')) {
+                    $cyrillic[] = $idx + 1;
                 }
             }
-            if ($untranslated > count($batch) * 0.3) {
-                Log::warning("[DUB] [{$this->title}] Batch {$this->batchIndex}: {$untranslated}/" . count($batch) . " segments still in Cyrillic — translation failed, retrying", [
+
+            if (!empty($cyrillic)) {
+                Log::warning("[DUB] [{$this->title}] Batch {$this->batchIndex}: Uzbek translation returned Cyrillic line(s)", [
                     'session' => $this->sessionId,
+                    'lines' => $cyrillic,
                 ]);
-                throw new \RuntimeException("Translation returned untranslated Cyrillic text ({$untranslated}/" . count($batch) . " segments)");
+                throw new \RuntimeException('Translation response used Cyrillic for Uzbek line(s): ' . implode(', ', $cyrillic));
             }
         }
 
-        return $batch;
+        $explicitDifferentSource = $this->translateFrom && $this->translateFrom !== 'auto' && $this->translateFrom !== $this->language;
+        $autoSource = !$this->translateFrom || $this->translateFrom === 'auto';
+        if (!$explicitDifferentSource && !$autoSource) {
+            return;
+        }
+
+        $copied = [];
+        foreach ($batch as $idx => $seg) {
+            $target = (string) ($seg['text'] ?? '');
+            if (
+                $this->looksLikeCopiedSource($sourceTexts[$idx] ?? '', $target)
+                && ($explicitDifferentSource || $this->looksWrongLanguageForTarget($target))
+            ) {
+                $copied[] = $idx + 1;
+            }
+        }
+
+        if (!empty($copied)) {
+            throw new \RuntimeException('Translation response copied source text for line(s): ' . implode(', ', $copied));
+        }
+    }
+
+    private function looksLikeCopiedSource(string $source, string $target): bool
+    {
+        $source = $this->normalizeForTranslationCompare($source);
+        $target = $this->normalizeForTranslationCompare($target);
+        $minLen = min(strlen($source), strlen($target));
+
+        if ($minLen < 10) {
+            return false;
+        }
+
+        if ($source === $target) {
+            return true;
+        }
+
+        similar_text($source, $target, $similarity);
+
+        return $similarity >= 88.0;
+    }
+
+    private function looksWrongLanguageForTarget(string $text): bool
+    {
+        if ($this->language !== 'uz') {
+            return false;
+        }
+
+        $text = mb_strtolower($text, 'UTF-8');
+
+        return (bool) preg_match('/\b(the|and|you|your|we|need|leave|right|now|what|where|when|why|how|hello|world|can|will|have|this|that|with|from|they|them|don\'t|doesn\'t|is|are)\b/u', $text)
+            || (bool) preg_match('/\b(privet|spasibo|pozhaluysta|kak|dela|net|da|horosho|pochemu|chto|gde)\b/u', $text);
+    }
+
+    private function normalizeForTranslationCompare(string $text): string
+    {
+        $text = mb_strtolower($text, 'UTF-8');
+        $text = preg_replace('/\{[^}]*}/u', ' ', $text);
+        $text = preg_replace('/[^\p{L}\p{N}]+/u', '', (string) $text);
+
+        return (string) $text;
     }
 
     private function targetLanguageRules(string $toLang): string
@@ -1042,71 +1143,9 @@ class TranslateInstantDubBatchJob implements ShouldQueue
             'session' => $this->sessionId,
         ]);
 
-        // Generate background-only segments for failed batch so there are no gaps
-        $batchKey = DubSession::batchKey($this->sessionId, $this->batchIndex);
-        $batchJson = Redis::get($batchKey);
-        if ($batchJson) {
-            $batch = json_decode($batchJson, true);
-            $total = (int) ($session['total_segments'] ?? 0);
-
-            foreach ($batch as $i => $seg) {
-                $globalIdx = $this->segmentOffset + ($this->batchIndex * 15) + $i;
-                $startTime = (float) ($seg['start'] ?? 0);
-                $endTime = (float) ($seg['end'] ?? 0);
-
-                // Compute slot end (next segment's start)
-                $slotEnd = null;
-                if (isset($batch[$i + 1])) {
-                    $slotEnd = (float) $batch[$i + 1]['start'];
-                } elseif ($globalIdx + 1 < $total) {
-                    $nextBatchKey = DubSession::batchKey($this->sessionId, $this->batchIndex + 1);
-                    $nextBatchJson = Redis::get($nextBatchKey);
-                    if ($nextBatchJson) {
-                        $nextBatch = json_decode($nextBatchJson, true);
-                        $slotEnd = (float) ($nextBatch[0]['start'] ?? $endTime);
-                    }
-                }
-
-                // Dispatch with empty text — ProcessInstantDubSegmentJob will
-                // generate background-only audio when TTS produces nothing
-                ProcessInstantDubSegmentJob::dispatch(
-                    $this->sessionId,
-                    $globalIdx,
-                    '', // empty text = background-only
-                    $startTime,
-                    $endTime,
-                    $this->language,
-                    'M1',
-                    $slotEnd,
-                )->onQueue('segment-generation');
-            }
-
-            Log::info("[DUB] [{$title}] Dispatched " . count($batch) . " background-only segments for failed batch {$this->batchIndex}", [
-                'session' => $this->sessionId,
-            ]);
-        }
-
-        // Don't set status to 'error' — let remaining batches continue
         $this->updateSession([
-            'last_warning' => "Batch {$this->batchIndex} failed: " . Str::limit($exception->getMessage(), 80),
+            'status' => 'error',
+            'error' => 'Translation failed: ' . Str::limit($exception->getMessage(), 120),
         ]);
-
-        // Chain next batch even on permanent failure — other batches may succeed
-        $nextBatch = $this->batchIndex + 1;
-        if ($nextBatch < $this->totalBatches) {
-            self::dispatch(
-                $this->sessionId,
-                $nextBatch,
-                $this->totalBatches,
-                $this->language,
-                $this->translateFrom,
-                $this->segmentOffset,
-            )->onQueue('default');
-        } else {
-            Redis::del(
-                DubSession::fullDialogueKey($this->sessionId),
-                DubSession::allSegmentsKey($this->sessionId),
-            );
-        }
     }
 }

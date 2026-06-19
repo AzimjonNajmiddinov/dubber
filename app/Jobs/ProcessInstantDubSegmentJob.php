@@ -40,6 +40,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         public ?float  $slotEnd = null,
         public ?string $sourceText = null,
         public ?string $delivery = null, // "emotion|pace" e.g. "angry|fast"
+        public int     $waveIndex = 0,
     ) {}
 
     public function handle(): void
@@ -57,11 +58,12 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         try {
             $slotDuration = $this->endTime - $this->startTime;
 
-            // Empty text = background-only (from failed translation batch)
             if (trim($this->text) === '') {
-                $this->generateBackgroundOnlyAac($session);
-                $this->incrementReady();
-                Log::info("[DUB] [{$title}] Segment #{$this->index} ready (background-only, failed translation)", [
+                DubSession::patch($this->sessionId, [
+                    'status' => 'error',
+                    'error' => "TTS text is empty for segment #{$this->index}",
+                ]);
+                Log::error("[DUB] [{$title}] Segment #{$this->index} has empty TTS text; stopping session", [
                     'session' => $this->sessionId,
                 ]);
                 return;
@@ -118,11 +120,13 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                     $this->generateWithEdgeTts($rawMp3, $tmpDir, $speakerEntry);
                 }
             } catch (\Throwable $ttsEx) {
-                Log::warning("[DUB] [{$title}] TTS unavailable for seg #{$this->index} ({$driver}), using background-only: " . $ttsEx->getMessage(), [
+                DubSession::patch($this->sessionId, [
+                    'status' => 'error',
+                    'error' => 'TTS failed: ' . Str::limit($ttsEx->getMessage(), 120),
+                ]);
+                Log::error("[DUB] [{$title}] TTS unavailable for seg #{$this->index} ({$driver}); stopping session: " . $ttsEx->getMessage(), [
                     'session' => $this->sessionId,
                 ]);
-                $this->generateBackgroundOnlyAac($session);
-                $this->incrementReady();
                 return;
             }
 
@@ -208,43 +212,22 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             ]);
 
         } catch (\Throwable $e) {
+            DubSession::patch($this->sessionId, [
+                'status' => 'error',
+                'error' => 'TTS segment failed: ' . Str::limit($e->getMessage(), 120),
+            ]);
             Log::error("[DUB] [{$title}] Segment #{$this->index} FAILED: " . $e->getMessage(), [
                 'session' => $this->sessionId,
             ]);
-
-            // Store error chunk so polling doesn't stall
-            Redis::setex(DubSession::chunkKey($this->sessionId, $this->index), DubSession::TTL, json_encode([
-                'index'          => $this->index,
-                'start_time'     => $this->startTime,
-                'end_time'       => $this->endTime,
-                'text'           => $this->text,
-                'speaker'        => $this->speaker,
-                'audio_path'     => null,
-                'audio_duration' => 0,
-                'error'          => $e->getMessage(),
-            ]));
-
-            $this->incrementReady();
         }
     }
 
     public function failed(\Throwable $exception): void
     {
-        $chunkKey = DubSession::chunkKey($this->sessionId, $this->index);
-        if (!Redis::exists($chunkKey)) {
-            Redis::setex($chunkKey, DubSession::TTL, json_encode([
-                'index'          => $this->index,
-                'start_time'     => $this->startTime,
-                'end_time'       => $this->endTime,
-                'text'           => $this->text,
-                'speaker'        => $this->speaker,
-                'audio_path'     => null,
-                'audio_duration' => 0,
-                'error'          => 'Job killed: ' . Str::limit($exception->getMessage(), 100),
-            ]));
-        }
-
-        $this->incrementReady();
+        DubSession::patch($this->sessionId, [
+            'status' => 'error',
+            'error' => 'TTS segment failed after retries: ' . Str::limit($exception->getMessage(), 120),
+        ]);
 
         Log::error("[DUB] Segment #{$this->index} killed by worker: " . Str::limit($exception->getMessage(), 100), [
             'session' => $this->sessionId,
@@ -813,28 +796,14 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         }
     }
 
-    private function generateBackgroundOnlyAac(array $session): void
-    {
-        Redis::setex(DubSession::chunkKey($this->sessionId, $this->index), DubSession::TTL, json_encode([
-            'index'          => $this->index,
-            'start_time'     => $this->startTime,
-            'end_time'       => $this->endTime,
-            'slot_end'       => $this->slotEnd,
-            'text'           => '',
-            'speaker'        => $this->speaker,
-            'audio_path'     => null,
-            'audio_duration' => 0,
-        ]));
-    }
-
     private function incrementReady(): void
     {
         $sessionKey = DubSession::key($this->sessionId);
 
         // Atomic increment + completion check via Lua.
-        // playable=true is only set here when total_bg_chunks=0 (no bg audio expected).
+        // playable=true is only set here when no video-backed bg audio is expected.
         // When bg audio is present, GenerateBgChunkJob.checkPlayable() sets playable=true
-        // once bg-0+bg-1 are on disk — prevents iOS from loading audio before files exist.
+        // only after a verified contiguous HLS dub runway is ready.
         $ttl = DubSession::TTL;
         $lua = <<<LUA
             local data = redis.call('GET', KEYS[1])
@@ -844,9 +813,10 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             session['last_progress_at'] = tonumber(ARGV[1])
             local total = session['total_segments'] or 999999
             if session['segments_ready'] >= total then
-                session['status'] = 'complete'
                 local totalBg = session['total_bg_chunks']
-                if not totalBg or totalBg == 0 then
+                local expectsBg = session['video_url'] ~= nil and session['video_url'] ~= ''
+                if not expectsBg or (totalBg and totalBg == 0) then
+                    session['status'] = 'complete'
                     session['playable'] = true
                 end
             end
@@ -873,9 +843,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         $totalWaves = (int) ($session['total_waves'] ?? 0);
         if ($totalWaves <= 1) return; // single wave — nothing to dispatch
 
-        // Determine which wave this segment belongs to
-        $WAVE_DURATION = 300.0;
-        $waveIndex = (int) floor($this->startTime / $WAVE_DURATION);
+        $waveIndex = $this->waveIndex;
 
         // Read wave progress
         $progressKey = DubSession::waveProgressKey($this->sessionId, $waveIndex);

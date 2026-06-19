@@ -11,6 +11,7 @@ use Illuminate\Support\Facades\Redis;
 class DubSession
 {
     const TTL = 86400; // 24 hours
+    const HLS_MASTER_REWRITE_VERSION = 'v4';
 
     // ── Key builders ──────────────────────────────────────────────────────────
 
@@ -44,6 +45,11 @@ class DubSession
         return "instant-dub:{$id}:all-segments";
     }
 
+    public static function speakableSegmentsKey(string $id): string
+    {
+        return "instant-dub:{$id}:speakable-segments";
+    }
+
     public static function fullDialogueKey(string $id): string
     {
         return "instant-dub:{$id}:full-dialogue";
@@ -62,6 +68,13 @@ class DubSession
     public static function rewrittenMasterKey(string $id): string
     {
         return "instant-dub:{$id}:rewritten-master";
+    }
+
+    public static function rewrittenMasterCacheKey(string $id, bool $playable): string
+    {
+        return static::rewrittenMasterKey($id)
+            . ':' . static::HLS_MASTER_REWRITE_VERSION
+            . ($playable ? ':playable' : ':waiting');
     }
 
     public static function masterPlaylistKey(string $id): string
@@ -153,6 +166,49 @@ class DubSession
         Redis::eval($lua, 1, static::key($id), $patch);
     }
 
+    /** Atomically merge metadata into one background-audio chunk. */
+    public static function mergeBgChunk(string $id, int $index, array $data): void
+    {
+        $ttl = static::TTL;
+        $patch = json_encode($data);
+        $lua = <<<LUA
+            local raw = redis.call('HGET', KEYS[1], ARGV[1])
+            local chunk = {}
+            if raw then chunk = cjson.decode(raw) end
+            local patch = cjson.decode(ARGV[2])
+            for k, v in pairs(patch) do
+                chunk[k] = v
+            end
+            redis.call('HSET', KEYS[1], ARGV[1], cjson.encode(chunk))
+            redis.call('EXPIRE', KEYS[1], {$ttl})
+            return 1
+        LUA;
+
+        Redis::eval($lua, 1, static::bgChunksKey($id), (string) $index, $patch);
+    }
+
+    /** Merge waiting metadata only while the chunk has not already published a dub. */
+    public static function mergeBgChunkIfNotDubReady(string $id, int $index, array $data): void
+    {
+        $ttl = static::TTL;
+        $patch = json_encode($data);
+        $lua = <<<LUA
+            local raw = redis.call('HGET', KEYS[1], ARGV[1])
+            if not raw then return 0 end
+            local chunk = cjson.decode(raw)
+            if chunk['dub_ready'] then return 0 end
+            local patch = cjson.decode(ARGV[2])
+            for k, v in pairs(patch) do
+                chunk[k] = v
+            end
+            redis.call('HSET', KEYS[1], ARGV[1], cjson.encode(chunk))
+            redis.call('EXPIRE', KEYS[1], {$ttl})
+            return 1
+        LUA;
+
+        Redis::eval($lua, 1, static::bgChunksKey($id), (string) $index, $patch);
+    }
+
     public static function isStopped(string $id): bool
     {
         $session = static::get($id);
@@ -183,11 +239,16 @@ class DubSession
     {
         $keys = [
             static::rewrittenMasterKey($id),
+            static::rewrittenMasterKey($id) . ':playable',
+            static::rewrittenMasterKey($id) . ':waiting',
+            static::rewrittenMasterCacheKey($id, true),
+            static::rewrittenMasterCacheKey($id, false),
             static::masterPlaylistKey($id),
             static::vttCacheKey($id),
             static::voicesKey($id),
             static::fullDialogueKey($id),
             static::allSegmentsKey($id),
+            static::speakableSegmentsKey($id),
             static::characterContextKey($id),
             static::bgChunksKey($id),
             static::wavesDispatchedKey($id),

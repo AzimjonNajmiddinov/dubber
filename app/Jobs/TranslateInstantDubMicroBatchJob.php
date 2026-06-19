@@ -58,9 +58,8 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
         }
         $this->mergeVoiceMap($speakers);
 
-        // Dispatch TTS for micro-batch segments (global indices 0, 1, 2, ...)
-        // Always dispatch — ProcessInstantDubSegmentJob handles empty text via generateBackgroundOnlyAac.
-        // Skipping here would leave segments_ready < total_segments → session never completes.
+        // Dispatch TTS for micro-batch segments (global indices 0, 1, 2, ...).
+        // Translation parsing has already rejected skipped or empty lines.
         foreach ($translated as $i => $seg) {
             $text = trim($seg['text']);
             $text = trim(preg_replace('/\[[^\]]*\]\s*/', '', $text));
@@ -77,9 +76,9 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
                 $seg['start'], $seg['end'], $this->language,
                 $seg['speaker'] ?? 'M1',
                 $slotEnd,
-                $seg['source_text'] ?? null,
+                $seg['source_text'] ?? ($this->segments[$i]['text'] ?? null),
                 $seg['delivery'] ?? null,
-                $this->segments[$i]['text'] ?? null,
+                0,
             )->onQueue('segment-generation');
         }
 
@@ -307,6 +306,11 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
         $translated = trim($content);
         $parsedCount = 0;
         $parsedIndexes = [];
+        $sourceTexts = [];
+        foreach ($batch as $idx => $seg) {
+            $sourceTexts[$idx] = (string) ($seg['raw_text'] ?? ($seg['source_text'] ?? ($seg['text'] ?? '')));
+        }
+
         foreach (preg_split('/\n+/', $translated) as $line) {
             if (preg_match('/^(\d+)\.\s*(?:\[[MFC]\d+\]\s*)?(.+)/', $line, $lm)) {
                 $idx = (int) $lm[1] - 1;
@@ -325,12 +329,30 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
             throw new \RuntimeException('Translation response did not contain numbered lines.');
         }
 
+        $missing = [];
         foreach ($batch as $idx => &$seg) {
             if (!isset($parsedIndexes[$idx])) {
-                $seg['text'] = '';
+                $missing[] = $idx + 1;
             }
         }
         unset($seg);
+
+        if (!empty($missing)) {
+            throw new \RuntimeException('Translation response skipped line(s): ' . implode(', ', $missing));
+        }
+
+        $empty = [];
+        foreach ($batch as $idx => $seg) {
+            if (trim((string) ($seg['text'] ?? '')) === '') {
+                $empty[] = $idx + 1;
+            }
+        }
+
+        if (!empty($empty)) {
+            throw new \RuntimeException('Translation response produced empty line(s): ' . implode(', ', $empty));
+        }
+
+        $this->rejectBadTranslationOutput($batch, $sourceTexts);
 
         // Replace stray Cyrillic characters with Latin equivalents
         if ($this->language === 'uz') {
@@ -359,6 +381,83 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
         }
 
         return $batch;
+    }
+
+    private function rejectBadTranslationOutput(array $batch, array $sourceTexts): void
+    {
+        if ($this->language === 'uz') {
+            $cyrillic = [];
+            foreach ($batch as $idx => $seg) {
+                if (preg_match('/[а-яА-ЯёЁўқғҳЎҚҒҲ]{3,}/u', $seg['text'] ?? '')) {
+                    $cyrillic[] = $idx + 1;
+                }
+            }
+
+            if (!empty($cyrillic)) {
+                throw new \RuntimeException('Translation response used Cyrillic for Uzbek line(s): ' . implode(', ', $cyrillic));
+            }
+        }
+
+        $explicitDifferentSource = $this->translateFrom && $this->translateFrom !== 'auto' && $this->translateFrom !== $this->language;
+        $autoSource = !$this->translateFrom || $this->translateFrom === 'auto';
+        if (!$explicitDifferentSource && !$autoSource) {
+            return;
+        }
+
+        $copied = [];
+        foreach ($batch as $idx => $seg) {
+            $target = (string) ($seg['text'] ?? '');
+            if (
+                $this->looksLikeCopiedSource($sourceTexts[$idx] ?? '', $target)
+                && ($explicitDifferentSource || $this->looksWrongLanguageForTarget($target))
+            ) {
+                $copied[] = $idx + 1;
+            }
+        }
+
+        if (!empty($copied)) {
+            throw new \RuntimeException('Translation response copied source text for line(s): ' . implode(', ', $copied));
+        }
+    }
+
+    private function looksLikeCopiedSource(string $source, string $target): bool
+    {
+        $source = $this->normalizeForTranslationCompare($source);
+        $target = $this->normalizeForTranslationCompare($target);
+        $minLen = min(strlen($source), strlen($target));
+
+        if ($minLen < 10) {
+            return false;
+        }
+
+        if ($source === $target) {
+            return true;
+        }
+
+        similar_text($source, $target, $similarity);
+
+        return $similarity >= 88.0;
+    }
+
+    private function looksWrongLanguageForTarget(string $text): bool
+    {
+        if ($this->language !== 'uz') {
+            return false;
+        }
+
+        $text = mb_strtolower($text, 'UTF-8');
+
+        return (bool) preg_match('/\b(the|and|you|your|we|need|leave|right|now|what|where|when|why|how|hello|world|can|will|have|this|that|with|from|they|them|don\'t|doesn\'t|is|are)\b/u', $text)
+            || (bool) preg_match('/\b(privet|spasibo|pozhaluysta|kak|dela|net|da|horosho|pochemu|chto|gde)\b/u', $text);
+    }
+
+    private function normalizeForTranslationCompare(string $text): string
+    {
+        $text = mb_strtolower($text, 'UTF-8');
+        $text = preg_replace('/\{[^}]*}/u', ' ', $text);
+        $text = preg_replace('/[^\p{L}\p{N}]+/u', '', (string) $text);
+
+        return (string) $text;
     }
 
     private function targetLanguageRules(string $toLang): string

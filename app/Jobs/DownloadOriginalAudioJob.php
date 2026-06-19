@@ -43,6 +43,10 @@ class DownloadOriginalAudioJob implements ShouldQueue
 
         $segments = $this->parseAudioPlaylist();
         if (empty($segments)) {
+            DubSession::patch($this->sessionId, [
+                'status' => 'error',
+                'error' => 'No audio segments found in HLS source.',
+            ]);
             Log::warning("[DUB] No audio segments found in HLS", ['session' => $this->sessionId]);
             return;
         }
@@ -51,9 +55,39 @@ class DownloadOriginalAudioJob implements ShouldQueue
         Redis::setex(DubSession::audioSegmentsKey($this->sessionId), 86400, json_encode($segments));
         DubSession::patch($this->sessionId, ['video_duration' => $totalDuration]);
 
+        $session = DubSession::get($this->sessionId) ?? $session;
+        $subtitleEnd = (float) ($session['expected_duration'] ?? 0.0);
+        if ($this->subtitleCoverageLooksBroken($subtitleEnd, $totalDuration)) {
+            DubSession::patch($this->sessionId, [
+                'status' => 'error',
+                'error' => sprintf(
+                    'Subtitle track looks broken: captions end at %ss but HLS audio is %ss.',
+                    round($subtitleEnd, 1),
+                    round($totalDuration, 1),
+                ),
+            ]);
+            Log::warning("[DUB] HLS subtitle coverage too short; refusing background-only dub", [
+                'session' => $this->sessionId,
+                'subtitle_end' => $subtitleEnd,
+                'video_duration' => $totalDuration,
+            ]);
+            return;
+        }
+
         $this->dispatchChunks($totalDuration, function (int $idx, float $start, float $end) {
-            DownloadAudioChunkJob::dispatch($this->sessionId, $idx, $start, $end)->onQueue('default');
+            DownloadAudioChunkJob::dispatch($this->sessionId, $idx, $start, $end)->onQueue('audio-downloads');
         }, segments: $segments);
+    }
+
+    private function subtitleCoverageLooksBroken(float $subtitleEnd, float $totalDuration): bool
+    {
+        if ($totalDuration < 600.0 || $subtitleEnd <= 0.0) {
+            return false;
+        }
+
+        $missingTail = $totalDuration - $subtitleEnd;
+
+        return $subtitleEnd < ($totalDuration * 0.7) && $missingTail > 300.0;
     }
 
     private function parseAudioPlaylist(): array
@@ -67,43 +101,63 @@ class DownloadOriginalAudioJob implements ShouldQueue
             $baseUrl = preg_replace('#/[^/]+$#', '/', $urlWithoutQuery);
             $query = parse_url($this->videoUrl, PHP_URL_QUERY) ?? '';
 
-            // Find first audio track
-            preg_match_all('/^#EXT-X-MEDIA:.*TYPE=AUDIO.*$/m', $master, $audioLines);
-            $audioUri = null;
-            foreach ($audioLines[0] ?? [] as $line) {
-                if (preg_match('/URI="([^"]+)"/', $line, $m)) {
-                    $audioUri = $m[1];
-                    break;
+            $playlistUrl = $this->videoUrl;
+            $playlistBody = $master;
+
+            if (!str_contains($master, '#EXTINF')) {
+                // Prefer a dedicated audio rendition, but fall back to the first
+                // media variant for muxed HLS where audio lives inside TS/fMP4.
+                preg_match_all('/^#EXT-X-MEDIA:.*TYPE=AUDIO.*$/m', $master, $audioLines);
+                $playlistUri = null;
+                foreach ($audioLines[0] ?? [] as $line) {
+                    if (preg_match('/URI="([^"]+)"/', $line, $m)) {
+                        $playlistUri = $m[1];
+                        break;
+                    }
                 }
+
+                if (!$playlistUri) {
+                    $playlistUri = $this->firstVariantPlaylistUri($master);
+                }
+
+                if (!$playlistUri) return [];
+
+                $playlistUrl = $this->resolveHlsUrl($baseUrl, $playlistUri, $query);
+                $playlistResp = Http::timeout(10)->get($playlistUrl);
+                if ($playlistResp->failed()) return [];
+                $playlistBody = $playlistResp->body();
             }
-            if (!$audioUri) return [];
 
-            $audioPlaylistUrl = str_starts_with($audioUri, 'http') ? $audioUri : $baseUrl . $audioUri;
-            if ($query) $audioPlaylistUrl .= (str_contains($audioPlaylistUrl, '?') ? '&' : '?') . $query;
-
-            $audioResp = Http::timeout(10)->get($audioPlaylistUrl);
-            if ($audioResp->failed()) return [];
-
-            $audioBase = preg_replace('#/[^/]+$#', '/', strtok($audioPlaylistUrl, '?'));
+            $audioBase = preg_replace('#/[^/]+$#', '/', strtok($playlistUrl, '?'));
 
             // Parse #EXTINF durations and segment URLs
             $segments = [];
-            $lines = explode("\n", $audioResp->body());
+            $lines = explode("\n", $playlistBody);
             $nextDuration = null;
+            $currentTime = 0.0;
+            $currentKeyTag = null;
+            $currentMapTag = null;
 
             foreach ($lines as $line) {
                 $trimmed = trim($line);
-                if (preg_match('/^#EXTINF:([\d.]+)/', $trimmed, $m)) {
+                if (str_starts_with($trimmed, '#EXT-X-KEY:')) {
+                    $currentKeyTag = $this->resolveHlsTagUri($trimmed, $audioBase, $query);
+                } elseif (str_starts_with($trimmed, '#EXT-X-MAP:')) {
+                    $currentMapTag = $this->resolveHlsTagUri($trimmed, $audioBase, $query);
+                } elseif (preg_match('/^#EXTINF:([\d.]+)/', $trimmed, $m)) {
                     $nextDuration = (float) $m[1];
                 } elseif ($nextDuration !== null && $trimmed !== '' && !str_starts_with($trimmed, '#')) {
-                    $url = str_starts_with($trimmed, 'http') ? $trimmed : $audioBase . $trimmed;
-                    if ($query && !str_contains($url, '?')) {
-                        $url .= '?' . $query;
-                    }
+                    $segmentStart = $currentTime;
+                    $segmentEnd = $segmentStart + $nextDuration;
                     $segments[] = [
-                        'url' => $url,
+                        'url' => $this->resolveHlsUrl($audioBase, $trimmed, $query),
                         'duration' => $nextDuration,
+                        'start' => $segmentStart,
+                        'end' => $segmentEnd,
+                        'key' => $currentKeyTag,
+                        'map' => $currentMapTag,
                     ];
+                    $currentTime = $segmentEnd;
                     $nextDuration = null;
                 }
             }
@@ -116,6 +170,58 @@ class DownloadOriginalAudioJob implements ShouldQueue
             ]);
             return [];
         }
+    }
+
+    private function firstVariantPlaylistUri(string $master): ?string
+    {
+        $expectUri = false;
+        foreach (explode("\n", $master) as $line) {
+            $trimmed = trim($line);
+            if (str_starts_with($trimmed, '#EXT-X-STREAM-INF')) {
+                $expectUri = true;
+                continue;
+            }
+            if ($expectUri && $trimmed !== '' && !str_starts_with($trimmed, '#')) {
+                return $trimmed;
+            }
+        }
+
+        return null;
+    }
+
+    private function resolveHlsUrl(string $baseUrl, string $uri, string $parentQuery = ''): string
+    {
+        if (str_starts_with($uri, 'http')) {
+            return $uri;
+        }
+
+        if (str_starts_with($uri, '//')) {
+            return 'https:' . $uri;
+        }
+
+        if (str_starts_with($uri, '/')) {
+            $parts = parse_url($baseUrl);
+            $origin = ($parts['scheme'] ?? 'https') . '://' . ($parts['host'] ?? '');
+            if (!empty($parts['port'])) {
+                $origin .= ':' . $parts['port'];
+            }
+            $url = $origin . $uri;
+        } else {
+            $url = rtrim($baseUrl, '/') . '/' . $uri;
+        }
+
+        if ($parentQuery && !str_contains($url, '?')) {
+            $url .= '?' . $parentQuery;
+        }
+
+        return $url;
+    }
+
+    private function resolveHlsTagUri(string $tag, string $baseUrl, string $parentQuery = ''): string
+    {
+        return preg_replace_callback('/URI="([^"]+)"/', function ($m) use ($baseUrl, $parentQuery) {
+            return 'URI="' . $this->resolveHlsUrl($baseUrl, $m[1], $parentQuery) . '"';
+        }, $tag);
     }
 
     private function handleYoutubeDirectUrl(string $audioUrl): void
@@ -191,13 +297,12 @@ class DownloadOriginalAudioJob implements ShouldQueue
         for ($idx = 0; $idx < $totalBgChunks; $idx++) {
             $start = $idx * DownloadYouTubeWindowJob::CHUNK_SIZE;
             $end = min($start + DownloadYouTubeWindowJob::CHUNK_SIZE, $totalDuration);
-            Redis::hset(DubSession::bgChunksKey($this->sessionId), (string) $idx, json_encode([
+            DubSession::mergeBgChunk($this->sessionId, $idx, [
                 'start'   => $start,
                 'end'     => $end,
                 'planned' => true,
-            ]));
+            ]);
         }
-        Redis::expire(DubSession::bgChunksKey($this->sessionId), DubSession::TTL);
 
         // Dispatch one window job per 5-minute slice (FIFO: window 0 starts TTS immediately)
         $windowSize  = 300.0; // 5 minutes
@@ -205,7 +310,7 @@ class DownloadOriginalAudioJob implements ShouldQueue
         for ($start = 0.0; $start < $totalDuration; $start += $windowSize) {
             $end = min($start + $windowSize, $totalDuration);
             DownloadYouTubeWindowJob::dispatch($this->sessionId, $this->videoUrl, $windowIndex++, $start, $end)
-                ->onQueue('default');
+                ->onQueue('audio-downloads');
         }
 
         Log::info("[DUB] YouTube: dispatched {$windowIndex} windows for {$totalDuration}s", [
@@ -255,7 +360,7 @@ class DownloadOriginalAudioJob implements ShouldQueue
         DubSession::patch($this->sessionId, ['video_duration' => $totalDuration]);
 
         $this->dispatchChunks($totalDuration, function (int $idx, float $start, float $end) use ($audioPath) {
-            DownloadAudioChunkJob::dispatch($this->sessionId, $idx, $start, $end, $audioPath)->onQueue('default');
+            DownloadAudioChunkJob::dispatch($this->sessionId, $idx, $start, $end, $audioPath)->onQueue('audio-downloads');
         });
     }
 
@@ -298,13 +403,12 @@ class DownloadOriginalAudioJob implements ShouldQueue
         // Write total BEFORE dispatching so hlsAudioPlaylist sees it immediately
         DubSession::patch($this->sessionId, ['total_bg_chunks' => $chunkIndex]);
         foreach ($pendingChunks as [$idx, $start, $end]) {
-            Redis::hset(DubSession::bgChunksKey($this->sessionId), (string) $idx, json_encode([
+            DubSession::mergeBgChunk($this->sessionId, $idx, [
                 'start'   => $start,
                 'end'     => $end,
                 'planned' => true,
-            ]));
+            ]);
         }
-        Redis::expire(DubSession::bgChunksKey($this->sessionId), DubSession::TTL);
 
         foreach ($pendingChunks as [$idx, $start, $end]) {
             $dispatch($idx, $start, $end);
