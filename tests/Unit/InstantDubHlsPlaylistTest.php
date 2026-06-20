@@ -191,6 +191,25 @@ class InstantDubHlsPlaylistTest extends TestCase
         $this->assertSame('video/mp2t', $response->headers->get('Content-Type'));
     }
 
+    public function test_cached_hls_slice_refreshes_when_source_chunk_is_newer(): void
+    {
+        $aacDir = $this->tempDir();
+        $sliceFile = $this->tempFile("{$aacDir}/bg-2-from-2500.ts", str_repeat('s', 128));
+        $sourceFile = $this->tempFile("{$aacDir}/bg-2.ts", str_repeat('d', 128));
+
+        touch($sliceFile, time() - 20);
+        touch($sourceFile, time());
+
+        $method = new ReflectionMethod(InstantDubController::class, 'hlsSliceNeedsRefresh');
+        $method->setAccessible(true);
+
+        $this->assertTrue($method->invoke(new InstantDubController(), $sliceFile, $sourceFile));
+
+        touch($sliceFile, time() + 20);
+
+        $this->assertFalse($method->invoke(new InstantDubController(), $sliceFile, $sourceFile));
+    }
+
     public function test_verified_hls_format_without_current_runway_is_not_playable(): void
     {
         $sessionId = 'verified-switch-test';

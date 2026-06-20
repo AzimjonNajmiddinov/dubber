@@ -939,7 +939,7 @@ class InstantDubController extends Controller
         }
 
         $sliceFile = "{$aacDir}/bg-{$index}-from-{$offsetMs}.ts";
-        if (!file_exists($sliceFile) || filesize($sliceFile) <= 10) {
+        if ($this->hlsSliceNeedsRefresh($sliceFile, $aacFile)) {
             $tmpFile = "{$sliceFile}.tmp." . getmypid();
             $result = Process::timeout(30)->run([
                 'ffmpeg', '-y',
@@ -968,6 +968,19 @@ class InstantDubController extends Controller
             'Access-Control-Allow-Origin' => '*',
             'Cache-Control' => $cache,
         ]);
+    }
+
+    private function hlsSliceNeedsRefresh(string $sliceFile, string $sourceFile): bool
+    {
+        if (!file_exists($sliceFile) || filesize($sliceFile) <= 10) {
+            return true;
+        }
+
+        if (!file_exists($sourceFile) || filesize($sourceFile) <= 10) {
+            return true;
+        }
+
+        return filemtime($sliceFile) < filemtime($sourceFile);
     }
 
     public function hlsTailSegment(string $sessionId)

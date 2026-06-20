@@ -87,6 +87,23 @@ class GenerateBgChunkJobTest extends TestCase
         $this->assertStringNotContainsString('volume=1.0', $filter);
     }
 
+    public function test_remixed_chunk_clears_cached_partial_slices(): void
+    {
+        $aacDir = $this->tempDir();
+        $sliceA = $this->tempFile("{$aacDir}/bg-2-from-2500.ts", str_repeat('s', 128));
+        $sliceB = $this->tempFile("{$aacDir}/bg-2-from-5000.ts", str_repeat('s', 128));
+        $otherChunkSlice = $this->tempFile("{$aacDir}/bg-3-from-2500.ts", str_repeat('o', 128));
+
+        $job = new GenerateBgChunkJob('slice-clear-test', 2, 64.0, 96.0);
+        $method = new ReflectionMethod($job, 'clearCachedSlices');
+        $method->setAccessible(true);
+        $method->invoke($job, $aacDir);
+
+        $this->assertFileDoesNotExist($sliceA);
+        $this->assertFileDoesNotExist($sliceB);
+        $this->assertFileExists($otherChunkSlice);
+    }
+
     public function test_stereo_dialogue_chunks_are_center_cancelled_and_suppressed(): void
     {
         $filter = $this->backgroundFilterForMix(channels: 2, expectedSpeech: 2);

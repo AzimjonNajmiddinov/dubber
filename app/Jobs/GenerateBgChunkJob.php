@@ -180,6 +180,7 @@ class GenerateBgChunkJob implements ShouldQueue, ShouldBeUnique
 
         // Atomic replace: outFile is only visible once fully written
         rename($writeFile, $outFile);
+        $this->clearCachedSlices($aacDir);
         $ttsInputs = $inputIdx - 2;
 
         InstantDubHlsReadiness::markDubChunkReady($this->sessionId, $this->chunkIndex, $coverage, $ttsInputs);
@@ -192,6 +193,13 @@ class GenerateBgChunkJob implements ShouldQueue, ShouldBeUnique
         );
 
         $this->checkPlayable($aacDir);
+    }
+
+    private function clearCachedSlices(string $aacDir): void
+    {
+        foreach (glob("{$aacDir}/bg-{$this->chunkIndex}-from-*.ts") ?: [] as $sliceFile) {
+            @unlink($sliceFile);
+        }
     }
 
     private function backgroundFilterForMix(int $bgChannels, int $expectedSpeech): string
