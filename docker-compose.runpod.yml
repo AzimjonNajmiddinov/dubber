@@ -38,7 +38,7 @@ services:
     environment:
       <<: *instant-dub-environment
     container_name: movie_dubber_queue
-    command: php -d memory_limit=1G artisan queue:work --queue=chunks,segment-processing,segment-generation,default --sleep=3 --tries=2 --timeout=600
+    command: php -d memory_limit=1G artisan queue:work --queue=audio-downloads,bg-mix,chunks,segment-processing,segment-generation,default --sleep=3 --tries=2 --timeout=900
     volumes:
       - .:/var/www
       - ./docker/php/php.ini:/usr/local/etc/php/conf.d/uploads.ini
