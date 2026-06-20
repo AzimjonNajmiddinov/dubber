@@ -159,11 +159,15 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
             ['role' => 'user', 'content' => "Translate:\n\n" . implode("\n", $lines)],
         ];
 
+        $providerFailures = [];
         $localTranslator = app(LocalTranslationClient::class);
         if ($localTranslator->enabled()) {
             $result = $localTranslator->chat($messages, timeout: 60, maxTokens: 2048);
             if ($result !== null) {
-                return $this->parseTranslationResponse($segments, $result);
+                $parsed = $this->tryParseProviderTranslation('local translation', $segments, $result, $providerFailures);
+                if ($parsed !== null) {
+                    return $parsed;
+                }
             }
         }
 
@@ -173,16 +177,30 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
             if ($uzResult !== null) {
                 return $uzResult;
             }
+
+            $providerFailures[] = config('services.uzbektranslator.url')
+                ? 'uzbekTranslator returned no usable output'
+                : 'uzbekTranslator not configured';
         }
 
         if ($localTranslator->enabled() && !$localTranslator->allowPaidFallback()) {
-            throw new \RuntimeException('Local translation returned no usable micro-batch output.');
+            $reason = $providerFailures
+                ? ': ' . implode('; ', $providerFailures)
+                : '.';
+            throw new \RuntimeException('Local translation returned no usable micro-batch output' . $reason);
         }
 
         // Try Claude
         $result = $this->callAnthropic($messages);
         if ($result !== null) {
-            return $this->parseTranslationResponse($segments, $result);
+            $parsed = $this->tryParseProviderTranslation('Claude', $segments, $result, $providerFailures);
+            if ($parsed !== null) {
+                return $parsed;
+            }
+        } else {
+            $providerFailures[] = config('services.anthropic.key')
+                ? 'Claude returned no response'
+                : 'Claude not configured';
         }
 
         // Fallback: GPT-4o
@@ -195,11 +213,41 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
                     'messages' => $messages,
                 ]);
             if ($resp->successful()) {
-                return $this->parseTranslationResponse($segments, $resp->json('choices.0.message.content') ?? '');
+                $parsed = $this->tryParseProviderTranslation(
+                    'OpenAI',
+                    $segments,
+                    $resp->json('choices.0.message.content') ?? '',
+                    $providerFailures
+                );
+                if ($parsed !== null) {
+                    return $parsed;
+                }
+            } else {
+                $providerFailures[] = 'OpenAI HTTP ' . $resp->status();
             }
+        } else {
+            $providerFailures[] = 'OpenAI not configured';
         }
 
-        throw new \RuntimeException('No translation provider returned usable micro-batch output.');
+        $reason = $providerFailures
+            ? ': ' . implode('; ', array_unique($providerFailures))
+            : '.';
+        throw new \RuntimeException('No translation provider returned usable micro-batch output' . $reason);
+    }
+
+    private function tryParseProviderTranslation(string $provider, array $segments, string $content, array &$providerFailures): ?array
+    {
+        try {
+            return $this->parseTranslationResponse($segments, $content);
+        } catch (\Throwable $e) {
+            $providerFailures[] = "{$provider}: " . $e->getMessage();
+            Log::warning("[DUB] Micro-batch {$provider} output rejected: " . $e->getMessage(), [
+                'session' => $this->sessionId,
+                'sample' => Str::limit($content, 500),
+            ]);
+
+            return null;
+        }
     }
 
     /**
@@ -312,12 +360,13 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
         }
 
         foreach (preg_split('/\n+/', $translated) as $line) {
-            if (preg_match('/^(\d+)\.\s*(?:\[[MFC]\d+\]\s*)?(.+)/', $line, $lm)) {
-                $idx = (int) $lm[1] - 1;
+            $parsedLine = $this->parseNumberedTranslationLine($line);
+            if ($parsedLine !== null) {
+                [$idx, $text] = $parsedLine;
                 if (isset($batch[$idx])) {
                     $batch[$idx]['speaker'] = 'M1';
                     $batch[$idx]['text']    = $this->sanitizeForTts(
-                        $this->extractDelivery(trim($lm[2]), $batch[$idx])
+                        $this->extractDelivery($text, $batch[$idx])
                     );
                     $parsedCount++;
                     $parsedIndexes[$idx] = true;
@@ -381,6 +430,22 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
         $this->rejectBadTranslationOutput($batch, $sourceTexts);
 
         return $batch;
+    }
+
+    private function parseNumberedTranslationLine(string $line): ?array
+    {
+        $line = trim($line);
+        if ($line === '' || str_starts_with($line, '```')) {
+            return null;
+        }
+
+        if (!preg_match('/^\s*(?:[-*•]\s*)?(?:\*\*)?(?:\[(\d+)\]|(\d+))(?:\*\*)?\s*(?:[.)\:：]|[-–—])?\s*(?:\*\*)?\s*(?:\[[MFC]\d+\]\s*)?(.+?)\s*$/u', $line, $m)) {
+            return null;
+        }
+
+        $number = $m[1] !== '' ? $m[1] : $m[2];
+
+        return [(int) $number - 1, trim($m[3])];
     }
 
     private function rejectBadTranslationOutput(array $batch, array $sourceTexts): void

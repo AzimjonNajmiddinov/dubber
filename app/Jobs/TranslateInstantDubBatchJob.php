@@ -222,6 +222,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
 
         $characterContext = '';
         $translationResult = null;
+        $providerFailures = [];
         $localTranslator = app(LocalTranslationClient::class);
 
         if ($localTranslator->enabled()) {
@@ -234,12 +235,18 @@ class TranslateInstantDubBatchJob implements ShouldQueue
             $translationResult = $localTranslator->chat($translationMessages, timeout: 90, maxTokens: 4096);
             if ($translationResult) {
                 Redis::setex(DubSession::characterContextKey($this->sessionId), DubSession::TTL, $characterContext);
-                return $this->parseTranslationResponse($batch, $translationResult);
+                $parsed = $this->tryParseProviderTranslation('local translation', $batch, $translationResult, $providerFailures);
+                if ($parsed !== null) {
+                    return $parsed;
+                }
             }
 
             if (!$localTranslator->allowPaidFallback()) {
                 Redis::setex(DubSession::characterContextKey($this->sessionId), DubSession::TTL, $characterContext);
-                throw new \RuntimeException('Local translation returned no usable batch 0 output.');
+                $reason = $providerFailures
+                    ? ': ' . implode('; ', $providerFailures)
+                    : '.';
+                throw new \RuntimeException('Local translation returned no usable batch 0 output' . $reason);
             }
         }
 
@@ -312,7 +319,10 @@ class TranslateInstantDubBatchJob implements ShouldQueue
 
         // Use parallel translation result if available
         if ($translationResult) {
-            return $this->parseTranslationResponse($batch, $translationResult);
+            $parsed = $this->tryParseProviderTranslation('Claude', $batch, $translationResult, $providerFailures);
+            if ($parsed !== null) {
+                return $parsed;
+            }
         }
 
         // Fallback: GPT-4o for translation
@@ -324,6 +334,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         $characterContext = Redis::get(DubSession::characterContextKey($this->sessionId)) ?? '';
         $messages = $this->buildTranslationMessages($batch, $characterContext, $fullDialogueText);
         $localTranslator = app(LocalTranslationClient::class);
+        $providerFailures = [];
 
         if ($localTranslator->enabled()) {
             $result = $localTranslator->chat($messages, timeout: 90, maxTokens: 4096);
@@ -331,11 +342,17 @@ class TranslateInstantDubBatchJob implements ShouldQueue
                 Log::debug("[DUB] [{$this->title}] Batch {$this->batchIndex} local response: " . Str::limit($result, 300), [
                     'session' => $this->sessionId,
                 ]);
-                return $this->parseTranslationResponse($batch, $result);
+                $parsed = $this->tryParseProviderTranslation('local translation', $batch, $result, $providerFailures);
+                if ($parsed !== null) {
+                    return $parsed;
+                }
             }
 
             if (!$localTranslator->allowPaidFallback()) {
-                throw new \RuntimeException("Local translation returned no usable output for batch {$this->batchIndex}.");
+                $reason = $providerFailures
+                    ? ': ' . implode('; ', $providerFailures)
+                    : '.';
+                throw new \RuntimeException("Local translation returned no usable output for batch {$this->batchIndex}{$reason}");
             }
         }
 
@@ -345,7 +362,10 @@ class TranslateInstantDubBatchJob implements ShouldQueue
             Log::debug("[DUB] [{$this->title}] Batch {$this->batchIndex} Claude response: " . Str::limit($result, 300), [
                 'session' => $this->sessionId,
             ]);
-            return $this->parseTranslationResponse($batch, $result);
+            $parsed = $this->tryParseProviderTranslation('Claude', $batch, $result, $providerFailures);
+            if ($parsed !== null) {
+                return $parsed;
+            }
         }
 
         // Fallback: GPT-4o with retry
@@ -448,6 +468,22 @@ class TranslateInstantDubBatchJob implements ShouldQueue
 
         throw new \RuntimeException('OpenAI translation failed after retries.');
     }
+
+    private function tryParseProviderTranslation(string $provider, array $batch, string $content, array &$providerFailures): ?array
+    {
+        try {
+            return $this->parseTranslationResponse($batch, $content);
+        } catch (\Throwable $e) {
+            $providerFailures[] = "{$provider}: " . $e->getMessage();
+            Log::warning("[DUB] [{$this->title}] Batch {$this->batchIndex} {$provider} output rejected: " . $e->getMessage(), [
+                'session' => $this->sessionId,
+                'sample' => Str::limit($content, 500),
+            ]);
+
+            return null;
+        }
+    }
+
 
     private function cloneVoicesWithElevenLabs(array $batch): void
     {
@@ -923,12 +959,13 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         }
 
         foreach (preg_split('/\n+/', $translated) as $line) {
-            if (preg_match('/^(\d+)\.\s*(?:\[[MFC]\d+\]\s*)?(.+)/', $line, $lm)) {
-                $idx = (int) $lm[1] - 1;
+            $parsedLine = $this->parseNumberedTranslationLine($line);
+            if ($parsedLine !== null) {
+                [$idx, $text] = $parsedLine;
                 if (isset($batch[$idx])) {
                     $batch[$idx]['speaker'] = 'M1';
                     $batch[$idx]['text']    = $this->sanitizeForTts(
-                        $this->extractDelivery(trim($lm[2]), $batch[$idx])
+                        $this->extractDelivery($text, $batch[$idx])
                     );
                     $parsedCount++;
                     $parsedIndexes[$idx] = true;
@@ -992,6 +1029,22 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         $this->rejectBadTranslationOutput($batch, $sourceTexts);
 
         return $batch;
+    }
+
+    private function parseNumberedTranslationLine(string $line): ?array
+    {
+        $line = trim($line);
+        if ($line === '' || str_starts_with($line, '```')) {
+            return null;
+        }
+
+        if (!preg_match('/^\s*(?:[-*•]\s*)?(?:\*\*)?(?:\[(\d+)\]|(\d+))(?:\*\*)?\s*(?:[.)\:：]|[-–—])?\s*(?:\*\*)?\s*(?:\[[MFC]\d+\]\s*)?(.+?)\s*$/u', $line, $m)) {
+            return null;
+        }
+
+        $number = $m[1] !== '' ? $m[1] : $m[2];
+
+        return [(int) $number - 1, trim($m[3])];
     }
 
     private function rejectBadTranslationOutput(array $batch, array $sourceTexts): void

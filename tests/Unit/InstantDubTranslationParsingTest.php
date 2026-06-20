@@ -4,6 +4,9 @@ namespace Tests\Unit;
 
 use App\Jobs\TranslateInstantDubBatchJob;
 use App\Jobs\TranslateInstantDubMicroBatchJob;
+use App\Support\DubSession;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Redis;
 use ReflectionMethod;
 use RuntimeException;
 use Tests\TestCase;
@@ -150,6 +153,87 @@ class InstantDubTranslationParsingTest extends TestCase
         $this->expectExceptionMessage('copied source text for line(s): 1');
 
         $this->invokeParser($job, $batch, '1. We need to leave right now {neutral|normal}');
+    }
+
+    public function test_batch_translation_parser_accepts_common_numbering_formats(): void
+    {
+        $job = new TranslateInstantDubBatchJob('parse-test', 0, 1, 'uz', 'en');
+        $batch = [
+            ['text' => 'Hello there', 'start' => 0.0, 'end' => 1.0],
+            ['text' => 'World is big', 'start' => 1.0, 'end' => 2.0],
+            ['text' => 'Go now', 'start' => 2.0, 'end' => 3.0],
+            ['text' => 'Stay here', 'start' => 3.0, 'end' => 4.0],
+        ];
+
+        $parsed = $this->invokeParser($job, $batch, implode("\n", [
+            '**1.** Salom {neutral|normal}',
+            '2) Dunyo katta {neutral|normal}',
+            '[3] Ketdik {excited|fast}',
+            '4: Shu yerda qol {calm|slow}',
+        ]));
+
+        $this->assertSame('Salom', $parsed[0]['text']);
+        $this->assertSame('Dunyo katta', $parsed[1]['text']);
+        $this->assertSame('Ketdik', $parsed[2]['text']);
+        $this->assertSame('Shu yerda qol', $parsed[3]['text']);
+    }
+
+    public function test_micro_translation_parser_accepts_common_numbering_formats(): void
+    {
+        $job = new TranslateInstantDubMicroBatchJob('parse-test', [], 'uz', 'en');
+        $batch = [
+            ['text' => 'Hello there', 'start' => 0.0, 'end' => 1.0],
+            ['text' => 'World is big', 'start' => 1.0, 'end' => 2.0],
+        ];
+
+        $parsed = $this->invokeParser($job, $batch, implode("\n", [
+            '- 1: Salom {neutral|normal}',
+            '* 2 - Dunyo katta {neutral|normal}',
+        ]));
+
+        $this->assertSame('Salom', $parsed[0]['text']);
+        $this->assertSame('Dunyo katta', $parsed[1]['text']);
+    }
+
+    public function test_micro_translation_falls_back_when_provider_output_is_unusable(): void
+    {
+        config([
+            'services.local_translation.enabled' => false,
+            'services.uzbektranslator.url' => null,
+            'services.anthropic.key' => 'anthropic-test-key',
+            'services.openai.key' => 'openai-test-key',
+        ]);
+
+        Redis::shouldReceive('get')
+            ->once()
+            ->with(DubSession::key('parse-test'))
+            ->andReturn(null);
+
+        Http::fake([
+            'api.anthropic.com/*' => Http::response([
+                'content' => [
+                    ['text' => 'This response is not numbered.'],
+                ],
+            ], 200),
+            'api.openai.com/*' => Http::response([
+                'choices' => [
+                    ['message' => ['content' => '1. Salom {neutral|normal}']],
+                ],
+            ], 200),
+        ]);
+
+        $job = new TranslateInstantDubMicroBatchJob('parse-test', [], 'uz', 'en');
+        $segments = [
+            ['text' => 'Hello there', 'raw_text' => 'Hello there', 'start' => 0.0, 'end' => 1.0],
+        ];
+
+        $method = new ReflectionMethod($job, 'translateMicroBatch');
+        $method->setAccessible(true);
+
+        $translated = $method->invoke($job, $segments, '');
+
+        $this->assertSame('Salom', $translated[0]['text']);
+        Http::assertSentCount(2);
     }
 
     private function invokeParser(object $job, array $batch, string $content): array
