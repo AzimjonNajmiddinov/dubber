@@ -2,8 +2,6 @@
 
 namespace App\Jobs;
 
-use App\Services\ElevenLabs\ElevenLabsClient;
-use App\Services\ElevenLabs\SpeakerSampleExtractor;
 use App\Services\LocalTranslationClient;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -83,11 +81,6 @@ class TranslateInstantDubBatchJob implements ShouldQueue
             }
             $this->mergeVoiceMap($speakers);
 
-            // Clone voices with ElevenLabs on batch 0 (first time speakers are identified)
-            $sessionTtsDriver = $session['tts_driver'] ?? config('dubber.tts.default', 'edge');
-            if ($this->waveIndex === 0 && $this->batchIndex === 0 && $sessionTtsDriver === 'elevenlabs') {
-                $this->cloneVoicesWithElevenLabs($batch);
-            }
         } catch (\Throwable $e) {
             $this->updateSession([
                 'status' => 'error',
@@ -499,105 +492,6 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         }
     }
 
-
-    private function cloneVoicesWithElevenLabs(array $batch): void
-    {
-        $apiKey = config('services.elevenlabs.api_key', '');
-        if ($apiKey === '') return;
-
-        $session = DubSession::get($this->sessionId);
-        if (!$session) return;
-        $originalAudioPath = $session['original_audio_path'] ?? null;
-        if (!$originalAudioPath || !file_exists($originalAudioPath)) return;
-
-        // Load all segments for sample extraction (need original timing + speaker tags)
-        $allSegmentsJson = Redis::get(DubSession::allSegmentsKey($this->sessionId));
-        $allSegments = $allSegmentsJson ? json_decode($allSegmentsJson, true) : [];
-        if (empty($allSegments)) return;
-
-        // Map speaker tags from translated batch onto original segments by index
-        $speakerMap = [];
-        foreach ($batch as $seg) {
-            $tag = $seg['speaker'] ?? 'M1';
-            $speakerMap[$tag] = true;
-        }
-
-        // Assign speaker tags to all segments for extraction
-        // Segments from batch have speakers identified by GPT/Claude
-        $segmentsWithSpeakers = [];
-        foreach ($allSegments as $seg) {
-            $seg['speaker'] = $seg['speaker'] ?? 'M1';
-            $segmentsWithSpeakers[] = $seg;
-        }
-
-        try {
-            $extractor = new SpeakerSampleExtractor();
-            $samples = $extractor->extractSamples($originalAudioPath, $segmentsWithSpeakers);
-
-            if (empty($samples)) return;
-
-            $client = new ElevenLabsClient($apiKey);
-            $voiceKey = DubSession::voicesKey($this->sessionId);
-            $voiceMap = json_decode(Redis::get($voiceKey), true) ?? [];
-            $clonedVoiceIds = [];
-
-            foreach ($samples as $tag => $samplePath) {
-                try {
-                    $voiceId = $client->addVoice("dub-{$this->sessionId}-{$tag}", [$samplePath]);
-                    $voiceMap[$tag] = ['driver' => 'elevenlabs', 'voice_id' => $voiceId];
-                    $clonedVoiceIds[] = $voiceId;
-                    Log::info("[DUB] [{$this->title}] ElevenLabs voice cloned: {$tag} → {$voiceId}", [
-                        'session' => $this->sessionId,
-                    ]);
-                } catch (\Throwable $e) {
-                    Log::warning("[DUB] [{$this->title}] ElevenLabs clone failed for {$tag}, keeping fallback", [
-                        'session' => $this->sessionId,
-                        'error' => $e->getMessage(),
-                    ]);
-                } finally {
-                    @unlink($samplePath);
-                }
-            }
-
-            // For speakers that couldn't be cloned, use ElevenLabs pre-made voices
-            $premadeMale = [
-                'pNInz6obpgDQGcFmaJgB', // Adam
-                'ErXwobaYiN019PkySvjV', // Antoni
-                'VR6AewLTigWG4xSOukaG', // Arnold
-                'yoZ06aMxZJJ28mfd3POQ', // Sam
-            ];
-            $premadeFemale = [
-                'EXAVITQu4vr4xnSDxMaL', // Sarah
-                '21m00Tcm4TlvDq8ikWAM', // Rachel
-                'XB0fDUnXU5powFXDhCwa', // Charlotte
-            ];
-            $maleIdx = count($clonedVoiceIds);
-            $femaleIdx = 0;
-
-            foreach ($speakerMap as $tag => $_) {
-                if (!isset($voiceMap[$tag]) || ($voiceMap[$tag]['driver'] ?? '') !== 'elevenlabs') {
-                    if (str_starts_with($tag, 'F')) {
-                        $voiceMap[$tag] = ['driver' => 'elevenlabs', 'voice_id' => $premadeFemale[$femaleIdx % count($premadeFemale)]];
-                        $femaleIdx++;
-                    } else {
-                        $voiceMap[$tag] = ['driver' => 'elevenlabs', 'voice_id' => $premadeMale[$maleIdx % count($premadeMale)]];
-                        $maleIdx++;
-                    }
-                }
-            }
-
-            Redis::setex($voiceKey, DubSession::TTL, json_encode($voiceMap));
-            if (!empty($clonedVoiceIds)) {
-                Redis::setex(DubSession::elevenLabsVoicesKey($this->sessionId), DubSession::TTL, json_encode($clonedVoiceIds));
-            }
-        } catch (\Throwable $e) {
-            Log::warning("[DUB] [{$this->title}] ElevenLabs voice cloning failed entirely", [
-                'session' => $this->sessionId,
-                'error' => $e->getMessage(),
-            ]);
-        }
-    }
-
     private function extractAndStoreTitle(string $analysisText): void
     {
         $session = DubSession::get($this->sessionId) ?? [];
@@ -723,24 +617,15 @@ class TranslateInstantDubBatchJob implements ShouldQueue
     {
         $voiceKey = DubSession::voicesKey($this->sessionId);
         $lockKey  = DubSession::voicesLockKey($this->sessionId);
-        $sessionData = DubSession::get($this->sessionId) ?? [];
-        $forceVoice = $sessionData['force_voice'] ?? null;
-        $driver = $sessionData['tts_driver'] ?? config('dubber.tts.default', 'edge');
-
-        $forceEntry = $forceVoice ? \App\Services\VoiceMapBuilder::forceVoiceEntry($driver, $forceVoice) : null;
-        $variants   = $forceEntry ? null : \App\Services\VoiceMapBuilder::variantsForDriver($driver, $this->language);
+        $driver = 'edge';
+        $variants = \App\Services\VoiceMapBuilder::variantsForDriver($driver, $this->language);
 
         $lock = Cache::lock($lockKey, 5);
         $voiceMap = [];
-        $lock->block(5, function () use ($voiceKey, $newSpeakers, $forceEntry, $variants, &$voiceMap) {
+        $lock->block(5, function () use ($voiceKey, $newSpeakers, $variants, &$voiceMap) {
             $voiceMap = json_decode(Redis::get($voiceKey) ?? '{}', true) ?: [];
-            if ($forceEntry) {
-                foreach (array_keys($newSpeakers) as $tag) {
-                    $voiceMap[$tag] = $forceEntry;
-                }
-            } else {
-                $voiceMap = \App\Services\VoiceMapBuilder::assignSpeakers($voiceMap, $newSpeakers, $variants);
-            }
+            $voiceMap = array_filter($voiceMap, fn ($entry) => !is_array($entry) || empty($entry['driver']) || $entry['driver'] === 'edge');
+            $voiceMap = \App\Services\VoiceMapBuilder::assignSpeakers($voiceMap, $newSpeakers, $variants);
             Redis::setex($voiceKey, DubSession::TTL, json_encode($voiceMap));
         });
 

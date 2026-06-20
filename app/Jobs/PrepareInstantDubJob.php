@@ -37,36 +37,16 @@ class PrepareInstantDubJob implements ShouldQueue
     {
         $session = DubSession::get($this->sessionId) ?? [];
         $title   = $session['title'] ?? 'Untitled';
-        $forceVoice = $session['force_voice'] ?? null;
-        // Chrome extension (force_voice) → disable prosody transfer so voice stays clean
-        if ($forceVoice && empty($session['disable_prosody'])) {
-            $this->updateSession(['disable_prosody' => true]);
-        }
-
-        $sessionDriver = $session['tts_driver'] ?? config('dubber.tts.default', 'edge');
-        if ($forceVoice && empty($session['force_voice_id']) && $sessionDriver === 'mms') {
-            $fvGender = \App\Services\VoiceMapBuilder::genderFromTag($forceVoice);
-            $voiceFile = null;
-            foreach (['wav', 'mp3', 'm4a'] as $ext) {
-                $p = storage_path("app/voice-pool/{$fvGender}/{$forceVoice}.{$ext}");
-                if (file_exists($p)) { $voiceFile = $p; break; }
-            }
-            if ($voiceFile) {
-                try {
-                    $client = new \App\Services\MmsTts\MmsTtsClient();
-                    $name   = pathinfo($voiceFile, PATHINFO_FILENAME);
-                    $cacheKey = 'voice-pool-id:mms:' . md5($voiceFile);
-                    $voiceId  = Redis::get($cacheKey);
-                    if (!$voiceId) {
-                        $voiceId = $client->findVoiceByName("pool-{$name}") ?? $client->addVoice("pool-{$name}", [$voiceFile]);
-                        Redis::setex($cacheKey, 604800, $voiceId);
-                    }
-                    $this->updateSession(['force_voice_id' => $voiceId]);
-                    Log::info("[DUB] force_voice '{$forceVoice}' pre-registered: {$voiceId}", ['session' => $this->sessionId]);
-                } catch (\Throwable $e) {
-                    Log::warning("[DUB] force_voice pre-register failed: " . $e->getMessage(), ['session' => $this->sessionId]);
-                }
-            }
+        if (($session['tts_driver'] ?? null) !== 'edge' || !empty($session['force_voice']) || !empty($session['force_voice_id'])) {
+            $this->updateSession([
+                'tts_driver' => 'edge',
+                'force_voice' => null,
+                'force_voice_id' => null,
+                'disable_prosody' => false,
+            ]);
+            $session['tts_driver'] = 'edge';
+            unset($session['force_voice'], $session['force_voice_id']);
+            $session['disable_prosody'] = false;
         }
 
         // Fast path: needs_retts — skip translation, re-TTS from saved DB segments
@@ -430,34 +410,8 @@ class PrepareInstantDubJob implements ShouldQueue
 
     private function buildVoiceMap(array $speakers): void
     {
-        $session    = DubSession::get($this->sessionId) ?? [];
-        $forceVoice = $session['force_voice'] ?? null;
-        $driver     = $session['tts_driver'] ?? config('dubber.tts.default', 'edge');
-
-        // Load saved voice map from DB (admin may have customised it)
+        $driver = 'edge';
         $voiceMap = [];
-        if ($this->cachedDubId) {
-            $saved = \App\Models\InstantDubVoiceMap::where('instant_dub_id', $this->cachedDubId)->get();
-            foreach ($saved as $vm) {
-                $voiceMap[$vm->speaker_tag] = is_array($vm->voice_config)
-                    ? $vm->voice_config
-                    : json_decode($vm->voice_config, true);
-            }
-        }
-
-        if ($forceVoice) {
-            $entry = \App\Services\VoiceMapBuilder::forceVoiceEntry($driver, $forceVoice);
-            if ($entry) {
-                foreach (array_keys($speakers) as $tag) {
-                    $voiceMap[$tag] = $entry;
-                }
-                Redis::setex(DubSession::voicesKey($this->sessionId), DubSession::TTL, json_encode($voiceMap));
-                Log::info("[DUB] Voice map built (force_voice={$forceVoice}, driver={$driver}): " . implode(', ', array_keys($speakers)), [
-                    'session' => $this->sessionId,
-                ]);
-                return;
-            }
-        }
 
         $variants = \App\Services\VoiceMapBuilder::variantsForDriver($driver, $this->language);
         $voiceMap = \App\Services\VoiceMapBuilder::assignSpeakers($voiceMap, $speakers, $variants);

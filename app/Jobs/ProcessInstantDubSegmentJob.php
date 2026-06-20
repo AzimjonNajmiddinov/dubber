@@ -7,15 +7,10 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
-use App\Http\Controllers\AdminVoicePoolController;
 use App\Jobs\DispatchWaveJob;
 use App\Jobs\GenerateBgChunkJob;
 use App\Jobs\PersistDubCacheJob;
-use App\Services\ElevenLabs\ElevenLabsClient;
-use App\Services\MmsTts\MmsTtsClient;
 use App\Services\TextNormalizer;
-use App\Services\Tts\Drivers\AishaTtsDriver;
-use App\Support\AudioFrame;
 use App\Support\DubSession;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Process;
@@ -69,75 +64,37 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                 return;
             }
 
-            // 1. Generate TTS audio with configured driver
+            // 1. Generate Edge TTS audio for the current instant-dub flow.
             $tmpDir = '/tmp/instant-dub-' . $this->sessionId;
             @mkdir($tmpDir, 0755, true);
 
             $rawMp3 = "{$tmpDir}/seg_{$this->index}.mp3";
-            $rawWav = "{$tmpDir}/seg_{$this->index}.wav";
 
-            // Read per-speaker voice entry from voice map
+            // Read per-speaker Edge voice entry from voice map.
             $voiceMap     = json_decode(Redis::get(DubSession::voicesKey($this->sessionId)), true) ?? [];
             $speakerEntry = $voiceMap[$this->speaker] ?? [];
-            $driver       = $speakerEntry['driver'] ?? ($session['tts_driver'] ?? config('dubber.tts.default', 'edge'));
-
-            // Voice map expired from Redis — reconstruct from session force_voice
-            if (empty($speakerEntry) && !empty($session['force_voice'])) {
-                $entry = \App\Services\VoiceMapBuilder::forceVoiceEntry($driver, $session['force_voice']);
-                if ($entry) $speakerEntry = $entry;
-            }
-
-            // Inject pre-registered MMS voice ID to skip /add_voice API call per segment
-            if ($driver === 'mms' && !empty($session['force_voice_id']) && empty($speakerEntry['mms_voice_id'])) {
-                $fv  = $session['force_voice'] ?? null;
-                $fvG = $fv ? \App\Services\VoiceMapBuilder::genderFromTag($fv) : ($speakerEntry['gender'] ?? 'male');
-                $speakerEntry['mms_voice_id'] = $session['force_voice_id'];
-                $speakerEntry['tau']   ??= \App\Http\Controllers\AdminVoicePoolController::getTau($fvG, $fv ?? '');
-                $speakerEntry['speed'] ??= \App\Http\Controllers\AdminVoicePoolController::getSpeed($fvG, $fv ?? '');
+            if (!is_array($speakerEntry) || (!empty($speakerEntry['driver']) && $speakerEntry['driver'] !== 'edge')) {
+                $speakerEntry = [];
             }
 
             try {
-                if ($driver === 'elevenlabs' && !empty($speakerEntry['voice_id'])) {
-                    $this->generateWithElevenLabs($rawMp3, $speakerEntry['voice_id']);
-                } elseif ($driver === 'aisha') {
-                    $this->generateWithAisha($rawMp3, $speakerEntry);
-                } elseif ($driver === 'mms') {
-                    // MMS outputs WAV directly — no MP3 encoding to avoid quality loss
-                    $this->generateWithMms($rawWav, $tmpDir, $speakerEntry);
-                    $rawMp3 = $rawWav;
-                } elseif ($driver === 'openai') {
-                    try {
-                        $this->generateWithOpenAi($rawMp3, $speakerEntry);
-                    } catch (\RuntimeException $e) {
-                        if (str_starts_with($e->getMessage(), 'openai_billing:')) {
-                            Log::warning("[DUB] OpenAI billing/quota, falling back to Edge TTS — seg #{$this->index}", ['session' => $this->sessionId]);
-                            $this->generateWithEdgeTts($rawMp3, $tmpDir, $speakerEntry);
-                        } else {
-                            throw $e;
-                        }
-                    }
-                } else {
-                    $this->generateWithEdgeTts($rawMp3, $tmpDir, $speakerEntry);
-                }
+                $this->generateWithEdgeTts($rawMp3, $tmpDir, $speakerEntry);
             } catch (\Throwable $ttsEx) {
                 DubSession::patch($this->sessionId, [
                     'status' => 'error',
-                    'error' => 'TTS failed: ' . Str::limit($ttsEx->getMessage(), 120),
+                    'error' => 'TTS failed: ' . Str::limit($ttsEx->getMessage(), 300),
                 ]);
-                Log::error("[DUB] [{$title}] TTS unavailable for seg #{$this->index} ({$driver}); stopping session: " . $ttsEx->getMessage(), [
+                Log::error("[DUB] [{$title}] Edge TTS unavailable for seg #{$this->index}; stopping session: " . $ttsEx->getMessage(), [
                     'session' => $this->sessionId,
                 ]);
                 return;
             }
 
-            // 2. Adjust tempo so TTS fills the timeslot naturally
-            // Skipped for MMS (WAV→MP3 encode artifacts) and force_voice sessions.
+            // 2. Adjust tempo so Edge TTS fills the timeslot naturally.
             $ttsDuration = $this->getAudioDuration($rawMp3);
             $finalMp3 = $rawMp3;
-            $isForceVoice = !empty($session['force_voice']);
-            $isMms = ($driver === 'mms');
 
-            if (!$isForceVoice && !$isMms && $slotDuration > 0.5 && $ttsDuration > 0.1) {
+            if ($slotDuration > 0.5 && $ttsDuration > 0.1) {
                 $ratio = $ttsDuration / $slotDuration;
                 $tempo = null;
 
@@ -234,88 +191,6 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         ]);
     }
 
-    private function generateWithOpenAi(string $outputMp3, array $speakerEntry = []): void
-    {
-        $text   = TextNormalizer::normalize($this->text, $this->language);
-        $gender = strtolower($speakerEntry['gender'] ?? \App\Services\VoiceMapBuilder::genderFromTag($this->speaker));
-
-        // Voice: user-selected or gender default
-        $defaultVoice = match($gender) { 'female' => 'nova', 'child' => 'shimmer', default => 'onyx' };
-        $voice = $speakerEntry['openai_voice'] ?? $defaultVoice;
-
-        // Parse delivery hint "emotion|pace" from translation
-        $emotion = 'neutral';
-        $pace    = 'normal';
-        if ($this->delivery) {
-            [$emotion, $pace] = array_pad(explode('|', $this->delivery, 2), 2, 'normal');
-        }
-
-        // Build natural-language instructions for gpt-4o-mini-tts
-        $emotionMap = [
-            'angry'   => 'angry and aggressive',
-            'happy'   => 'cheerful and warm',
-            'sad'     => 'sad and heavy-hearted',
-            'fearful' => 'fearful and anxious',
-            'excited' => 'excited and energetic',
-            'calm'    => 'calm and composed',
-            'whisper' => 'in a quiet whisper',
-            'neutral' => 'natural and conversational',
-        ];
-        $emotionDesc = $emotionMap[$emotion] ?? 'natural and conversational';
-
-        $paceDesc  = match($pace) { 'fast' => ' Speak quickly.', 'slow' => ' Speak slowly and deliberately.', default => '' };
-        $speed     = match($pace) { 'fast' => 1.12, 'slow' => 0.88, default => 1.0 };
-
-        $instructions = "Speak {$emotionDesc}.{$paceDesc}";
-
-        $model  = 'gpt-4o-mini-tts'; // supports instructions parameter
-        $apiKey = config('services.openai.key');
-
-        if (!$apiKey) {
-            throw new \RuntimeException('OpenAI API key not configured — set OPENAI_API_KEY in .env');
-        }
-
-        $payload = [
-            'model'           => $model,
-            'input'           => $text,
-            'voice'           => $voice,
-            'instructions'    => $instructions,
-            'speed'           => $speed,
-            'response_format' => 'mp3',
-        ];
-
-        $lastError = '';
-        for ($attempt = 1; $attempt <= 3; $attempt++) {
-            if ($attempt > 1) usleep(($attempt - 1) * 1500 * 1000);
-
-            $response = \Illuminate\Support\Facades\Http::withToken($apiKey)
-                ->timeout(30)
-                ->post('https://api.openai.com/v1/audio/speech', $payload);
-
-            if ($response->successful()) {
-                file_put_contents($outputMp3, $response->body());
-                if (file_exists($outputMp3) && filesize($outputMp3) >= 200) {
-                    return;
-                }
-                $lastError = 'Empty response body';
-            } else {
-                $lastError = $response->status() . ': ' . Str::limit($response->body(), 200);
-                $status    = $response->status();
-                if ($status === 401 || $status === 403) break;
-                // Billing/quota errors — no point retrying
-                if ($status === 402 || ($status === 429 && str_contains($response->body(), 'quota'))) {
-                    throw new \RuntimeException("openai_billing: {$lastError}");
-                }
-            }
-
-            Log::warning("[DUB] Segment #{$this->index} OpenAI TTS attempt {$attempt} failed: {$lastError}", [
-                'session' => $this->sessionId,
-            ]);
-        }
-
-        throw new \RuntimeException("OpenAI TTS failed after 3 attempts: {$lastError}");
-    }
-
     private function generateWithEdgeTts(string $outputMp3, string $tmpDir, array $speakerEntry = []): void
     {
         if (!empty($speakerEntry['voice'])) {
@@ -374,37 +249,6 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         }
 
         throw new \RuntimeException('Edge TTS failed after all retries (bin=' . $edgeTts . '): ' . $lastError);
-    }
-
-    private function generateWithElevenLabs(string $outputMp3, string $voiceId): void
-    {
-        $text = TextNormalizer::normalize($this->text, $this->language);
-
-        $client = new ElevenLabsClient();
-        $mp3Data = $client->synthesize($voiceId, $text);
-
-        file_put_contents($outputMp3, $mp3Data);
-
-        if (!file_exists($outputMp3) || filesize($outputMp3) < 200) {
-            throw new \RuntimeException('ElevenLabs TTS returned invalid audio');
-        }
-    }
-
-    private function generateWithAisha(string $outputMp3, array $speakerEntry = []): void
-    {
-        $model = $speakerEntry['voice'] ?? (str_starts_with($this->speaker, 'F') ? 'gulnoza' : 'jaxongir');
-        $mood = $speakerEntry['mood'] ?? 'neutral';
-
-        $text = TextNormalizer::normalize($this->text, $this->language);
-
-        $aisha = new AishaTtsDriver();
-        $mp3Data = $aisha->callAishaApi($text, $this->language, $model, $mood);
-
-        file_put_contents($outputMp3, $mp3Data);
-
-        if (!file_exists($outputMp3) || filesize($outputMp3) < 200) {
-            throw new \RuntimeException('AISHA TTS returned invalid audio');
-        }
     }
 
     /**
@@ -514,220 +358,6 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                 "{$tmpDir}/et_{$this->index}_out.mp3",
             ] as $f) @unlink($f);
         }
-    }
-
-    private function generateWithMms(string $outputMp3, string $tmpDir, array $speakerEntry = []): void
-    {
-        $client    = new MmsTtsClient();
-        $voiceFile = null;
-        $cacheKey  = null;
-
-        $seed = null;
-        if (!empty($speakerEntry['mms_voice_id'])) {
-            $voiceId = $speakerEntry['mms_voice_id'];
-            $speed   = $speakerEntry['speed'] ?? 1.0;
-            $tau     = $speakerEntry['tau']   ?? 0.4;
-            // Look up seed from pool JSON if not already in voice map
-            if (!isset($speakerEntry['seed']) && !empty($speakerEntry['pool_name'])) {
-                $g = $speakerEntry['gender'] ?? 'male';
-                $seed = AdminVoicePoolController::getSeed($g, $speakerEntry['pool_name']);
-            } else {
-                $seed = $speakerEntry['seed'] ?? null;
-            }
-        } else {
-            $gender = $speakerEntry['gender'] ?? \App\Services\VoiceMapBuilder::genderFromTag($this->speaker);
-            $poolName   = $speakerEntry['pool_name'] ?? null;
-            $speakerIdx = (int) preg_replace('/\D/', '', $this->speaker) ?: 0;
-
-            $voiceFile = $poolName
-                ? $this->mmsPoolFileByName($gender, $poolName)
-                : $this->mmsPoolFile($gender, $speakerIdx);
-
-            if (!$voiceFile) {
-                throw new \RuntimeException("MMS: no voice pool file for gender '{$gender}'" . ($poolName ? " name '{$poolName}'" : ''));
-            }
-
-            $cacheKey = 'voice-pool-id:mms:' . md5($voiceFile);
-            $voiceId  = \Illuminate\Support\Facades\Redis::get($cacheKey);
-            if (!$voiceId) {
-                // Lock prevents parallel workers from creating duplicate MMS voice clones
-                $lock = \Illuminate\Support\Facades\Cache::lock('mms-voice-register:' . md5($voiceFile), 30);
-                $lock->block(30, function () use ($cacheKey, $voiceFile, $client, &$voiceId) {
-                    $voiceId = \Illuminate\Support\Facades\Redis::get($cacheKey);
-                    if (!$voiceId) {
-                        $name    = pathinfo($voiceFile, PATHINFO_FILENAME);
-                        $voiceId = $client->findVoiceByName("pool-{$name}") ?? $client->addVoice("pool-{$name}", [$voiceFile]);
-                        \Illuminate\Support\Facades\Redis::setex($cacheKey, 604800, $voiceId);
-                    }
-                });
-            }
-
-            $name  = pathinfo($voiceFile, PATHINFO_FILENAME);
-            $speed = $speakerEntry['speed'] ?? AdminVoicePoolController::getSpeed($gender, $name);
-            $tau   = $speakerEntry['tau']   ?? AdminVoicePoolController::getTau($gender, $name);
-            $seed  = $speakerEntry['seed']  ?? AdminVoicePoolController::getSeed($gender, $name);
-        }
-
-        // MMS model vocabulary is ASCII+basic-Latin — replace Uzbek apostrophe variants
-        $text = TextNormalizer::normalize($this->text, $this->language);
-        $text = str_replace(["\u{02BB}", "\u{02BC}", "\u{02B0}"], "'", $text);
-
-        // Strip any character outside MMS vocabulary to prevent FloatTensor embedding crash.
-        // MMS uz accepts: ASCII printable + Uzbek-specific ' (apostrophe) only.
-        // Unknown characters make the tokenizer return float indices → pytorch crash.
-        $text = preg_replace('/[^\x20-\x7E\'\x{02BB}]/u', ' ', $text);
-        $text = preg_replace('/\s{2,}/', ' ', trim($text));
-
-        $options = [
-            'language' => $this->language,
-            'speed'    => $speed,
-            'tau'      => $tau,
-            'seed'     => $seed,
-        ];
-
-        // Try to use original actor's voice as reference for this segment
-        $refAudioBytes = $this->extractSegmentRefAudio();
-
-        if ($refAudioBytes !== null) {
-            Log::info("[DUB] Segment #{$this->index} synthesizeWithRef (ref bytes=" . strlen($refAudioBytes) . ")", ['session' => $this->sessionId]);
-            $wavData = $client->synthesizeWithRef($text, $refAudioBytes, $options);
-        } else {
-            Log::info("[DUB] Segment #{$this->index} no ref audio — using pool voice", ['session' => $this->sessionId]);
-            try {
-                $wavData = $client->synthesize($voiceId, $text, $options);
-            } catch (\RuntimeException $e) {
-                // MMS service lost voice (pod restart) — re-register and retry once
-                if (!str_contains(strtolower($e->getMessage()), 'not found') && !str_contains($e->getMessage(), '404')) {
-                    throw $e;
-                }
-                $voiceId = $this->reRegisterMmsVoice($client, $voiceFile, $cacheKey);
-                $wavData = $client->synthesize($voiceId, $text, $options);
-            }
-        }
-
-        // Write WAV directly — no encoding artifacts
-        file_put_contents($outputMp3, $wavData);
-
-        if (!file_exists($outputMp3) || filesize($outputMp3) < 200) {
-            throw new \RuntimeException('MMS synthesis returned empty audio');
-        }
-    }
-
-    /**
-     * Extract segment audio from original bg_chunk as voice reference.
-     * Returns WAV bytes, or null if bg_chunk not ready or segment too short.
-     */
-    private function extractSegmentRefAudio(): ?string
-    {
-        $duration = $this->endTime - $this->startTime;
-        if ($duration < 1.0) {
-            Log::info("[DUB] Segment #{$this->index} ref skip: too short ({$duration}s)", ['session' => $this->sessionId]);
-            return null;
-        }
-
-        $bgHashData = Redis::hgetall(DubSession::bgChunksKey($this->sessionId)) ?? [];
-
-        Log::info("[DUB] Segment #{$this->index} ref search: start={$this->startTime} end={$this->endTime} chunks=" . count($bgHashData), ['session' => $this->sessionId]);
-
-        foreach ($bgHashData as $bgJson) {
-            $bgChunk = json_decode($bgJson, true);
-            $cs      = (float) ($bgChunk['start'] ?? 0);
-            $ce      = (float) ($bgChunk['end']   ?? 0);
-
-            if ($this->startTime < $cs || $this->startTime >= $ce) continue;
-
-            // Use raw original audio with frequency filter (Demucs removed)
-            $rawPath  = $bgChunk['path'] ?? null;
-            $refPath  = $rawPath;
-
-            if (!$refPath || !file_exists($refPath)) {
-                continue;
-            }
-
-            $segOffset = round($this->startTime - $cs, 3);
-            $segDur    = round(min($duration, $ce - $this->startTime), 3);
-
-            Log::info("[DUB] Segment #{$this->index} ref cutting raw {$cs}-{$ce} offset={$segOffset} dur={$segDur}", ['session' => $this->sessionId]);
-
-            $tmpWav = "/tmp/ref_{$this->sessionId}_{$this->index}.wav";
-
-            $ffmpegArgs = array_merge(
-                ['ffmpeg', '-y', '-ss', (string) $segOffset, '-t', (string) $segDur, '-i', $refPath],
-                ['-af', 'highpass=f=150,lowpass=f=4000'],
-                ['-ar', '22050', '-ac', '1', $tmpWav]
-            );
-
-            $result = \Illuminate\Support\Facades\Process::timeout(10)->run($ffmpegArgs);
-
-            if ($result->successful() && file_exists($tmpWav) && filesize($tmpWav) > 2000) {
-                $bytes = file_get_contents($tmpWav);
-                @unlink($tmpWav);
-                Log::info("[DUB] Segment #{$this->index} ref ok bytes=" . strlen($bytes), ['session' => $this->sessionId]);
-                return $bytes;
-            }
-
-            Log::warning("[DUB] Segment #{$this->index} ref ffmpeg failed: " . $result->errorOutput(), ['session' => $this->sessionId]);
-            return null;
-        }
-
-        Log::info("[DUB] Segment #{$this->index} ref: no matching chunk found", ['session' => $this->sessionId]);
-        return null;
-    }
-
-    private function reRegisterMmsVoice(MmsTtsClient $client, ?string $voiceFile, ?string $cacheKey): string
-    {
-        if (!$voiceFile) {
-            $session   = DubSession::get($this->sessionId) ?? [];
-            $fv        = $session['force_voice'] ?? null;
-            if (!$fv) throw new \RuntimeException("MMS: cannot re-register — no force_voice in session");
-            $gender    = DubSession::genderFromTag($fv);
-            $voiceFile = $this->mmsPoolFileByName($gender, $fv);
-            if (!$voiceFile) throw new \RuntimeException("MMS: cannot re-register — voice file not found for '{$fv}'");
-            $cacheKey  = 'voice-pool-id:mms:' . md5($voiceFile);
-        }
-
-        $name    = pathinfo($voiceFile, PATHINFO_FILENAME);
-        Redis::del($cacheKey);
-        $voiceId = $client->findVoiceByName("pool-{$name}") ?? $client->addVoice("pool-{$name}", [$voiceFile]);
-        Redis::setex($cacheKey, 604800, $voiceId);
-
-        // Update force_voice_id in session if it was stale
-        DubSession::patch($this->sessionId, ['force_voice_id' => $voiceId]);
-
-        Log::info("[MMS] Re-registered voice after pod restart: {$voiceId}", ['session' => $this->sessionId]);
-        return $voiceId;
-    }
-
-    private function mmsPoolFileByName(string $gender, string $name): ?string
-    {
-        foreach (['wav', 'mp3', 'm4a'] as $ext) {
-            $path = storage_path("app/voice-pool/{$gender}/{$name}.{$ext}");
-            if (file_exists($path)) return $path;
-        }
-        // Fallback: try other genders
-        foreach (['male', 'female', 'child'] as $g) {
-            if ($g === $gender) continue;
-            foreach (['wav', 'mp3', 'm4a'] as $ext) {
-                $path = storage_path("app/voice-pool/{$g}/{$name}.{$ext}");
-                if (file_exists($path)) return $path;
-            }
-        }
-        return null;
-    }
-
-    private function mmsPoolFile(string $gender, int $speakerIdx): ?string
-    {
-        if (!in_array($gender, ['male', 'female', 'child'])) {
-            $gender = 'male';
-        }
-        $dir   = storage_path("app/voice-pool/{$gender}");
-        $files = is_dir($dir) ? glob("{$dir}/*.{wav,mp3,m4a}", GLOB_BRACE) : [];
-        if (empty($files)) {
-            $dir   = storage_path('app/voice-pool/male');
-            $files = is_dir($dir) ? glob("{$dir}/*.{wav,mp3,m4a}", GLOB_BRACE) : [];
-        }
-        if (empty($files)) return null;
-        return $files[$speakerIdx % count($files)];
     }
 
     private function resolveEdgeTts(): string

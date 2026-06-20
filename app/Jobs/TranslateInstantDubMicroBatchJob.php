@@ -104,8 +104,7 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
             ? ($langNames[$this->translateFrom] ?? $this->translateFrom)
             : 'auto-detected / mixed';
 
-        $sessionData = DubSession::get($this->sessionId) ?? [];
-        $forceVoice = !empty($sessionData['force_voice']);
+        $forceVoice = false;
 
         $lines = [];
         foreach ($segments as $i => $seg) {
@@ -588,23 +587,14 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
     {
         $voiceKey    = DubSession::voicesKey($this->sessionId);
         $lockKey     = DubSession::voicesLockKey($this->sessionId);
-        $sessionData = DubSession::get($this->sessionId) ?? [];
-        $forceVoice  = $sessionData['force_voice'] ?? null;
-        $driver      = $sessionData['tts_driver'] ?? config('dubber.tts.default', 'edge');
-
-        $forceEntry = $forceVoice ? \App\Services\VoiceMapBuilder::forceVoiceEntry($driver, $forceVoice) : null;
-        $variants   = $forceEntry ? null : \App\Services\VoiceMapBuilder::variantsForDriver($driver, $this->language);
+        $driver      = 'edge';
+        $variants    = \App\Services\VoiceMapBuilder::variantsForDriver($driver, $this->language);
 
         $lock = Cache::lock($lockKey, 5);
-        $lock->block(5, function () use ($voiceKey, $speakers, $forceEntry, $variants) {
+        $lock->block(5, function () use ($voiceKey, $speakers, $variants) {
             $voiceMap = json_decode(Redis::get($voiceKey) ?? '{}', true) ?: [];
-            if ($forceEntry) {
-                foreach (array_keys($speakers) as $tag) {
-                    $voiceMap[$tag] = $forceEntry;
-                }
-            } else {
-                $voiceMap = \App\Services\VoiceMapBuilder::assignSpeakers($voiceMap, $speakers, $variants);
-            }
+            $voiceMap = array_filter($voiceMap, fn ($entry) => !is_array($entry) || empty($entry['driver']) || $entry['driver'] === 'edge');
+            $voiceMap = \App\Services\VoiceMapBuilder::assignSpeakers($voiceMap, $speakers, $variants);
             Redis::setex($voiceKey, DubSession::TTL, json_encode($voiceMap));
         });
     }

@@ -85,15 +85,9 @@ class InstantDubController extends Controller
         $srt      = (string) ($request->input('srt') ?? '');
         $audioUrl = $audioUrlRaw ?: null;
         $title    = $request->input('title', 'Untitled');
-        $quality    = $request->input('quality', 'standard');
-        $forceVoice = $request->input('voice_id') ?: null;
-        $ttsDriver  = $quality === 'premium' ? 'elevenlabs' : config('dubber.tts.default', 'edge');
-
-        // OpenAI: if no voice selected, pick one randomly for this session
-        if ($ttsDriver === 'openai' && !$forceVoice) {
-            $openaiVoices = ['cedar','onyx','echo','verse','ash','alloy','sage','nova','shimmer','coral','marin','fable','ballad'];
-            $forceVoice   = $openaiVoices[array_rand($openaiVoices)];
-        }
+        $quality    = 'standard';
+        $forceVoice = null;
+        $ttsDriver  = 'edge';
 
         // Parse video URL components for HLS
         $urlWithoutQuery = strtok($videoUrl, '?');
@@ -1452,9 +1446,9 @@ class InstantDubController extends Controller
             'video_query'    => $videoQuery,
             'status'         => 'processing',
             'playable'       => false,
-            'tts_driver'     => config('dubber.tts.default', 'edge'),
-            'force_voice'    => $forceVoice,
-            'disable_prosody' => (bool) $forceVoice,
+            'tts_driver'     => 'edge',
+            'force_voice'    => null,
+            'disable_prosody' => false,
             'total_segments' => $dub->total_segments,
             'segments_ready' => $isComplete ? $dub->total_segments : 0,
             'cached_dub_id'  => $dub->id,

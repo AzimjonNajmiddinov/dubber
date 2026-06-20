@@ -4,9 +4,7 @@ namespace Tests\Unit;
 
 use App\Jobs\TranslateInstantDubBatchJob;
 use App\Jobs\TranslateInstantDubMicroBatchJob;
-use App\Support\DubSession;
 use Illuminate\Support\Facades\Http;
-use Illuminate\Support\Facades\Redis;
 use ReflectionMethod;
 use RuntimeException;
 use Tests\TestCase;
@@ -204,11 +202,6 @@ class InstantDubTranslationParsingTest extends TestCase
             'services.openai.key' => 'openai-test-key',
         ]);
 
-        Redis::shouldReceive('get')
-            ->once()
-            ->with(DubSession::key('parse-test'))
-            ->andReturn(null);
-
         Http::fake([
             'api.anthropic.com/*' => Http::response([
                 'content' => [
@@ -244,11 +237,6 @@ class InstantDubTranslationParsingTest extends TestCase
             'services.anthropic.key' => null,
             'services.openai.key' => null,
         ]);
-
-        Redis::shouldReceive('get')
-            ->once()
-            ->with(DubSession::key('parse-test'))
-            ->andReturn(null);
 
         $job = new TranslateInstantDubMicroBatchJob('parse-test', [], 'uz', 'en');
         $segments = [
