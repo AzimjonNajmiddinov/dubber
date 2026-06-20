@@ -236,6 +236,39 @@ class InstantDubTranslationParsingTest extends TestCase
         Http::assertSentCount(2);
     }
 
+    public function test_micro_translation_missing_provider_error_only_mentions_paid_providers_when_local_is_disabled(): void
+    {
+        config([
+            'services.local_translation.enabled' => false,
+            'services.uzbektranslator.url' => null,
+            'services.anthropic.key' => null,
+            'services.openai.key' => null,
+        ]);
+
+        Redis::shouldReceive('get')
+            ->once()
+            ->with(DubSession::key('parse-test'))
+            ->andReturn(null);
+
+        $job = new TranslateInstantDubMicroBatchJob('parse-test', [], 'uz', 'en');
+        $segments = [
+            ['text' => 'Hello there', 'raw_text' => 'Hello there', 'start' => 0.0, 'end' => 1.0],
+        ];
+
+        $method = new ReflectionMethod($job, 'translateMicroBatch');
+        $method->setAccessible(true);
+
+        try {
+            $method->invoke($job, $segments, '');
+            $this->fail('Expected translation provider failure.');
+        } catch (RuntimeException $e) {
+            $this->assertStringContainsString('Claude not configured', $e->getMessage());
+            $this->assertStringContainsString('OpenAI not configured', $e->getMessage());
+            $this->assertStringContainsString('ANTHROPIC_API_KEY or OPENAI_API_KEY', $e->getMessage());
+            $this->assertStringNotContainsString('uzbekTranslator not configured', $e->getMessage());
+        }
+    }
+
     private function invokeParser(object $job, array $batch, string $content): array
     {
         $method = new ReflectionMethod($job, 'parseTranslationResponse');

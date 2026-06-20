@@ -22,6 +22,9 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
     public int $timeout = 60;
     public int $tries = 1;
 
+    private ?string $lastAnthropicFailure = null;
+    private ?string $lastOpenAiFailure = null;
+
     public function __construct(
         public string  $sessionId,
         public array   $segments,
@@ -43,7 +46,7 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
         } catch (\Throwable $e) {
             DubSession::patch($this->sessionId, [
                 'status' => 'error',
-                'error' => 'Translation failed: ' . Str::limit($e->getMessage(), 120),
+                'error' => 'Translation failed: ' . Str::limit($e->getMessage(), 500),
             ]);
             Log::error("[DUB] [{$title}] Micro-batch translation failed; stopping session: " . Str::limit($e->getMessage(), 200), [
                 'session' => $this->sessionId,
@@ -171,16 +174,16 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
             }
         }
 
-        // Try uzbekTranslator local service (only uz target, en/ru source)
-        if ($this->language === 'uz' && in_array($this->translateFrom, ['en', 'ru'])) {
+        // Optional self-hosted Uzbek translator. If it is not configured, skip it
+        // silently: this deployment uses Claude/OpenAI as the translation providers.
+        $uzbekTranslatorUrl = config('services.uzbektranslator.url');
+        if ($uzbekTranslatorUrl && $this->language === 'uz' && in_array($this->translateFrom, ['en', 'ru'])) {
             $uzResult = $this->callUzbekTranslator($segments);
             if ($uzResult !== null) {
                 return $uzResult;
             }
 
-            $providerFailures[] = config('services.uzbektranslator.url')
-                ? 'uzbekTranslator returned no usable output'
-                : 'uzbekTranslator not configured';
+            $providerFailures[] = 'uzbekTranslator returned no usable output';
         }
 
         if ($localTranslator->enabled() && !$localTranslator->allowPaidFallback()) {
@@ -198,32 +201,37 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
                 return $parsed;
             }
         } else {
-            $providerFailures[] = config('services.anthropic.key')
-                ? 'Claude returned no response'
-                : 'Claude not configured';
+            $providerFailures[] = $this->lastAnthropicFailure
+                ?? (config('services.anthropic.key') ? 'Claude returned no response' : 'Claude not configured');
         }
 
         // Fallback: GPT-4o
         $openaiKey = config('services.openai.key');
         if ($openaiKey) {
-            $resp = Http::withToken($openaiKey)->timeout(30)
-                ->post('https://api.openai.com/v1/chat/completions', [
-                    'model' => 'gpt-4o',
-                    'temperature' => 0.3,
-                    'messages' => $messages,
-                ]);
-            if ($resp->successful()) {
-                $parsed = $this->tryParseProviderTranslation(
-                    'OpenAI',
-                    $segments,
-                    $resp->json('choices.0.message.content') ?? '',
-                    $providerFailures
-                );
-                if ($parsed !== null) {
-                    return $parsed;
+            try {
+                $resp = Http::withToken($openaiKey)->timeout(30)
+                    ->post('https://api.openai.com/v1/chat/completions', [
+                        'model' => 'gpt-4o',
+                        'temperature' => 0.3,
+                        'messages' => $messages,
+                    ]);
+                if ($resp->successful()) {
+                    $parsed = $this->tryParseProviderTranslation(
+                        'OpenAI',
+                        $segments,
+                        $resp->json('choices.0.message.content') ?? '',
+                        $providerFailures
+                    );
+                    if ($parsed !== null) {
+                        return $parsed;
+                    }
+                } else {
+                    $this->lastOpenAiFailure = 'OpenAI HTTP ' . $resp->status() . ': ' . Str::limit($resp->body(), 180);
+                    $providerFailures[] = $this->lastOpenAiFailure;
                 }
-            } else {
-                $providerFailures[] = 'OpenAI HTTP ' . $resp->status();
+            } catch (\Throwable $e) {
+                $this->lastOpenAiFailure = 'OpenAI exception: ' . Str::limit($e->getMessage(), 180);
+                $providerFailures[] = $this->lastOpenAiFailure;
             }
         } else {
             $providerFailures[] = 'OpenAI not configured';
@@ -232,7 +240,7 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
         $reason = $providerFailures
             ? ': ' . implode('; ', array_unique($providerFailures))
             : '.';
-        throw new \RuntimeException('No translation provider returned usable micro-batch output' . $reason);
+        throw new \RuntimeException('No translation provider returned usable micro-batch output' . $reason . '. Configure ANTHROPIC_API_KEY or OPENAI_API_KEY on the server, clear Laravel config cache, and restart queue workers.');
     }
 
     private function tryParseProviderTranslation(string $provider, array $segments, string $content, array &$providerFailures): ?array
@@ -315,7 +323,10 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
     private function callAnthropic(array $messages): ?string
     {
         $apiKey = config('services.anthropic.key');
-        if (!$apiKey) return null;
+        if (!$apiKey) {
+            $this->lastAnthropicFailure = 'Claude not configured';
+            return null;
+        }
 
         $system = '';
         $anthropicMessages = [];
@@ -340,9 +351,18 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
             ]);
 
             if ($response->successful()) {
-                return trim($response->json('content.0.text') ?? '');
+                $content = trim($response->json('content.0.text') ?? '');
+                if ($content !== '') {
+                    return $content;
+                }
+
+                $this->lastAnthropicFailure = 'Claude returned empty response';
+                return null;
             }
+
+            $this->lastAnthropicFailure = 'Claude HTTP ' . $response->status() . ': ' . Str::limit($response->body(), 180);
         } catch (\Throwable $e) {
+            $this->lastAnthropicFailure = 'Claude exception: ' . Str::limit($e->getMessage(), 180);
             Log::warning("[DUB] Micro-batch Anthropic error: " . $e->getMessage(), ['session' => $this->sessionId]);
         }
 

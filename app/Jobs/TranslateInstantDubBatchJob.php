@@ -25,6 +25,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
     public int $tries = 1; // Retries handled internally; chain must not break
 
     private string $title = 'Untitled';
+    private ?string $lastAnthropicFailure = null;
 
     public function __construct(
         public string $sessionId,
@@ -90,7 +91,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         } catch (\Throwable $e) {
             $this->updateSession([
                 'status' => 'error',
-                'error' => 'Translation failed: ' . Str::limit($e->getMessage(), 120),
+                'error' => 'Translation failed: ' . Str::limit($e->getMessage(), 500),
             ]);
             Log::error("[DUB] [{$this->title}] Batch {$this->batchIndex} translation failed; stopping session: " . Str::limit($e->getMessage(), 200), [
                 'session' => $this->sessionId,
@@ -378,7 +379,10 @@ class TranslateInstantDubBatchJob implements ShouldQueue
     private function callAnthropic(array $messages): ?string
     {
         $apiKey = config('services.anthropic.key');
-        if (!$apiKey) return null;
+        if (!$apiKey) {
+            $this->lastAnthropicFailure = 'Claude not configured';
+            return null;
+        }
 
         // Convert OpenAI-style messages to Anthropic format
         $system = '';
@@ -404,14 +408,22 @@ class TranslateInstantDubBatchJob implements ShouldQueue
             ]);
 
             if ($response->successful()) {
-                return trim($response->json('content.0.text') ?? '');
+                $content = trim($response->json('content.0.text') ?? '');
+                if ($content !== '') {
+                    return $content;
+                }
+
+                $this->lastAnthropicFailure = 'Claude returned empty response';
+                return null;
             }
 
+            $this->lastAnthropicFailure = 'Claude HTTP ' . $response->status() . ': ' . Str::limit($response->body(), 180);
             Log::warning("[DUB] Anthropic API error (batch {$this->batchIndex}): HTTP " . $response->status(), [
                 'session' => $this->sessionId,
                 'body' => Str::limit($response->body(), 200),
             ]);
         } catch (\Throwable $e) {
+            $this->lastAnthropicFailure = 'Claude exception: ' . Str::limit($e->getMessage(), 180);
             Log::warning("[DUB] Anthropic API exception (batch {$this->batchIndex}): " . $e->getMessage(), [
                 'session' => $this->sessionId,
             ]);
@@ -424,7 +436,10 @@ class TranslateInstantDubBatchJob implements ShouldQueue
     {
         $apiKey = config('services.openai.key');
         if (!$apiKey) {
-            throw new \RuntimeException('OpenAI API key missing and no translation provider succeeded.');
+            $reason = $this->lastAnthropicFailure
+                ? ' Last provider failure: ' . $this->lastAnthropicFailure
+                : '';
+            throw new \RuntimeException('OpenAI API key missing and no translation provider succeeded.' . $reason . ' Configure ANTHROPIC_API_KEY or OPENAI_API_KEY on the server, clear Laravel config cache, and restart queue workers.');
         }
 
         for ($attempt = 1; $attempt <= 4; $attempt++) {
