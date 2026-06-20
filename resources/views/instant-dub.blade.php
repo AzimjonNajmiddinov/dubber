@@ -260,7 +260,11 @@
                 if (resumeAt !== null && Number.isFinite(resumeAt)) {
                     video.currentTime = Math.max(0, resumeAt);
                 }
-                if (preferDub) selectDubAudioTrack();
+                if (preferDub) {
+                    selectDubAudioTrack();
+                    selectDubSubtitleTrack();
+                    setTimeout(selectDubSubtitleTrack, 500);
+                }
                 resolve();
             };
 
@@ -276,6 +280,9 @@
                     hlsInstance.on(Hls.Events.AUDIO_TRACKS_UPDATED, () => {
                         if (preferDub) selectDubAudioTrack();
                     });
+                    hlsInstance.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, () => {
+                        if (preferDub) selectDubSubtitleTrack();
+                    });
                     hlsInstance.on(Hls.Events.AUDIO_TRACK_SWITCHED, (_, data) => {
                         if (!preferDub || !hlsInstance || !Array.isArray(hlsInstance.audioTracks)) return;
                         const activeTrack = hlsInstance.audioTracks[data.id];
@@ -284,7 +291,10 @@
                         }
                     });
                     hlsInstance.on(Hls.Events.LEVEL_SWITCHED, () => {
-                        if (preferDub) setTimeout(selectDubAudioTrack, 0);
+                        if (preferDub) {
+                            setTimeout(selectDubAudioTrack, 0);
+                            setTimeout(selectDubSubtitleTrack, 0);
+                        }
                     });
                     hlsInstance.on(Hls.Events.ERROR, (_, d) => { if (d.fatal) reject(d.type); });
                 } else {
@@ -337,6 +347,44 @@
         return false;
     }
 
+    function isDubSubtitleTrack(track) {
+        const name = `${track?.name || track?.label || ''}`.toLowerCase();
+        const lang = `${track?.lang || track?.language || ''}`.toLowerCase();
+        const uri = `${track?.url || track?.uri || track?.src || ''}`.toLowerCase();
+        if (uri.includes('dub-subtitles')) return true;
+
+        const target = `${language?.value || ''}`.toLowerCase();
+        if (target === 'uz') return lang === 'uz' || name.includes("o'zbek") || name.includes('o‘zbek') || name.includes('uzbek');
+        if (target === 'ru') return lang === 'ru' || name.includes('рус') || name.includes('russian');
+        if (target === 'en') return lang === 'en' || name.includes('english');
+
+        return target !== '' && lang === target;
+    }
+
+    function selectDubSubtitleTrack() {
+        if (hlsInstance && Array.isArray(hlsInstance.subtitleTracks)) {
+            const idx = hlsInstance.subtitleTracks.findIndex(track => `${track?.url || track?.uri || ''}`.toLowerCase().includes('dub-subtitles'));
+            const fallbackIdx = idx >= 0 ? idx : hlsInstance.subtitleTracks.findIndex(isDubSubtitleTrack);
+            if (fallbackIdx >= 0) {
+                hlsInstance.subtitleTrack = fallbackIdx;
+                return true;
+            }
+        }
+
+        const tracks = video.textTracks;
+        if (tracks && tracks.length) {
+            let selected = false;
+            for (let i = 0; i < tracks.length; i++) {
+                const show = isDubSubtitleTrack(tracks[i]);
+                tracks[i].mode = show ? 'showing' : 'disabled';
+                selected = selected || show;
+            }
+            return selected;
+        }
+
+        return false;
+    }
+
     function hasDubRunwayForCurrentPlayback(hls) {
         if (!hls || !hls.playable) return false;
 
@@ -361,6 +409,7 @@
             await loadVideo(masterUrl, true, resumeAt);
             hlsSwitchedToDub = true;
             selectDubAudioTrack();
+            selectDubSubtitleTrack();
             if (!wasPaused) {
                 try { await video.play(); } catch (e) { console.warn('Dub switch play failed:', e); }
             }

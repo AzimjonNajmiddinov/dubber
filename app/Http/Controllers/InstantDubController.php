@@ -679,7 +679,7 @@ class InstantDubController extends Controller
                     $sourceReadyBeforeDubStart = false;
                 }
                 $dur = round($this->frameAlignedDuration($cs, $ce), 6);
-                $entries[] = ['uri' => "dub-segment/source-bg-{$bgIdx}.ts", 'duration' => $dur];
+                $entries[] = ['uri' => $this->versionedHlsUri("dub-segment/source-bg-{$bgIdx}.ts", $this->hlsFileVersion($rawFile)), 'duration' => $dur];
                 $startedDub = true;
                 $lastPlannedBgIdx = $bgIdx;
                 continue;
@@ -696,19 +696,24 @@ class InstantDubController extends Controller
                 }
                 $offsetMs = (int) round(($dubStartTime - $cs) * 1000);
                 $sourceDur = round($this->frameAlignedDuration($cs, $dubStartTime), 6);
-                $entries[] = ['uri' => "dub-segment/source-bg-{$bgIdx}-to-{$offsetMs}.ts", 'duration' => $sourceDur];
+                $entries[] = ['uri' => $this->versionedHlsUri("dub-segment/source-bg-{$bgIdx}-to-{$offsetMs}.ts", $this->hlsFileVersion($rawFile)), 'duration' => $sourceDur];
                 if (!InstantDubHlsReadiness::chunkHasVerifiedDub($sessionId, $session, $bgIdx, $bgChunk, $aacDir)) {
                     break;
                 }
                 $dur = round($this->frameAlignedDuration($dubStartTime, $ce), 6);
-                $entries[] = ['uri' => "dub-segment/bg-{$bgIdx}-from-{$offsetMs}.ts", 'duration' => $dur];
+                $dubFile = InstantDubHlsReadiness::dubChunkPath($aacDir, $bgIdx);
+                $sliceFile = "{$aacDir}/bg-{$bgIdx}-from-{$offsetMs}.ts";
+                $version = $this->hlsFileVersion($sliceFile) ?: $this->hlsFileVersion($dubFile) ?: (string) ($bgChunk['dub_mixed_at'] ?? '');
+                $entries[] = ['uri' => $this->versionedHlsUri("dub-segment/bg-{$bgIdx}-from-{$offsetMs}.ts", $version), 'duration' => $dur];
                 $lastReadyDubBgIdx = $bgIdx;
             } else {
                 if (!InstantDubHlsReadiness::chunkHasVerifiedDub($sessionId, $session, $bgIdx, $bgChunk, $aacDir)) {
                     break;
                 }
                 $dur = round($this->frameAlignedDuration($cs, $ce), 6);
-                $entries[] = ['uri' => "dub-segment/bg-{$bgIdx}.ts", 'duration' => $dur];
+                $dubFile = InstantDubHlsReadiness::dubChunkPath($aacDir, $bgIdx);
+                $version = $this->hlsFileVersion($dubFile) ?: (string) ($bgChunk['dub_mixed_at'] ?? '');
+                $entries[] = ['uri' => $this->versionedHlsUri("dub-segment/bg-{$bgIdx}.ts", $version), 'duration' => $dur];
                 $lastReadyDubBgIdx = $bgIdx;
             }
 
@@ -857,11 +862,10 @@ class InstantDubController extends Controller
 
         if (InstantDubHlsReadiness::chunkHasVerifiedDub($sessionId, $session, $index, $bgChunk, $aacDir)) {
             $status  = $session['status'] ?? 'processing';
-            $cache   = in_array($status, ['complete', 'stopped']) ? 'max-age=86400' : 'max-age=5';
             return response()->file($aacFile, [
                 'Content-Type'              => $this->hlsAudioContentType($aacFile),
                 'Access-Control-Allow-Origin' => '*',
-                'Cache-Control'             => $cache,
+                'Cache-Control'             => 'no-store',
             ]);
         }
 
@@ -928,6 +932,7 @@ class InstantDubController extends Controller
         $ce = $bgChunk ? (float) ($bgChunk['end']   ?? ($index + 1) * self::BG_CHUNK_SECONDS) : ($index + 1) * self::BG_CHUNK_SECONDS;
         $offset = max(0.0, $offsetMs / 1000);
         $duration = round($this->frameAlignedDuration($cs + $offset, $ce), 6);
+        $chunkDuration = round($this->frameAlignedDuration($cs, $ce), 6);
 
         if ($duration <= 0.1) {
             return $this->silentHlsAudioResponse(0.1);
@@ -939,7 +944,8 @@ class InstantDubController extends Controller
         }
 
         $sliceFile = "{$aacDir}/bg-{$index}-from-{$offsetMs}.ts";
-        if ($this->hlsSliceNeedsRefresh($sliceFile, $aacFile)) {
+        $speechExpected = (int) ($bgChunk['dub_tts_inputs'] ?? $bgChunk['dub_expected_speech'] ?? 0) > 0;
+        if ($this->hlsSliceNeedsRefresh($sliceFile, $aacFile, $chunkDuration, $duration, $speechExpected)) {
             $tmpFile = "{$sliceFile}.tmp." . getmypid();
             $result = Process::timeout(30)->run([
                 'ffmpeg', '-y',
@@ -960,17 +966,20 @@ class InstantDubController extends Controller
             }
         }
 
-        $status  = $session['status'] ?? 'processing';
-        $cache   = in_array($status, ['complete', 'stopped']) ? 'max-age=86400' : 'max-age=5';
-
         return response()->file($sliceFile, [
             'Content-Type' => $this->hlsAudioContentType($sliceFile),
             'Access-Control-Allow-Origin' => '*',
-            'Cache-Control' => $cache,
+            'Cache-Control' => 'no-store',
         ]);
     }
 
-    private function hlsSliceNeedsRefresh(string $sliceFile, string $sourceFile): bool
+    private function hlsSliceNeedsRefresh(
+        string $sliceFile,
+        string $sourceFile,
+        ?float $sourceDuration = null,
+        ?float $sliceDuration = null,
+        bool $speechExpected = false,
+    ): bool
     {
         if (!file_exists($sliceFile) || filesize($sliceFile) <= 10) {
             return true;
@@ -980,7 +989,24 @@ class InstantDubController extends Controller
             return true;
         }
 
+        if ($speechExpected && $sourceDuration !== null && $sliceDuration !== null && $sourceDuration > 0.0) {
+            $expectedBytes = filesize($sourceFile) * min(1.0, max(0.0, $sliceDuration / $sourceDuration)) * 0.65;
+            if (filesize($sliceFile) < $expectedBytes) {
+                return true;
+            }
+        }
+
         return filemtime($sliceFile) < filemtime($sourceFile);
+    }
+
+    private function hlsFileVersion(?string $file): string
+    {
+        return $file && file_exists($file) ? (string) filemtime($file) : '';
+    }
+
+    private function versionedHlsUri(string $uri, string $version): string
+    {
+        return $version !== '' ? "{$uri}?v={$version}" : $uri;
     }
 
     public function hlsTailSegment(string $sessionId)
@@ -1367,13 +1393,14 @@ class InstantDubController extends Controller
                 'Content-Type' => 'video/mp2t',
                 'Content-Length' => strlen($data),
                 'Access-Control-Allow-Origin' => '*',
-                'Cache-Control' => 'max-age=3600',
+                'Cache-Control' => 'no-store',
             ]);
         }
 
         return response('', 200, [
             'Content-Type' => 'video/mp2t',
             'Access-Control-Allow-Origin' => '*',
+            'Cache-Control' => 'no-store',
         ]);
     }
 

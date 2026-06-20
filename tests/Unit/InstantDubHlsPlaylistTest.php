@@ -210,6 +210,71 @@ class InstantDubHlsPlaylistTest extends TestCase
         $this->assertFalse($method->invoke(new InstantDubController(), $sliceFile, $sourceFile));
     }
 
+    public function test_low_bitrate_cached_hls_slice_refreshes_when_speech_is_expected(): void
+    {
+        $aacDir = $this->tempDir();
+        $sliceFile = $this->tempFile("{$aacDir}/bg-2-from-2500.ts", str_repeat('s', 350));
+        $sourceFile = $this->tempFile("{$aacDir}/bg-2.ts", str_repeat('d', 1000));
+
+        touch($sourceFile, time() - 20);
+        touch($sliceFile, time());
+
+        $method = new ReflectionMethod(InstantDubController::class, 'hlsSliceNeedsRefresh');
+        $method->setAccessible(true);
+
+        $this->assertTrue($method->invoke(
+            new InstantDubController(),
+            $sliceFile,
+            $sourceFile,
+            30.0,
+            25.0,
+            true,
+        ));
+
+        file_put_contents($sliceFile, str_repeat('s', 700));
+
+        $this->assertFalse($method->invoke(
+            new InstantDubController(),
+            $sliceFile,
+            $sourceFile,
+            30.0,
+            25.0,
+            true,
+        ));
+    }
+
+    public function test_audio_playlist_versions_dub_segment_urls(): void
+    {
+        $sessionId = 'playlist-versioned-dub-test';
+        $aacDir = $this->tempDir();
+        $raw0 = $this->tempFile("{$aacDir}/raw-0.ts", str_repeat('0', 128));
+        $raw1 = $this->tempFile("{$aacDir}/raw-1.ts", str_repeat('1', 128));
+        $this->tempFile("{$aacDir}/bg-1.ts", str_repeat('d', 128));
+        $session = [
+            'hls_dub_start_time' => 45.0,
+            'total_bg_chunks' => 2,
+            'aac_base_dir' => $aacDir,
+            'status' => 'processing',
+        ];
+
+        Redis::shouldReceive('get')
+            ->with(DubSession::key($sessionId))
+            ->once()
+            ->andReturn(json_encode($session));
+
+        Redis::shouldReceive('hgetall')
+            ->with(DubSession::bgChunksKey($sessionId))
+            ->once()
+            ->andReturn([
+                '0' => json_encode(['start' => 0.0, 'end' => 30.0, 'path' => $raw0]),
+                '1' => json_encode(['start' => 30.0, 'end' => 60.0, 'path' => $raw1, 'dub_ready' => true]),
+            ]);
+
+        $content = (new InstantDubController())->hlsAudioPlaylist($sessionId)->getContent();
+
+        $this->assertMatchesRegularExpression('/dub-segment\/bg-1-from-15000\.ts\?v=\d+/', $content);
+    }
+
     public function test_verified_hls_format_without_current_runway_is_not_playable(): void
     {
         $sessionId = 'verified-switch-test';
