@@ -2,6 +2,7 @@
 
 namespace App\Jobs;
 
+use App\Services\AnthropicModelResolver;
 use App\Services\LocalTranslationClient;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -245,8 +246,9 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         }
 
         if ($anthropicKey) {
+            $anthropicModel = AnthropicModelResolver::primary();
             // Fire both requests to Claude in parallel
-            $responses = Http::pool(function ($pool) use ($anthropicKey, $analysisSystem, $analysisUserMessages, $translationSystem, $translationUserMessages) {
+            $responses = Http::pool(function ($pool) use ($anthropicKey, $anthropicModel, $analysisSystem, $analysisUserMessages, $translationSystem, $translationUserMessages) {
                 $pool->as('analysis')
                     ->withHeaders([
                         'x-api-key' => $anthropicKey,
@@ -255,7 +257,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
                     ])
                     ->timeout(60)
                     ->post('https://api.anthropic.com/v1/messages', [
-                        'model' => 'claude-3-5-sonnet-latest',
+                        'model' => $anthropicModel,
                         'max_tokens' => 4096,
                         'system' => $analysisSystem,
                         'messages' => $analysisUserMessages,
@@ -269,7 +271,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
                     ])
                     ->timeout(60)
                     ->post('https://api.anthropic.com/v1/messages', [
-                        'model' => 'claude-3-5-sonnet-latest',
+                        'model' => $anthropicModel,
                         'max_tokens' => 4096,
                         'system' => $translationSystem,
                         'messages' => $translationUserMessages,
@@ -286,6 +288,14 @@ class TranslateInstantDubBatchJob implements ShouldQueue
             // Process translation result
             if (isset($responses['translation']) && $responses['translation'] instanceof \Illuminate\Http\Client\Response && $responses['translation']->successful()) {
                 $translationResult = trim($responses['translation']->json('content.0.text') ?? '');
+            }
+        }
+
+        if (!$characterContext && $anthropicKey) {
+            $characterContext = $this->callAnthropic($analysisPrompt) ?? '';
+            if ($characterContext !== '') {
+                $this->extractAndStoreTitle($characterContext);
+                Log::info("[DUB] [{$this->title}] Character analysis (Claude fallback): " . Str::limit($characterContext, 200), ['session' => $this->sessionId]);
             }
         }
 
@@ -316,6 +326,16 @@ class TranslateInstantDubBatchJob implements ShouldQueue
             $parsed = $this->tryParseProviderTranslation('Claude', $batch, $translationResult, $providerFailures);
             if ($parsed !== null) {
                 return $parsed;
+            }
+        }
+
+        if ($anthropicKey) {
+            $translationResult = $this->callAnthropic($translationMessages);
+            if ($translationResult) {
+                $parsed = $this->tryParseProviderTranslation('Claude', $batch, $translationResult, $providerFailures);
+                if ($parsed !== null) {
+                    return $parsed;
+                }
             }
         }
 
@@ -388,40 +408,49 @@ class TranslateInstantDubBatchJob implements ShouldQueue
             }
         }
 
-        try {
-            $response = Http::withHeaders([
-                'x-api-key' => $apiKey,
-                'anthropic-version' => '2023-06-01',
-                'content-type' => 'application/json',
-            ])->timeout(60)->post('https://api.anthropic.com/v1/messages', [
-                'model' => 'claude-3-5-sonnet-latest',
-                'max_tokens' => 4096,
-                'system' => $system,
-                'messages' => $anthropicMessages,
-            ]);
+        $failures = [];
+        foreach (AnthropicModelResolver::models() as $model) {
+            try {
+                $response = Http::withHeaders([
+                    'x-api-key' => $apiKey,
+                    'anthropic-version' => '2023-06-01',
+                    'content-type' => 'application/json',
+                ])->timeout(60)->post('https://api.anthropic.com/v1/messages', [
+                    'model' => $model,
+                    'max_tokens' => 4096,
+                    'system' => $system,
+                    'messages' => $anthropicMessages,
+                ]);
 
-            if ($response->successful()) {
-                $content = trim($response->json('content.0.text') ?? '');
-                if ($content !== '') {
-                    return $content;
+                if ($response->successful()) {
+                    $content = trim($response->json('content.0.text') ?? '');
+                    if ($content !== '') {
+                        return $content;
+                    }
+
+                    $failures[] = "Claude {$model} returned empty response";
+                    continue;
                 }
 
-                $this->lastAnthropicFailure = 'Claude returned empty response';
-                return null;
-            }
+                $failure = 'Claude ' . $model . ' HTTP ' . $response->status() . ': ' . Str::limit($response->body(), 180);
+                $failures[] = $failure;
+                Log::warning("[DUB] Anthropic API error (batch {$this->batchIndex}, {$model}): HTTP " . $response->status(), [
+                    'session' => $this->sessionId,
+                    'body' => Str::limit($response->body(), 200),
+                ]);
 
-            $this->lastAnthropicFailure = 'Claude HTTP ' . $response->status() . ': ' . Str::limit($response->body(), 180);
-            Log::warning("[DUB] Anthropic API error (batch {$this->batchIndex}): HTTP " . $response->status(), [
-                'session' => $this->sessionId,
-                'body' => Str::limit($response->body(), 200),
-            ]);
-        } catch (\Throwable $e) {
-            $this->lastAnthropicFailure = 'Claude exception: ' . Str::limit($e->getMessage(), 180);
-            Log::warning("[DUB] Anthropic API exception (batch {$this->batchIndex}): " . $e->getMessage(), [
-                'session' => $this->sessionId,
-            ]);
+                if (!in_array($response->status(), [400, 404, 429, 529], true)) {
+                    break;
+                }
+            } catch (\Throwable $e) {
+                $failures[] = 'Claude ' . $model . ' exception: ' . Str::limit($e->getMessage(), 180);
+                Log::warning("[DUB] Anthropic API exception (batch {$this->batchIndex}, {$model}): " . $e->getMessage(), [
+                    'session' => $this->sessionId,
+                ]);
+            }
         }
 
+        $this->lastAnthropicFailure = implode('; ', array_unique($failures)) ?: 'Claude returned no response';
         return null;
     }
 

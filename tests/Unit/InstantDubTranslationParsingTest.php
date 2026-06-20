@@ -229,6 +229,47 @@ class InstantDubTranslationParsingTest extends TestCase
         Http::assertSentCount(2);
     }
 
+    public function test_micro_translation_skips_retired_claude_model(): void
+    {
+        config([
+            'services.local_translation.enabled' => false,
+            'services.uzbektranslator.url' => null,
+            'services.anthropic.key' => 'anthropic-test-key',
+            'services.anthropic.model' => 'claude-3-5-sonnet-latest',
+            'services.anthropic.fallback_models' => ['claude-sonnet-4-6'],
+            'services.openai.key' => null,
+        ]);
+
+        Http::fake(function ($request) {
+            $model = $request->data()['model'] ?? '';
+
+            if ($model === 'claude-sonnet-4-6') {
+                return Http::response([
+                    'content' => [
+                        ['text' => '1. Salom {neutral|normal}'],
+                    ],
+                ], 200);
+            }
+
+            return Http::response(['error' => 'unexpected model'], 500);
+        });
+
+        $job = new TranslateInstantDubMicroBatchJob('parse-test', [], 'uz', 'en');
+        $segments = [
+            ['text' => 'Hello there', 'raw_text' => 'Hello there', 'start' => 0.0, 'end' => 1.0],
+        ];
+
+        $method = new ReflectionMethod($job, 'translateMicroBatch');
+        $method->setAccessible(true);
+
+        $translated = $method->invoke($job, $segments, '');
+
+        $this->assertSame('Salom', $translated[0]['text']);
+        Http::assertNotSent(fn ($request) => ($request->data()['model'] ?? '') === 'claude-3-5-sonnet-latest');
+        Http::assertSent(fn ($request) => ($request->data()['model'] ?? '') === 'claude-sonnet-4-6');
+        Http::assertSentCount(1);
+    }
+
     public function test_micro_translation_missing_provider_error_only_mentions_paid_providers_when_local_is_disabled(): void
     {
         config([

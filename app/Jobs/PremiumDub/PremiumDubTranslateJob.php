@@ -7,6 +7,7 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use App\Services\AnthropicModelResolver;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Redis;
@@ -186,22 +187,29 @@ class PremiumDubTranslateJob implements ShouldQueue
     {
         $anthropicKey = config('services.anthropic.key');
         if ($anthropicKey) {
-            try {
-                $response = Http::withHeaders([
-                    'x-api-key'         => $anthropicKey,
-                    'anthropic-version' => '2023-06-01',
-                ])->timeout(90)->post('https://api.anthropic.com/v1/messages', [
-                    'model'      => 'claude-3-5-sonnet-latest',
-                    'max_tokens' => 4096,
-                    'system'     => $system,
-                    'messages'   => [['role' => 'user', 'content' => $user]],
-                ]);
+            foreach (AnthropicModelResolver::models() as $model) {
+                try {
+                    $response = Http::withHeaders([
+                        'x-api-key'         => $anthropicKey,
+                        'anthropic-version' => '2023-06-01',
+                    ])->timeout(90)->post('https://api.anthropic.com/v1/messages', [
+                        'model'      => $model,
+                        'max_tokens' => 4096,
+                        'system'     => $system,
+                        'messages'   => [['role' => 'user', 'content' => $user]],
+                    ]);
 
-                if ($response->successful()) {
-                    return trim($response->json('content.0.text') ?? '');
+                    if ($response->successful()) {
+                        return trim($response->json('content.0.text') ?? '');
+                    }
+
+                    Log::warning("[PREMIUM] [{$this->dubId}] Claude {$model} failed, falling back if possible: HTTP " . $response->status());
+                    if (!in_array($response->status(), [400, 404, 429, 529], true)) {
+                        break;
+                    }
+                } catch (\Throwable $e) {
+                    Log::warning("[PREMIUM] [{$this->dubId}] Claude {$model} failed, falling back if possible: " . $e->getMessage());
                 }
-            } catch (\Throwable $e) {
-                Log::warning("[PREMIUM] [{$this->dubId}] Claude failed, falling back to GPT: " . $e->getMessage());
             }
         }
 

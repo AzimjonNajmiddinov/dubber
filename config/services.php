@@ -41,6 +41,8 @@ return [
 
     'anthropic' => [
         'key' => env('ANTHROPIC_API_KEY'),
+        'model' => env('ANTHROPIC_MODEL', 'claude-sonnet-4-6'),
+        'fallback_models' => array_filter(array_map('trim', explode(',', env('ANTHROPIC_FALLBACK_MODELS', 'claude-haiku-4-5')))),
     ],
 
     'openvoice' => [

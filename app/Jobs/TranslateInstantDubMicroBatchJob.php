@@ -7,6 +7,7 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use App\Services\AnthropicModelResolver;
 use App\Services\LocalTranslationClient;
 use App\Support\DubSession;
 use Illuminate\Support\Facades\Cache;
@@ -337,34 +338,43 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
             }
         }
 
-        try {
-            $response = Http::withHeaders([
-                'x-api-key' => $apiKey,
-                'anthropic-version' => '2023-06-01',
-                'content-type' => 'application/json',
-            ])->timeout(30)->post('https://api.anthropic.com/v1/messages', [
-                'model' => 'claude-3-5-sonnet-latest',
-                'max_tokens' => 1024,
-                'system' => $system,
-                'messages' => $anthropicMessages,
-            ]);
+        $failures = [];
+        foreach (AnthropicModelResolver::models() as $model) {
+            try {
+                $response = Http::withHeaders([
+                    'x-api-key' => $apiKey,
+                    'anthropic-version' => '2023-06-01',
+                    'content-type' => 'application/json',
+                ])->timeout(30)->post('https://api.anthropic.com/v1/messages', [
+                    'model' => $model,
+                    'max_tokens' => 1024,
+                    'system' => $system,
+                    'messages' => $anthropicMessages,
+                ]);
 
-            if ($response->successful()) {
-                $content = trim($response->json('content.0.text') ?? '');
-                if ($content !== '') {
-                    return $content;
+                if ($response->successful()) {
+                    $content = trim($response->json('content.0.text') ?? '');
+                    if ($content !== '') {
+                        return $content;
+                    }
+
+                    $failures[] = "Claude {$model} returned empty response";
+                    continue;
                 }
 
-                $this->lastAnthropicFailure = 'Claude returned empty response';
-                return null;
-            }
+                $failure = 'Claude ' . $model . ' HTTP ' . $response->status() . ': ' . Str::limit($response->body(), 180);
+                $failures[] = $failure;
 
-            $this->lastAnthropicFailure = 'Claude HTTP ' . $response->status() . ': ' . Str::limit($response->body(), 180);
-        } catch (\Throwable $e) {
-            $this->lastAnthropicFailure = 'Claude exception: ' . Str::limit($e->getMessage(), 180);
-            Log::warning("[DUB] Micro-batch Anthropic error: " . $e->getMessage(), ['session' => $this->sessionId]);
+                if (!in_array($response->status(), [400, 404, 429, 529], true)) {
+                    break;
+                }
+            } catch (\Throwable $e) {
+                $failures[] = 'Claude ' . $model . ' exception: ' . Str::limit($e->getMessage(), 180);
+                Log::warning("[DUB] Micro-batch Anthropic error ({$model}): " . $e->getMessage(), ['session' => $this->sessionId]);
+            }
         }
 
+        $this->lastAnthropicFailure = implode('; ', array_unique($failures)) ?: 'Claude returned no response';
         return null;
     }
 
