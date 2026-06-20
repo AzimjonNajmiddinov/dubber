@@ -90,30 +90,28 @@ class InstantDubTranslationParsingTest extends TestCase
         $this->invokeParser($job, $batch, '1. We need to leave right now {neutral|normal}');
     }
 
-    public function test_batch_translation_parser_rejects_cyrillic_for_uzbek(): void
+    public function test_batch_translation_parser_transliterates_cyrillic_for_uzbek_tts(): void
     {
         $job = new TranslateInstantDubBatchJob('parse-test', 0, 1, 'uz', 'ru');
         $batch = [
             ['text' => 'Привет, как дела?', 'start' => 0.0, 'end' => 2.0],
         ];
 
-        $this->expectException(RuntimeException::class);
-        $this->expectExceptionMessage('used Cyrillic for Uzbek line(s): 1');
+        $parsed = $this->invokeParser($job, $batch, '1. Қалайсан? {neutral|normal}');
 
-        $this->invokeParser($job, $batch, '1. Привет, как дела? {neutral|normal}');
+        $this->assertSame('Qalaysan?', $parsed[0]['text']);
     }
 
-    public function test_micro_translation_parser_rejects_cyrillic_for_uzbek(): void
+    public function test_micro_translation_parser_transliterates_cyrillic_for_uzbek_tts(): void
     {
         $job = new TranslateInstantDubMicroBatchJob('parse-test', [], 'uz', 'ru');
         $batch = [
             ['text' => 'Привет, как дела?', 'start' => 0.0, 'end' => 2.0],
         ];
 
-        $this->expectException(RuntimeException::class);
-        $this->expectExceptionMessage('used Cyrillic for Uzbek line(s): 1');
+        $parsed = $this->invokeParser($job, $batch, '1. Қалайсан? {neutral|normal}');
 
-        $this->invokeParser($job, $batch, '1. Привет, как дела? {neutral|normal}');
+        $this->assertSame('Qalaysan?', $parsed[0]['text']);
     }
 
     public function test_auto_batch_translation_parser_rejects_obvious_english_copy_for_uzbek(): void

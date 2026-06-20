@@ -1,8 +1,14 @@
+x-instant-dub-environment: &instant-dub-environment
+  INSTANT_DUB_INITIAL_WAVE_LOOKAHEAD: "${INSTANT_DUB_INITIAL_WAVE_LOOKAHEAD:-4}"
+  INSTANT_DUB_MIN_HLS_SWITCH_RUNWAY: "${INSTANT_DUB_MIN_HLS_SWITCH_RUNWAY:-5}"
+
 services:
   app:
     build:
       context: .
       dockerfile: docker/php/Dockerfile
+    environment:
+      <<: *instant-dub-environment
     container_name: movie_dubber_app
     volumes:
       - .:/var/www
@@ -24,6 +30,8 @@ services:
     build:
       context: .
       dockerfile: docker/php/Dockerfile
+    environment:
+      <<: *instant-dub-environment
     container_name: movie_dubber_horizon
     command: php -d memory_limit=512M artisan horizon
     volumes:

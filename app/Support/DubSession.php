@@ -11,7 +11,7 @@ use Illuminate\Support\Facades\Redis;
 class DubSession
 {
     const TTL = 86400; // 24 hours
-    const HLS_MASTER_REWRITE_VERSION = 'v4';
+    const HLS_MASTER_REWRITE_VERSION = 'v5';
 
     // ── Key builders ──────────────────────────────────────────────────────────
 

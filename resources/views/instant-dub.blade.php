@@ -348,10 +348,7 @@
             return true;
         }
 
-        const duration = Number.isFinite(video.duration) ? video.duration : 0;
-        const minAhead = duration >= 7200 ? 180 : (duration >= 3600 ? 120 : 60);
-
-        return continuousUntil >= current + minAhead;
+        return continuousUntil > current + 1;
     }
 
     async function switchToDubHls(masterUrl) {
@@ -494,12 +491,7 @@
             }
 
             if (isHlsFlow && data.hls && data.hls.playable && !hlsSwitchedToDub) {
-                if (!hasDubRunwayForCurrentPlayback(data.hls)) {
-                    const until = Math.max(0, Number(data.hls.continuous_until || 0));
-                    statusText.textContent = `Dubbed HLS ready until ${formatTime(until)} — preparing more runway...`;
-                } else {
-                    await switchToDubHls(data.hls.hls_url || data.hls.master_url || data.hls_url || data.master_url);
-                }
+                await switchToDubHls(data.hls.hls_url || data.hls.master_url || data.hls_url || data.master_url);
             }
 
             // Update total when server reports it

@@ -241,6 +241,41 @@ class InstantDubHlsReadinessTest extends TestCase
         $this->assertEquals(150.0, $ready['continuous_until']);
     }
 
+    public function test_long_hls_movie_can_switch_after_first_verified_post_intro_chunk(): void
+    {
+        $sessionId = 'long-hls-early-switch-test';
+        $aacDir = sys_get_temp_dir() . '/instant-dub-readiness-' . uniqid();
+        @mkdir($aacDir, 0755, true);
+        $this->dirs[] = $aacDir;
+        $sourceFile = $this->tempFile('source-0.ts', str_repeat('s', 128));
+        $this->files[] = "{$aacDir}/bg-1.ts";
+        file_put_contents("{$aacDir}/bg-1.ts", str_repeat('d', 128));
+
+        $session = [
+            'total_bg_chunks' => 240,
+            'hls_dub_start_time' => 30.0,
+            'aac_base_dir' => $aacDir,
+            'video_duration' => 7200.0,
+            'created_at' => now()->subMinutes(20)->toIso8601String(),
+        ];
+
+        Redis::shouldReceive('hgetall')
+            ->with(DubSession::bgChunksKey($sessionId))
+            ->once()
+            ->andReturn([
+                '0' => json_encode(['start' => 0.0, 'end' => 30.0, 'path' => $sourceFile]),
+                '1' => json_encode(['start' => 30.0, 'end' => 60.0, 'path' => $sourceFile, 'dub_ready' => true]),
+                '2' => json_encode(['start' => 60.0, 'end' => 90.0, 'planned' => true]),
+            ]);
+
+        $ready = InstantDubHlsReadiness::readyWindow($sessionId, $session, $aacDir);
+
+        $this->assertTrue($ready['ready']);
+        $this->assertSame(1, $ready['last_ready_bg_idx']);
+        $this->assertEquals(30.0, $ready['ready_seconds']);
+        $this->assertEquals(5.0, $ready['required_seconds']);
+    }
+
     private function tempFile(string $name, string $contents): string
     {
         $path = sys_get_temp_dir() . '/' . uniqid('dub-test-', true) . '-' . $name;

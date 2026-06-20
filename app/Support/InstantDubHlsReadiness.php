@@ -10,23 +10,7 @@ class InstantDubHlsReadiness
 
     public static function requiredSwitchBufferSeconds(array $session): float
     {
-        $duration = (float) ($session['video_duration'] ?? 0.0);
-        $totalBg = (int) ($session['total_bg_chunks'] ?? 0);
-        $estimatedDuration = max($duration, $totalBg * 30.0);
-        $dubStart = max(0.0, (float) ($session['hls_dub_start_time'] ?? 0.0));
-        $createdAt = isset($session['created_at']) ? strtotime((string) $session['created_at']) : false;
-        $elapsed = $createdAt ? max(0.0, (float) (time() - $createdAt)) : 0.0;
-        $viewerPositionAfterDubStart = max(0.0, $elapsed - $dubStart);
-
-        if ($estimatedDuration >= 7200.0) {
-            return max(240.0, $viewerPositionAfterDubStart + 120.0);
-        }
-
-        if ($estimatedDuration >= 3600.0) {
-            return max(180.0, $viewerPositionAfterDubStart + 90.0);
-        }
-
-        return max(120.0, $viewerPositionAfterDubStart + 60.0);
+        return max(5.0, (float) config('dubber.instant_dub.min_hls_switch_runway', 5.0));
     }
 
     public static function chunkMixCoverage(string $sessionId, array $session, float $start, float $end): array

@@ -352,8 +352,6 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
             throw new \RuntimeException('Translation response produced empty line(s): ' . implode(', ', $empty));
         }
 
-        $this->rejectBadTranslationOutput($batch, $sourceTexts);
-
         // Replace stray Cyrillic characters with Latin equivalents
         if ($this->language === 'uz') {
             $cyrToLat = [
@@ -380,24 +378,13 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
             unset($seg);
         }
 
+        $this->rejectBadTranslationOutput($batch, $sourceTexts);
+
         return $batch;
     }
 
     private function rejectBadTranslationOutput(array $batch, array $sourceTexts): void
     {
-        if ($this->language === 'uz') {
-            $cyrillic = [];
-            foreach ($batch as $idx => $seg) {
-                if (preg_match('/[а-яА-ЯёЁўқғҳЎҚҒҲ]{3,}/u', $seg['text'] ?? '')) {
-                    $cyrillic[] = $idx + 1;
-                }
-            }
-
-            if (!empty($cyrillic)) {
-                throw new \RuntimeException('Translation response used Cyrillic for Uzbek line(s): ' . implode(', ', $cyrillic));
-            }
-        }
-
         $explicitDifferentSource = $this->translateFrom && $this->translateFrom !== 'auto' && $this->translateFrom !== $this->language;
         $autoSource = !$this->translateFrom || $this->translateFrom === 'auto';
         if (!$explicitDifferentSource && !$autoSource) {
