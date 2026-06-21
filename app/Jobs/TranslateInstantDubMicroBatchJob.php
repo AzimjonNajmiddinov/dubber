@@ -69,7 +69,9 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
             $text = trim(preg_replace('/\[[^\]]*\]\s*/', '', $text));
             $text = str_replace('`', '\'', $text);
             // Strip *emphasis* markers — kept as metadata by translator but not speakable
-            $text = preg_replace('/\*([^*]+)\*/', '$1', $text);
+            $text = $this->scrubUtf8(preg_replace('/\*([^*]+)\*/', '$1', $text));
+            $sourceText = $seg['source_text'] ?? ($this->segments[$i]['text'] ?? null);
+            $sourceText = $sourceText !== null ? $this->scrubUtf8($sourceText) : null;
 
             $slotEnd = isset($translated[$i + 1])
                 ? (float) $translated[$i + 1]['start']
@@ -80,7 +82,7 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
                 $seg['start'], $seg['end'], $this->language,
                 $seg['speaker'] ?? 'M1',
                 $slotEnd,
-                $seg['source_text'] ?? ($this->segments[$i]['text'] ?? null),
+                $sourceText,
                 $seg['delivery'] ?? null,
                 0,
             )->onQueue('segment-generation');
@@ -592,6 +594,7 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
 
     private function sanitizeForTts(string $text): string
     {
+        $text = $this->scrubUtf8($text);
         $text = html_entity_decode($text, ENT_QUOTES | ENT_HTML5, 'UTF-8');
         $text = strip_tags($text);
         $text = preg_replace('/\s*\{(?:emotion:)?[a-z]+\|(?:pace:)?[a-z]+\}\s*$/i', '', $text);
@@ -605,6 +608,22 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
         $text = preg_replace('/\s+/u', ' ', $text);
 
         return trim($text, " \t\n\r\0\x0B\"“”«»");
+    }
+
+    private function scrubUtf8(?string $text): string
+    {
+        $text = (string) $text;
+        if ($text === '') {
+            return '';
+        }
+
+        if (function_exists('mb_scrub')) {
+            return mb_scrub($text, 'UTF-8');
+        }
+
+        $clean = @iconv('UTF-8', 'UTF-8//IGNORE', $text);
+
+        return $clean === false ? '' : $clean;
     }
 
     private function extractDelivery(string $text, array &$seg): string

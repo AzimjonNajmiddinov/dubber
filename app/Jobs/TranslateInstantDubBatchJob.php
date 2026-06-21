@@ -122,7 +122,8 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         foreach ($batch as $localIdx => $seg) {
             $text = trim($seg['text']);
             $text = trim(preg_replace('/\[[^\]]*\]\s*/', '', $text));
-            $text = str_replace('`', '\'', $text);
+            $text = $this->scrubUtf8(str_replace('`', '\'', $text));
+            $sourceText = isset($seg['source_text']) ? $this->scrubUtf8($seg['source_text']) : null;
 
             // slotEnd = next segment's start (within batch or from next batch)
             $slotEnd = isset($batch[$localIdx + 1])
@@ -138,7 +139,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
                 $this->language,
                 $seg['speaker'] ?? 'M1',
                 $slotEnd,
-                $seg['source_text'] ?? null,
+                $sourceText,
                 $seg['delivery'] ?? null,
                 $this->waveIndex,
             )->onQueue('segment-generation');
@@ -1093,6 +1094,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
 
     private function sanitizeForTts(string $text): string
     {
+        $text = $this->scrubUtf8($text);
         $text = html_entity_decode($text, ENT_QUOTES | ENT_HTML5, 'UTF-8');
         $text = strip_tags($text);
         $text = preg_replace('/\s*\{(?:emotion:)?[a-z]+\|(?:pace:)?[a-z]+\}\s*$/i', '', $text);
@@ -1106,6 +1108,22 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         $text = preg_replace('/\s+/u', ' ', $text);
 
         return trim($text, " \t\n\r\0\x0B\"“”«»");
+    }
+
+    private function scrubUtf8(?string $text): string
+    {
+        $text = (string) $text;
+        if ($text === '') {
+            return '';
+        }
+
+        if (function_exists('mb_scrub')) {
+            return mb_scrub($text, 'UTF-8');
+        }
+
+        $clean = @iconv('UTF-8', 'UTF-8//IGNORE', $text);
+
+        return $clean === false ? '' : $clean;
     }
 
     /** Extract {emotion|pace} delivery hint from end of translated text. Mutates $seg. */
