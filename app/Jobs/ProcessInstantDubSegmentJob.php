@@ -80,13 +80,26 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
             try {
                 $this->generateWithEdgeTts($rawMp3, $tmpDir, $speakerEntry);
             } catch (\Throwable $ttsEx) {
-                DubSession::patch($this->sessionId, [
-                    'status' => 'error',
-                    'error' => 'TTS failed: ' . Str::limit($ttsEx->getMessage(), 300),
-                ]);
-                Log::error("[DUB] [{$title}] Edge TTS unavailable for seg #{$this->index}; stopping session: " . $ttsEx->getMessage(), [
-                    'session' => $this->sessionId,
-                ]);
+                try {
+                    $silentMp3 = $this->generateSilentTtsPlaceholder($tmpDir, $slotDuration);
+                    $silentDuration = $this->getAudioDuration($silentMp3) ?: max(0.25, $slotDuration);
+                    $this->storeReadyChunkAndDispatch($silentMp3, $silentDuration, [
+                        'tts_failed' => true,
+                        'tts_error' => Str::limit($ttsEx->getMessage(), 300),
+                    ], false);
+
+                    Log::warning("[DUB] [{$title}] Edge TTS unavailable for seg #{$this->index}; using silent placeholder: " . Str::limit($ttsEx->getMessage(), 200), [
+                        'session' => $this->sessionId,
+                    ]);
+                } catch (\Throwable $fallbackEx) {
+                    DubSession::patch($this->sessionId, [
+                        'status' => 'error',
+                        'error' => 'TTS failed: ' . Str::limit($ttsEx->getMessage(), 300),
+                    ]);
+                    Log::error("[DUB] [{$title}] Edge TTS unavailable for seg #{$this->index}; fallback placeholder failed: " . $fallbackEx->getMessage(), [
+                        'session' => $this->sessionId,
+                    ]);
+                }
                 return;
             }
 
@@ -122,47 +135,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
                 }
             }
 
-            // 3. Move audio to persistent per-session directory (avoids base64 bloat in Redis)
-            $audioDir = DubSession::audioDir($this->sessionId);
-            @mkdir($audioDir, 0755, true);
-            $ext       = pathinfo($finalMp3, PATHINFO_EXTENSION) ?: 'mp3';
-            $audioPath = "{$audioDir}/seg_{$this->index}.{$ext}";
-            rename($finalMp3, $audioPath);
-
-            // 4. Save TTS chunk metadata to Redis (path only — no base64)
-            Redis::setex(DubSession::chunkKey($this->sessionId, $this->index), DubSession::TTL, json_encode([
-                'index'          => $this->index,
-                'start_time'     => $this->startTime,
-                'end_time'       => $this->endTime,
-                'slot_end'       => $this->slotEnd,
-                'text'           => $this->text,
-                'source_text'    => $this->sourceText,
-                'speaker'        => $this->speaker,
-                'audio_path'     => $audioPath,
-                'audio_duration' => $ttsDuration,
-            ]));
-
-            // 5. Energy transfer — bg chunk tayyor bo'lsa shu yerda apply qilish
-            // (yangi kinoda bg tez, TTS kech bo'ladi; shuning uchun TTS tarafdan ham chaqiramiz)
-            $this->applyEnergyTransferIfBgReady();
-
-            // 6. Dispatch GenerateBgChunkJob for bg chunks overlapping this segment.
-            // ShouldBeUnique + 3s delay collapses concurrent TTS completions into one ffmpeg run.
-            $bgHashData = Redis::hgetall(DubSession::bgChunksKey($this->sessionId)) ?? [];
-            foreach ($bgHashData as $bgIdx => $bgJson) {
-                $bg = json_decode($bgJson, true);
-                $cs = (float) ($bg['start'] ?? 0);
-                $ce = (float) ($bg['end']   ?? 0);
-                if ($this->startTime < $ce && $this->endTime > $cs) {
-                    GenerateBgChunkJob::dispatch($this->sessionId, (int) $bgIdx, $cs, $ce)
-                        ->onQueue('bg-mix')
-                        ->delay(now()->addSeconds(3));
-                }
-            }
-
-            // 5. Increment ready counter and dispatch cache persist on completion
-            $this->incrementReady();
-            $this->dispatchPersistIfComplete();
+            $this->storeReadyChunkAndDispatch($finalMp3, $ttsDuration);
 
             Log::info("[DUB] [{$title}] Segment #{$this->index} ready ({$this->speaker}, " . round($ttsDuration, 2) . "s): " . Str::limit($this->text, 60), [
                 'session' => $this->sessionId,
@@ -189,6 +162,86 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         Log::error("[DUB] Segment #{$this->index} killed by worker: " . Str::limit($exception->getMessage(), 100), [
             'session' => $this->sessionId,
         ]);
+    }
+
+    private function storeReadyChunkAndDispatch(
+        string $finalMp3,
+        float $ttsDuration,
+        array $extra = [],
+        bool $applyEnergy = true,
+    ): string {
+        $audioDir = DubSession::audioDir($this->sessionId);
+        @mkdir($audioDir, 0755, true);
+
+        $ext = pathinfo($finalMp3, PATHINFO_EXTENSION) ?: 'mp3';
+        $audioPath = "{$audioDir}/seg_{$this->index}.{$ext}";
+        @unlink($audioPath);
+        if (!@rename($finalMp3, $audioPath)) {
+            throw new \RuntimeException("Unable to store TTS audio for segment #{$this->index}");
+        }
+
+        $payload = array_merge([
+            'index'          => $this->index,
+            'start_time'     => $this->startTime,
+            'end_time'       => $this->endTime,
+            'slot_end'       => $this->slotEnd,
+            'text'           => $this->text,
+            'source_text'    => $this->sourceText,
+            'speaker'        => $this->speaker,
+            'audio_path'     => $audioPath,
+            'audio_duration' => $ttsDuration,
+        ], $extra);
+
+        Redis::setex(DubSession::chunkKey($this->sessionId, $this->index), DubSession::TTL, json_encode($payload));
+
+        if ($applyEnergy) {
+            $this->applyEnergyTransferIfBgReady();
+        }
+
+        $this->dispatchBgChunksForSegment();
+        $this->incrementReady();
+        $this->dispatchPersistIfComplete();
+
+        return $audioPath;
+    }
+
+    private function dispatchBgChunksForSegment(): void
+    {
+        // ShouldBeUnique + 3s delay collapses concurrent TTS completions into one ffmpeg run.
+        $bgHashData = Redis::hgetall(DubSession::bgChunksKey($this->sessionId)) ?? [];
+        foreach ($bgHashData as $bgIdx => $bgJson) {
+            $bg = json_decode($bgJson, true);
+            $cs = (float) ($bg['start'] ?? 0);
+            $ce = (float) ($bg['end'] ?? 0);
+            if ($this->startTime < $ce && $this->endTime > $cs) {
+                GenerateBgChunkJob::dispatch($this->sessionId, (int) $bgIdx, $cs, $ce)
+                    ->onQueue('bg-mix')
+                    ->delay(now()->addSeconds(3));
+            }
+        }
+    }
+
+    private function generateSilentTtsPlaceholder(string $tmpDir, float $duration): string
+    {
+        $duration = max(0.25, min(30.0, $duration));
+        $outputMp3 = "{$tmpDir}/seg_{$this->index}_silent.mp3";
+
+        $result = Process::timeout(10)->run([
+            'ffmpeg', '-y',
+            '-f', 'lavfi',
+            '-t', (string) round($duration, 3),
+            '-i', 'anullsrc=r=44100:cl=mono',
+            '-codec:a', 'libmp3lame',
+            '-b:a', '64k',
+            $outputMp3,
+        ]);
+
+        if (!$result->successful() || !file_exists($outputMp3) || filesize($outputMp3) <= 100) {
+            @unlink($outputMp3);
+            throw new \RuntimeException('Unable to generate silent TTS placeholder: ' . Str::limit($result->errorOutput(), 200));
+        }
+
+        return $outputMp3;
     }
 
     private function generateWithEdgeTts(string $outputMp3, string $tmpDir, array $speakerEntry = []): void

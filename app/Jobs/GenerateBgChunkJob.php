@@ -274,6 +274,7 @@ class GenerateBgChunkJob implements ShouldQueue, ShouldBeUnique
             'hls_required_seconds' => round((float) $window['required_seconds'], 3),
             'hls_continuous_until' => round((float) $window['continuous_until'], 3),
             'hls_last_ready_bg_idx' => $window['last_ready_bg_idx'],
+            'hls_complete' => true,
         ]);
 
         PersistDubCacheJob::dispatch($this->sessionId)->onQueue('default');

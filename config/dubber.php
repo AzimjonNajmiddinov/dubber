@@ -86,7 +86,7 @@ return [
         // More lookahead keeps long movies ahead of playback without dispatching
         // the whole title at once.
         'initial_wave_lookahead' => (int) env('INSTANT_DUB_INITIAL_WAVE_LOOKAHEAD', 4),
-        'min_hls_switch_runway' => (float) env('INSTANT_DUB_MIN_HLS_SWITCH_RUNWAY', 5.0),
+        'min_hls_switch_runway' => (float) env('INSTANT_DUB_MIN_HLS_SWITCH_RUNWAY', 90.0),
     ],
 
     // Safety clamps (reduced to avoid ultrasound-like high pitches)

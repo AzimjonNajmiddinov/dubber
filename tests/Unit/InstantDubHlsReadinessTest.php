@@ -241,15 +241,19 @@ class InstantDubHlsReadinessTest extends TestCase
         $this->assertEquals(150.0, $ready['continuous_until']);
     }
 
-    public function test_long_hls_movie_can_switch_after_first_verified_post_intro_chunk(): void
+    public function test_long_hls_movie_waits_for_configured_post_intro_runway(): void
     {
-        $sessionId = 'long-hls-early-switch-test';
+        config(['dubber.instant_dub.min_hls_switch_runway' => 90.0]);
+
+        $sessionId = 'long-hls-runway-switch-test';
         $aacDir = sys_get_temp_dir() . '/instant-dub-readiness-' . uniqid();
         @mkdir($aacDir, 0755, true);
         $this->dirs[] = $aacDir;
         $sourceFile = $this->tempFile('source-0.ts', str_repeat('s', 128));
-        $this->files[] = "{$aacDir}/bg-1.ts";
-        file_put_contents("{$aacDir}/bg-1.ts", str_repeat('d', 128));
+        foreach ([1, 2, 3] as $idx) {
+            $this->files[] = "{$aacDir}/bg-{$idx}.ts";
+            file_put_contents("{$aacDir}/bg-{$idx}.ts", str_repeat('d', 128));
+        }
 
         $session = [
             'total_bg_chunks' => 240,
@@ -268,12 +272,30 @@ class InstantDubHlsReadinessTest extends TestCase
                 '2' => json_encode(['start' => 60.0, 'end' => 90.0, 'planned' => true]),
             ]);
 
-        $ready = InstantDubHlsReadiness::readyWindow($sessionId, $session, $aacDir);
+        $notReady = InstantDubHlsReadiness::readyWindow($sessionId, $session, $aacDir);
 
+        $this->assertFalse($notReady['ready']);
+        $this->assertSame(1, $notReady['last_ready_bg_idx']);
+        $this->assertEquals(30.0, $notReady['ready_seconds']);
+        $this->assertEquals(90.0, $notReady['required_seconds']);
+
+        Redis::shouldReceive('hgetall')
+            ->with(DubSession::bgChunksKey($sessionId))
+            ->once()
+            ->andReturn([
+                '0' => json_encode(['start' => 0.0, 'end' => 30.0, 'path' => $sourceFile]),
+                '1' => json_encode(['start' => 30.0, 'end' => 60.0, 'path' => $sourceFile, 'dub_ready' => true]),
+                '2' => json_encode(['start' => 60.0, 'end' => 90.0, 'path' => $sourceFile, 'dub_ready' => true]),
+                '3' => json_encode(['start' => 90.0, 'end' => 120.0, 'path' => $sourceFile, 'dub_ready' => true]),
+                '4' => json_encode(['start' => 120.0, 'end' => 150.0, 'planned' => true]),
+            ]);
+
+        $ready = InstantDubHlsReadiness::readyWindow($sessionId, $session, $aacDir);
         $this->assertTrue($ready['ready']);
-        $this->assertSame(1, $ready['last_ready_bg_idx']);
-        $this->assertEquals(30.0, $ready['ready_seconds']);
-        $this->assertEquals(5.0, $ready['required_seconds']);
+        $this->assertSame(3, $ready['last_ready_bg_idx']);
+        $this->assertEquals(90.0, $ready['ready_seconds']);
+        $this->assertEquals(90.0, $ready['required_seconds']);
+        $this->assertEquals(120.0, $ready['continuous_until']);
     }
 
     private function tempFile(string $name, string $contents): string

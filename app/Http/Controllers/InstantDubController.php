@@ -237,6 +237,7 @@ class InstantDubController extends Controller
                 'required_seconds' => (float) ($session['hls_required_seconds'] ?? 0.0),
                 'continuous_until' => (float) ($session['hls_continuous_until'] ?? 0.0),
                 'last_ready_bg_idx' => $session['hls_last_ready_bg_idx'] ?? null,
+                'complete' => (bool) ($session['hls_complete'] ?? (($session['status'] ?? null) === 'complete')),
             ]),
             'chunks' => $chunks,
         ]);
@@ -366,6 +367,7 @@ class InstantDubController extends Controller
                             'required_seconds' => (float) ($session['hls_required_seconds'] ?? 0.0),
                             'continuous_until' => $hlsContinuousUntil,
                             'last_ready_bg_idx' => $session['hls_last_ready_bg_idx'] ?? null,
+                            'complete' => (bool) ($session['hls_complete'] ?? (($session['status'] ?? null) === 'complete')),
                             'master_url' => $this->hlsMasterUrl($sessionId, $playable),
                             'hls_url' => $this->hlsMasterUrl($sessionId, $playable),
                         ],
@@ -1602,6 +1604,7 @@ class InstantDubController extends Controller
                     'hls_required_seconds' => 0.0,
                     'hls_continuous_until' => 0.0,
                     'hls_last_ready_bg_idx' => null,
+                    'hls_complete' => false,
                 ];
 
                 if (!empty($session['playable']) || !empty($session['hls_switch_verified'])) {
@@ -1635,13 +1638,16 @@ class InstantDubController extends Controller
             'hls_required_seconds' => round((float) $window['required_seconds'], 3),
             'hls_continuous_until' => round((float) $window['continuous_until'], 3),
             'hls_last_ready_bg_idx' => $window['last_ready_bg_idx'],
+            'hls_complete' => !empty($window['complete']),
         ];
 
         $changed = (bool) ($session['playable'] ?? false) !== $playable
             || (bool) ($session['hls_switch_verified'] ?? false) !== $patch['hls_switch_verified']
             || (string) ($session['hls_verified_format'] ?? '') !== (string) ($patch['hls_verified_format'] ?? '')
             || (float) ($session['hls_ready_seconds'] ?? -1) !== $patch['hls_ready_seconds']
-            || (int) ($session['hls_last_ready_bg_idx'] ?? -999) !== (int) ($patch['hls_last_ready_bg_idx'] ?? -999);
+            || (float) ($session['hls_continuous_until'] ?? -1) !== $patch['hls_continuous_until']
+            || (int) ($session['hls_last_ready_bg_idx'] ?? -999) !== (int) ($patch['hls_last_ready_bg_idx'] ?? -999)
+            || (bool) ($session['hls_complete'] ?? false) !== $patch['hls_complete'];
 
         if ($changed) {
             DubSession::patch($sessionId, $patch);

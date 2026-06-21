@@ -391,12 +391,17 @@
         const current = Number.isFinite(video.currentTime) ? video.currentTime : 0;
         const dubStart = Number(hls.dub_start_time || 0);
         const continuousUntil = Number(hls.continuous_until || 0);
+        const requiredRunway = Math.max(5, Number(hls.required_seconds || 90));
 
-        if (current < dubStart - 2) {
+        if (hls.complete) {
             return true;
         }
 
-        return continuousUntil > current + 1;
+        if (current < dubStart - 2) {
+            return continuousUntil >= dubStart + requiredRunway;
+        }
+
+        return continuousUntil >= current + requiredRunway;
     }
 
     async function switchToDubHls(masterUrl) {

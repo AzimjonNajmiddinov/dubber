@@ -7,10 +7,14 @@ use Illuminate\Support\Facades\Redis;
 class InstantDubHlsReadiness
 {
     private const OVERLAP_EPSILON = 0.05;
+    private const DEFAULT_SWITCH_BUFFER_SECONDS = 90.0;
 
     public static function requiredSwitchBufferSeconds(array $session): float
     {
-        return max(5.0, (float) config('dubber.instant_dub.min_hls_switch_runway', 5.0));
+        return max(
+            5.0,
+            (float) config('dubber.instant_dub.min_hls_switch_runway', self::DEFAULT_SWITCH_BUFFER_SECONDS),
+        );
     }
 
     public static function chunkMixCoverage(string $sessionId, array $session, float $start, float $end): array
