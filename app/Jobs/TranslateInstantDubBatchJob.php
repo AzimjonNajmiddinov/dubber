@@ -869,7 +869,8 @@ class TranslateInstantDubBatchJob implements ShouldQueue
             . "- emotion: neutral angry happy sad fearful excited calm whisper\n"
             . "- pace: normal fast slow\n"
             . "Example: \"3. Qo'ying! {angry|fast}\"\n"
-            . "Do not include timing info. Do not skip or merge lines. Keep exact numbering.";
+            . "Do not include timing info. Do not skip or merge lines. Keep exact numbering.\n"
+            . "Return ONLY the numbered translated lines. No analysis, no intro sentence, no explanation.";
 
         return [
             ['role' => 'system', 'content' => $systemPrompt],
@@ -890,8 +891,9 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         foreach (preg_split('/\n+/', $translated) as $line) {
             $parsedLine = $this->parseNumberedTranslationLine($line);
             if ($parsedLine !== null) {
-                [$idx, $text] = $parsedLine;
-                if (isset($batch[$idx])) {
+                [$number, $text] = $parsedLine;
+                $idx = $this->resolveTranslationLineIndex($number, $batch);
+                if ($idx !== null && isset($batch[$idx])) {
                     $batch[$idx]['speaker'] = 'M1';
                     $batch[$idx]['text']    = $this->sanitizeForTts(
                         $this->extractDelivery($text, $batch[$idx])
@@ -973,7 +975,31 @@ class TranslateInstantDubBatchJob implements ShouldQueue
 
         $number = $m[1] !== '' ? $m[1] : $m[2];
 
-        return [(int) $number - 1, trim($m[3])];
+        return [(int) $number, trim($m[3])];
+    }
+
+    private function resolveTranslationLineIndex(int $number, array $batch): ?int
+    {
+        $localIdx = $number - 1;
+        if (array_key_exists($localIdx, $batch)) {
+            return $localIdx;
+        }
+
+        foreach ($batch as $idx => $seg) {
+            if (!isset($seg['index'])) {
+                continue;
+            }
+
+            $segmentIndex = (int) $seg['index'];
+            if ($number === $segmentIndex || $number === $segmentIndex + 1) {
+                return $idx;
+            }
+        }
+
+        $globalStart = $this->segmentOffset + ($this->batchIndex * 15);
+        $globalIdx = $number - $globalStart - 1;
+
+        return array_key_exists($globalIdx, $batch) ? $globalIdx : null;
     }
 
     private function rejectBadTranslationOutput(array $batch, array $sourceTexts): void

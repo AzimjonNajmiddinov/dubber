@@ -193,6 +193,41 @@ class InstantDubTranslationParsingTest extends TestCase
         $this->assertSame('Dunyo katta', $parsed[1]['text']);
     }
 
+    public function test_batch_translation_parser_accepts_global_subtitle_numbering(): void
+    {
+        $job = new TranslateInstantDubBatchJob('parse-test', 2, 3, 'uz', 'en', 64);
+        $batch = [
+            ['text' => "They'll be destroyed, Captain,", 'start' => 582.791, 'end' => 584.832],
+            ['text' => 'but in the arena,', 'start' => 584.833, 'end' => 586.665],
+        ];
+
+        $parsed = $this->invokeParser($job, $batch, implode("\n", [
+            "I'll analyze each line carefully first.",
+            "95. Yo'q qilinadi, Kapitan, {neutral|normal}",
+            "96. lekin arenada, {neutral|normal}",
+        ]));
+
+        $this->assertSame("Yo'q qilinadi, Kapitan,", $parsed[0]['text']);
+        $this->assertSame('lekin arenada,', $parsed[1]['text']);
+    }
+
+    public function test_micro_translation_parser_accepts_segment_index_numbering(): void
+    {
+        $job = new TranslateInstantDubMicroBatchJob('parse-test', [], 'uz', 'en');
+        $batch = [
+            ['index' => 94, 'text' => "They'll be destroyed, Captain,", 'start' => 582.791, 'end' => 584.832],
+            ['index' => 95, 'text' => 'but in the arena,', 'start' => 584.833, 'end' => 586.665],
+        ];
+
+        $parsed = $this->invokeParser($job, $batch, implode("\n", [
+            "95. Yo'q qilinadi, Kapitan, {neutral|normal}",
+            "96. lekin arenada, {neutral|normal}",
+        ]));
+
+        $this->assertSame("Yo'q qilinadi, Kapitan,", $parsed[0]['text']);
+        $this->assertSame('lekin arenada,', $parsed[1]['text']);
+    }
+
     public function test_micro_translation_falls_back_when_provider_output_is_unusable(): void
     {
         config([

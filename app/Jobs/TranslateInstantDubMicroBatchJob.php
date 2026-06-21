@@ -142,7 +142,8 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
                 . "2. Keep names/titles recognizable, but transliterate them to the target language's normal pronunciation when needed for TTS.\n"
                 . "3. Punctuation = emotion: ! anger, ... hesitation, — pause, ? question.\n"
                 . "\n" . 'Format: "1. text {emotion|pace}"' . "\n"
-                . "Append delivery hint: emotion=neutral/angry/happy/sad/fearful/excited/calm/whisper, pace=normal/fast/slow";
+                . "Append delivery hint: emotion=neutral/angry/happy/sad/fearful/excited/calm/whisper, pace=normal/fast/slow\n"
+                . "Return ONLY the numbered translated lines. No analysis, no intro sentence, no explanation.";
         } else {
             $systemPrompt = "You are a dubbing voice director writing dialogue for a film in {$toLang}. You watch the scene, understand the story and emotions, then write what the characters would ACTUALLY SAY in {$toLang} — not a translation, but a re-creation.\n"
                 . "\nCRITICAL: Each line has a TIME SLOT [Ns]. Your text must be speakable within that duration. Short slot = concise. Long slot = natural phrasing. Never write more than fits.\n"
@@ -154,7 +155,8 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
                 . "3. Keep names/titles recognizable, but transliterate them to the target language's normal pronunciation when needed for TTS.\n"
                 . "4. Punctuation = emotion: ! anger, ... hesitation, — pause, ? question.\n"
                 . "\n" . 'Format: "1. text {emotion|pace}"' . "\n"
-                . "Append delivery hint: emotion=neutral/angry/happy/sad/fearful/excited/calm/whisper, pace=normal/fast/slow";
+                . "Append delivery hint: emotion=neutral/angry/happy/sad/fearful/excited/calm/whisper, pace=normal/fast/slow\n"
+                . "Return ONLY the numbered translated lines. No analysis, no intro sentence, no explanation.";
         }
 
         $messages = [
@@ -391,8 +393,9 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
         foreach (preg_split('/\n+/', $translated) as $line) {
             $parsedLine = $this->parseNumberedTranslationLine($line);
             if ($parsedLine !== null) {
-                [$idx, $text] = $parsedLine;
-                if (isset($batch[$idx])) {
+                [$number, $text] = $parsedLine;
+                $idx = $this->resolveTranslationLineIndex($number, $batch);
+                if ($idx !== null && isset($batch[$idx])) {
                     $batch[$idx]['speaker'] = 'M1';
                     $batch[$idx]['text']    = $this->sanitizeForTts(
                         $this->extractDelivery($text, $batch[$idx])
@@ -474,7 +477,28 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
 
         $number = $m[1] !== '' ? $m[1] : $m[2];
 
-        return [(int) $number - 1, trim($m[3])];
+        return [(int) $number, trim($m[3])];
+    }
+
+    private function resolveTranslationLineIndex(int $number, array $batch): ?int
+    {
+        $localIdx = $number - 1;
+        if (array_key_exists($localIdx, $batch)) {
+            return $localIdx;
+        }
+
+        foreach ($batch as $idx => $seg) {
+            if (!isset($seg['index'])) {
+                continue;
+            }
+
+            $segmentIndex = (int) $seg['index'];
+            if ($number === $segmentIndex || $number === $segmentIndex + 1) {
+                return $idx;
+            }
+        }
+
+        return null;
     }
 
     private function rejectBadTranslationOutput(array $batch, array $sourceTexts): void
