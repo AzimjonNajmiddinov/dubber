@@ -52,22 +52,23 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
 
         try {
             $slotDuration = $this->endTime - $this->startTime;
+            $tmpDir = '/tmp/instant-dub-' . $this->sessionId;
+            @mkdir($tmpDir, 0755, true);
 
-            if (trim($this->text) === '') {
-                DubSession::patch($this->sessionId, [
-                    'status' => 'error',
-                    'error' => "TTS text is empty for segment #{$this->index}",
-                ]);
-                Log::error("[DUB] [{$title}] Segment #{$this->index} has empty TTS text; stopping session", [
+            if ($this->isSilentPlaceholderText($this->text)) {
+                $silentMp3 = $this->generateSilentTtsPlaceholder($tmpDir, $slotDuration);
+                $silentDuration = $this->getAudioDuration($silentMp3) ?: max(0.25, $slotDuration);
+                $this->storeReadyChunkAndDispatch($silentMp3, $silentDuration, [
+                    'translation_missing' => true,
+                ], false);
+
+                Log::warning("[DUB] [{$title}] Segment #{$this->index} has no speakable translated text; using silent placeholder", [
                     'session' => $this->sessionId,
                 ]);
                 return;
             }
 
             // 1. Generate Edge TTS audio for the current instant-dub flow.
-            $tmpDir = '/tmp/instant-dub-' . $this->sessionId;
-            @mkdir($tmpDir, 0755, true);
-
             $rawMp3 = "{$tmpDir}/seg_{$this->index}.mp3";
 
             // Read per-speaker Edge voice entry from voice map.
@@ -563,7 +564,7 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
 
         // Read language info from session
         $language = $session['language'] ?? 'uz';
-        $translateFrom = $session['translate_from'] ?? '';
+        $translateFrom = $session['translate_from'] ?? ($session['detected_language'] ?? '');
 
         DispatchWaveJob::dispatch(
             $this->sessionId, $nextWave, $language, $translateFrom, $waveOffset,
@@ -572,5 +573,15 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         Log::info("[DUB] Wave {$waveIndex} at {$newReady}/{$waveTotal} ({$threshold} threshold) — dispatched wave {$nextWave}", [
             'session' => $this->sessionId,
         ]);
+    }
+
+    private function isSilentPlaceholderText(string $text): bool
+    {
+        $text = trim(preg_replace('/\s*\{(?:emotion:)?[a-z]+\|(?:pace:)?[a-z]+\}\s*$/i', '', trim($text)) ?? '');
+        if ($text === '') {
+            return true;
+        }
+
+        return preg_replace('/[^\p{L}\p{N}]+/u', '', $text) === '';
     }
 }

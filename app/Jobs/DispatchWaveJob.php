@@ -60,7 +60,8 @@ class DispatchWaveJob implements ShouldQueue
             json_encode(['total' => count($segments), 'ready' => 0])
         );
 
-        $needsTranslation = $this->translateFrom && $this->translateFrom !== $this->language;
+        $translateFrom = $this->translateFrom ?: (string) ($session['translate_from'] ?? '');
+        $needsTranslation = $translateFrom !== '' && $translateFrom !== $this->language;
 
         if (!$needsTranslation) {
             // No translation — dispatch TTS directly
@@ -109,7 +110,7 @@ class DispatchWaveJob implements ShouldQueue
                 0,
                 $totalBatches,
                 $this->language,
-                $this->translateFrom,
+                $translateFrom,
                 $this->globalSegmentOffset,
                 $this->waveIndex, // pass wave index for wave-specific batch keys
             )->onQueue('segment-generation');
@@ -123,7 +124,7 @@ class DispatchWaveJob implements ShouldQueue
         // Clean up wave key (segments are now in batch keys)
         Redis::del($waveKey);
 
-        Log::info("[DUB] [{$title}] Wave {$this->waveIndex}: " . count($segments) . " segments in {$totalBatches} batches dispatched ({$this->translateFrom}→{$this->language})", [
+        Log::info("[DUB] [{$title}] Wave {$this->waveIndex}: " . count($segments) . " segments in {$totalBatches} batches dispatched ({$translateFrom}→{$this->language})", [
             'session' => $this->sessionId,
             'offset'  => $this->globalSegmentOffset,
         ]);

@@ -88,6 +88,10 @@ class PrepareInstantDubJob implements ShouldQueue
             Log::info("[DUB] [{$title}] Auto-detected subtitle language: {$detectedLang}", ['session' => $this->sessionId]);
         }
 
+        $this->updateSession([
+            'translate_from' => $this->translateFrom,
+        ]);
+
         // 2. Parse SRT
         $allSegments = SrtParser::parse($srt);
 
@@ -139,6 +143,7 @@ class PrepareInstantDubJob implements ShouldQueue
             'total_segments'     => count($segments),
             'status'             => 'processing',
             'hls_dub_start_time' => (float) ($segments[0]['start'] ?? 0.0),
+            'translate_from'      => $this->translateFrom,
         ]);
 
         $this->storeSegmentPlan($segments, $allSegments, $fullDialogueText);
@@ -362,6 +367,7 @@ class PrepareInstantDubJob implements ShouldQueue
             'total_segments'     => $total,
             'status'             => 'processing',
             'hls_dub_start_time' => (float) ($segments->first()->start_time ?? 0.0),
+            'translate_from'      => $this->translateFrom,
         ]);
 
         Redis::setex(

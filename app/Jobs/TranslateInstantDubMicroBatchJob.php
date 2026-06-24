@@ -63,7 +63,7 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
         $this->mergeVoiceMap($speakers);
 
         // Dispatch TTS for micro-batch segments (global indices 0, 1, 2, ...).
-        // Translation parsing has already rejected skipped or empty lines.
+        // Translation parsing has already converted tiny gaps into explicit silent placeholders.
         foreach ($translated as $i => $seg) {
             $text = trim($seg['text']);
             $text = trim(preg_replace('/\[[^\]]*\]\s*/', '', $text));
@@ -420,10 +420,6 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
         }
         unset($seg);
 
-        if (!empty($missing)) {
-            throw new \RuntimeException('Translation response skipped line(s): ' . implode(', ', $missing));
-        }
-
         $empty = [];
         foreach ($batch as $idx => $seg) {
             if (trim((string) ($seg['text'] ?? '')) === '') {
@@ -431,9 +427,7 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
             }
         }
 
-        if (!empty($empty)) {
-            throw new \RuntimeException('Translation response produced empty line(s): ' . implode(', ', $empty));
-        }
+        $this->fillUnusableTranslationLines($batch, $missing, $empty);
 
         // Replace stray Cyrillic characters with Latin equivalents
         if ($this->language === 'uz') {
@@ -464,6 +458,35 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
         $this->rejectBadTranslationOutput($batch, $sourceTexts);
 
         return $batch;
+    }
+
+    private function fillUnusableTranslationLines(array &$batch, array $missing, array $empty): void
+    {
+        $lineNumbers = array_values(array_unique(array_merge($missing, $empty)));
+        if (empty($lineNumbers)) {
+            return;
+        }
+
+        $maxSilentLines = max(1, (int) floor(count($batch) * 0.34));
+        if (count($lineNumbers) > $maxSilentLines) {
+            throw new \RuntimeException('Translation response skipped or emptied too many line(s): ' . implode(', ', $lineNumbers));
+        }
+
+        foreach ($lineNumbers as $lineNumber) {
+            $idx = $lineNumber - 1;
+            if (!isset($batch[$idx])) {
+                continue;
+            }
+
+            $batch[$idx]['speaker'] = $batch[$idx]['speaker'] ?? 'M1';
+            $batch[$idx]['text'] = '...';
+            $batch[$idx]['delivery'] = 'neutral|normal';
+            $batch[$idx]['translation_missing'] = true;
+        }
+
+        Log::warning("[DUB] Micro-batch using silent placeholder for translation line(s): " . implode(', ', $lineNumbers), [
+            'session' => $this->sessionId,
+        ]);
     }
 
     private function parseNumberedTranslationLine(string $line): ?array

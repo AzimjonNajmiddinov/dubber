@@ -11,7 +11,7 @@ use Tests\TestCase;
 
 class InstantDubTranslationParsingTest extends TestCase
 {
-    public function test_batch_translation_parser_rejects_missing_lines(): void
+    public function test_batch_translation_parser_fills_single_missing_line_with_silent_placeholder(): void
     {
         $job = new TranslateInstantDubBatchJob('parse-test', 0, 1, 'uz', 'en');
         $batch = [
@@ -19,13 +19,14 @@ class InstantDubTranslationParsingTest extends TestCase
             ['text' => 'World', 'start' => 1.0, 'end' => 2.0],
         ];
 
-        $this->expectException(RuntimeException::class);
-        $this->expectExceptionMessage('skipped line(s): 2');
+        $parsed = $this->invokeParser($job, $batch, '1. Salom {neutral|normal}');
 
-        $this->invokeParser($job, $batch, '1. Salom {neutral|normal}');
+        $this->assertSame('Salom', $parsed[0]['text']);
+        $this->assertSame('...', $parsed[1]['text']);
+        $this->assertTrue($parsed[1]['translation_missing']);
     }
 
-    public function test_micro_translation_parser_rejects_missing_lines(): void
+    public function test_micro_translation_parser_fills_single_missing_line_with_silent_placeholder(): void
     {
         $job = new TranslateInstantDubMicroBatchJob('parse-test', [], 'uz', 'en');
         $batch = [
@@ -33,36 +34,37 @@ class InstantDubTranslationParsingTest extends TestCase
             ['text' => 'World', 'start' => 1.0, 'end' => 2.0],
         ];
 
-        $this->expectException(RuntimeException::class);
-        $this->expectExceptionMessage('skipped line(s): 2');
+        $parsed = $this->invokeParser($job, $batch, '1. Salom {neutral|normal}');
 
-        $this->invokeParser($job, $batch, '1. Salom {neutral|normal}');
+        $this->assertSame('Salom', $parsed[0]['text']);
+        $this->assertSame('...', $parsed[1]['text']);
+        $this->assertTrue($parsed[1]['translation_missing']);
     }
 
-    public function test_batch_translation_parser_rejects_empty_lines(): void
+    public function test_batch_translation_parser_fills_single_empty_line_with_silent_placeholder(): void
     {
         $job = new TranslateInstantDubBatchJob('parse-test', 0, 1, 'uz', 'en');
         $batch = [
             ['text' => 'Hello', 'start' => 0.0, 'end' => 1.0],
         ];
 
-        $this->expectException(RuntimeException::class);
-        $this->expectExceptionMessage('empty line(s): 1');
+        $parsed = $this->invokeParser($job, $batch, '1. {neutral|normal}');
 
-        $this->invokeParser($job, $batch, '1. {neutral|normal}');
+        $this->assertSame('...', $parsed[0]['text']);
+        $this->assertTrue($parsed[0]['translation_missing']);
     }
 
-    public function test_micro_translation_parser_rejects_empty_lines(): void
+    public function test_micro_translation_parser_fills_single_empty_line_with_silent_placeholder(): void
     {
         $job = new TranslateInstantDubMicroBatchJob('parse-test', [], 'uz', 'en');
         $batch = [
             ['text' => 'Hello', 'start' => 0.0, 'end' => 1.0],
         ];
 
-        $this->expectException(RuntimeException::class);
-        $this->expectExceptionMessage('empty line(s): 1');
+        $parsed = $this->invokeParser($job, $batch, '1. {neutral|normal}');
 
-        $this->invokeParser($job, $batch, '1. {neutral|normal}');
+        $this->assertSame('...', $parsed[0]['text']);
+        $this->assertTrue($parsed[0]['translation_missing']);
     }
 
     public function test_batch_translation_parser_rejects_copied_source_text(): void
