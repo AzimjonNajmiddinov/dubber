@@ -28,7 +28,7 @@ class NaturalSpeechProcessor
      * Process TTS audio to sound more natural and human.
      *
      * @param string $audioPath Path to TTS audio file
-     * @param array $direction Acting direction from ActingDirector
+     * @param array $direction Acting direction metadata
      * @param array $options Additional options
      * @return string Path to processed audio
      */

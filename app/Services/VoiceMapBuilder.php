@@ -18,7 +18,7 @@ class VoiceMapBuilder
 
     /**
      * Build a voice entry for a forced voice selection.
-     * Returns null for drivers that don't use force_voice (edge, aisha use default variants).
+     * Returns null for drivers that don't use force_voice (edge uses default variants).
      */
     public static function forceVoiceEntry(string $driver, string $forceVoice): ?array
     {
@@ -39,7 +39,7 @@ class VoiceMapBuilder
             ];
         }
 
-        return null; // edge, aisha: force_voice has no meaning
+        return null; // edge: force_voice has no meaning
     }
 
     /**
@@ -63,10 +63,6 @@ class VoiceMapBuilder
                 'female' => array_map($toVariant('female'), $femaleFiles),
                 'child'  => array_map($toVariant('child'),  $childFiles),
             ];
-        }
-
-        if ($driver === 'aisha') {
-            return VoiceVariants::forAisha();
         }
 
         return VoiceVariants::forLanguage($language);

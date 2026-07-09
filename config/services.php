@@ -57,38 +57,13 @@ return [
         'url' => env('DEMUCS_SERVICE_URL', 'http://demucs:8000'),
     ],
 
-    'aisha' => [
-        'url' => env('AISHA_API_URL', 'https://back.aisha.group/api/v1'),
-        'api_key' => env('AISHA_API_KEY', ''),
-    ],
-
     'uzbekvoice' => [
         'url' => env('UZBEKVOICE_API_URL', 'https://uzbekvoice.ai/api/v1'),
         'api_key' => env('UZBEKVOICE_API_KEY', ''),
     ],
 
-    'xtts' => [
-        'url' => env('XTTS_SERVICE_URL', 'http://localhost:8001'),
-    ],
-
-    'f5tts' => [
-        'url' => env('F5TTS_SERVICE_URL', 'http://localhost:8004'),
-    ],
-
     'mms_tts' => [
         'url' => env('MMS_TTS_SERVICE_URL', 'http://localhost:8005'),
-    ],
-
-    'uzbektranslator' => [
-        'url' => env('UZBEKTRANSLATOR_SERVICE_URL'),
-    ],
-
-    'local_translation' => [
-        'enabled' => env('LOCAL_TRANSLATION_ENABLED', false),
-        'driver' => env('LOCAL_TRANSLATION_DRIVER', 'ollama'),
-        'url' => env('LOCAL_TRANSLATION_URL', 'http://localhost:11434'),
-        'model' => env('LOCAL_TRANSLATION_MODEL', 'qwen2.5:7b-instruct'),
-        'allow_paid_fallback' => env('LOCAL_TRANSLATION_ALLOW_PAID_FALLBACK', true),
     ],
 
     'prosody_transfer' => [

@@ -38,31 +38,6 @@ class VoiceVariants
         ];
     }
 
-    /**
-     * Get AISHA voice variants (Uzbek only).
-     *
-     * @return array{male: array, female: array, child: array}
-     */
-    public static function forAisha(): array
-    {
-        return [
-            'male' => [
-                ['voice' => 'jaxongir', 'mood' => 'neutral'],
-                ['voice' => 'jaxongir', 'mood' => 'happy'],
-                ['voice' => 'jaxongir', 'mood' => 'sad'],
-            ],
-            'female' => [
-                ['voice' => 'gulnoza', 'mood' => 'neutral'],
-                ['voice' => 'gulnoza', 'mood' => 'happy'],
-                ['voice' => 'gulnoza', 'mood' => 'sad'],
-            ],
-            'child' => [
-                ['voice' => 'gulnoza', 'mood' => 'happy'],
-                ['voice' => 'jaxongir', 'mood' => 'happy'],
-            ],
-        ];
-    }
-
     private static function voicesByLanguage(string $language): array
     {
         // Preferred voices for common languages (best quality picks)

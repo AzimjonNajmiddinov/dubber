@@ -1027,64 +1027,6 @@ class InstantDubController extends Controller
         return $this->silentHlsAudioResponse();
     }
 
-    public function hlsAudioSegment(string $sessionId, int $index)
-    {
-        $aacFile = $this->aacDir($sessionId) . "/{$index}.aac";
-
-        if (file_exists($aacFile) && filesize($aacFile) > 10) {
-            $session = $this->getSession($sessionId);
-            $status = $session['status'] ?? 'processing';
-            $cacheControl = in_array($status, ['complete', 'stopped']) ? 'max-age=86400' : 'max-age=10';
-
-            return response()->file($aacFile, [
-                'Content-Type' => 'audio/aac',
-                'Access-Control-Allow-Origin' => '*',
-                'Cache-Control' => $cacheControl,
-            ]);
-        }
-
-        Log::warning("[DUB] Segment {$index} pre-gen AAC missing, using fallback", [
-            'session' => $sessionId,
-            'exists' => file_exists($aacFile),
-            'size' => file_exists($aacFile) ? filesize($aacFile) : 'N/A',
-        ]);
-
-        // Fallback: generate on-demand if pre-gen missed (e.g. race condition, old session)
-        $chunkJson = Redis::get(DubSession::chunkKey($sessionId, $index));
-        if (!$chunkJson) {
-            return $this->silentAacResponse();
-        }
-
-        $session = $this->getSession($sessionId);
-        $originalAudioPath = $session['original_audio_path'] ?? null;
-
-        $chunk = json_decode($chunkJson, true);
-        [$slotStart, $slotEnd] = $this->computeSlotBounds($sessionId, $index, $chunk);
-        $aacData = $this->generateAacSegment($chunk, $originalAudioPath, $slotStart, $slotEnd);
-
-        if (!$aacData) {
-            return response('Failed to generate AAC segment', 500);
-        }
-
-        // Cache to disk for subsequent requests
-        $aacDir = dirname($aacFile);
-        try {
-            if (!is_dir($aacDir)) {
-                mkdir($aacDir, 0755, true);
-            }
-            file_put_contents($aacFile, $aacData);
-        } catch (\Throwable) {
-            // Non-fatal
-        }
-
-        return response($aacData, 200, [
-            'Content-Type' => 'audio/aac',
-            'Content-Length' => strlen($aacData),
-            'Access-Control-Allow-Origin' => '*',
-            'Cache-Control' => 'max-age=86400',
-        ]);
-    }
-
     // ── HLS Subtitle endpoints ──
 
     public function hlsSubtitlePlaylist(string $sessionId)
@@ -1237,33 +1179,6 @@ class InstantDubController extends Controller
 
     // ── Private helpers ──
 
-    /**
-     * Return a minimal silent AAC ADTS segment for missing chunks.
-     */
-    private function silentAacResponse()
-    {
-        $silentFile = storage_path('app/silent.aac');
-        if (!file_exists($silentFile)) {
-            Process::timeout(5)->run([
-                'ffmpeg', '-y', '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=mono',
-                '-t', '0.5', '-c:a', 'aac', '-b:a', '32k', '-f', 'adts', $silentFile,
-            ]);
-        }
-
-        if (file_exists($silentFile)) {
-            return response()->file($silentFile, [
-                'Content-Type' => 'audio/aac',
-                'Access-Control-Allow-Origin' => '*',
-                'Cache-Control' => 'max-age=86400',
-            ]);
-        }
-
-        return response('', 200, [
-            'Content-Type' => 'audio/aac',
-            'Access-Control-Allow-Origin' => '*',
-        ]);
-    }
-
     private function hlsMediaFile(string $dir, string $baseName): string
     {
         $tsFile = "{$dir}/{$baseName}.ts";
@@ -1405,42 +1320,6 @@ class InstantDubController extends Controller
             'Access-Control-Allow-Origin' => '*',
             'Cache-Control' => 'no-store',
         ]);
-    }
-
-    /**
-     * Generate a silent AAC ADTS segment of the given duration (for lead/tail gaps).
-     * Result is NOT cached to disk — generated fresh per request (durations vary).
-     */
-    private function silentAacOfDuration(float $duration): \Illuminate\Http\Response
-    {
-        $duration = max(0.1, round($duration, 3));
-        $destFile = sys_get_temp_dir() . '/silent-' . (int) ($duration * 1000) . 'ms.aac';
-
-        if (!file_exists($destFile) || filesize($destFile) < 10) {
-            $buildFile = $destFile . '.tmp.' . getmypid();
-            Process::timeout(15)->run([
-                'ffmpeg', '-y', '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=mono',
-                '-t', (string) $duration,
-                '-c:a', 'aac', '-b:a', '32k', '-f', 'adts', $buildFile,
-            ]);
-            if (file_exists($buildFile) && filesize($buildFile) > 10) {
-                rename($buildFile, $destFile);
-            } else {
-                @unlink($buildFile);
-            }
-        }
-
-        if (file_exists($destFile) && filesize($destFile) > 10) {
-            $data = file_get_contents($destFile);
-            return response($data, 200, [
-                'Content-Type'   => 'audio/aac',
-                'Content-Length' => strlen($data),
-                'Access-Control-Allow-Origin' => '*',
-                'Cache-Control'  => 'max-age=3600',
-            ]);
-        }
-
-        return $this->silentAacResponse();
     }
 
     private function uncachedHlsAudioSliceResponse(string $sourceFile, float $offset, float $duration): \Illuminate\Http\Response
@@ -1670,114 +1549,6 @@ class InstantDubController extends Controller
             is_dir($entry) ? $this->deleteDirectory($entry) : @unlink($entry);
         }
         @rmdir($dir);
-    }
-
-    /**
-     * Compute the extended slot boundaries for a segment.
-     * Segment 0 starts at time 0 (absorbs leading gap for timeline alignment).
-     * Each segment extends to the next chunk's start_time.
-     */
-    private function computeSlotBounds(string $sessionId, int $index, array $chunk): array
-    {
-        $startTime = (float) ($chunk['start_time'] ?? 0);
-        $endTime = (float) ($chunk['end_time'] ?? 0);
-
-        $slotStart = $startTime;
-
-        $nextJson = Redis::get(DubSession::chunkKey($sessionId, $index + 1));
-        if ($nextJson) {
-            $next = json_decode($nextJson, true);
-            $slotEnd = (float) ($next['start_time'] ?? $endTime);
-        } else {
-            $slotEnd = $endTime;
-        }
-
-        return [$slotStart, $slotEnd];
-    }
-
-    /**
-     * Generate AAC for a TTS segment.
-     * Mixes TTS with original audio at 20% if available.
-     * Pads/trims to exact slot duration.
-     */
-    private function generateAacSegment(array $chunk, ?string $originalAudioPath = null, float $slotStart = -1, float $slotEnd = -1): ?string
-    {
-        $tmpDir = sys_get_temp_dir() . '/hls-dub-' . Str::random(8);
-        @mkdir($tmpDir, 0755, true);
-
-        $mp3File = "{$tmpDir}/seg.mp3";
-        $aacFile = "{$tmpDir}/seg.aac";
-        $hasBg = $originalAudioPath && file_exists($originalAudioPath);
-
-        try {
-            $startTime = (float) ($chunk['start_time'] ?? 0);
-            $endTime = (float) ($chunk['end_time'] ?? 0);
-
-            if ($slotStart < 0) $slotStart = $startTime;
-            if ($slotEnd < 0) $slotEnd = $endTime;
-
-            $slotDuration = round(max(0.1, $slotEnd - $slotStart), 3);
-            $preGap = max(0, $startTime - $slotStart);
-            $preGapMs = (int) round($preGap * 1000);
-
-            // Resolve audio: prefer in-memory base64, fall back to reading from disk
-            $audioBase64 = $chunk['audio_base64'] ?? null;
-            if (!$audioBase64 && !empty($chunk['audio_path']) && file_exists($chunk['audio_path'])) {
-                $audioBase64 = base64_encode(file_get_contents($chunk['audio_path']));
-            }
-
-            if (!$audioBase64) {
-                if ($hasBg) {
-                    Process::timeout(20)->run([
-                        'ffmpeg', '-y',
-                        '-i', $originalAudioPath,
-                        '-ss', (string) round($slotStart, 3),
-                        '-t', (string) $slotDuration,
-                        '-af', 'volume=0.2',
-                        '-ac', '1', '-ar', '44100', '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
-                    ]);
-                } else {
-                    Process::timeout(15)->run([
-                        'ffmpeg', '-y', '-f', 'lavfi', '-t', (string) $slotDuration,
-                        '-i', 'anullsrc=r=44100:cl=mono',
-                        '-c:a', 'aac', '-b:a', '64k', '-f', 'adts', $aacFile,
-                    ]);
-                }
-            } else {
-                file_put_contents($mp3File, base64_decode($audioBase64));
-
-                if ($hasBg) {
-                    $delayFilter = $preGapMs > 0 ? "adelay={$preGapMs}|{$preGapMs}," : '';
-                    Process::timeout(20)->run([
-                        'ffmpeg', '-y',
-                        '-i', $mp3File,
-                        '-ss', (string) round($slotStart, 3), '-i', $originalAudioPath,
-                        '-filter_complex',
-                        "[0:a]aresample=44100,{$delayFilter}apad=whole_dur={$slotDuration}[tts];[1:a]atrim=duration={$slotDuration},volume=0.2[bg];[tts][bg]amix=inputs=2:duration=first:normalize=0",
-                        '-t', (string) $slotDuration,
-                        '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
-                    ]);
-                } else {
-                    $delayFilter = $preGapMs > 0 ? "adelay={$preGapMs}|{$preGapMs}," : '';
-                    Process::timeout(15)->run([
-                        'ffmpeg', '-y', '-i', $mp3File,
-                        '-af', "aresample=44100,{$delayFilter}apad=whole_dur={$slotDuration}",
-                        '-t', (string) $slotDuration,
-                        '-ac', '1', '-c:a', 'aac', '-b:a', '128k', '-f', 'adts', $aacFile,
-                    ]);
-                }
-            }
-
-            if (!file_exists($aacFile) || filesize($aacFile) < 10) {
-                return null;
-            }
-
-            return file_get_contents($aacFile);
-        } finally {
-            @unlink($mp3File);
-            @unlink($aacFile);
-            @rmdir($tmpDir);
-        }
     }
 
     private function formatVttTime(float $seconds): string
