@@ -1,5 +1,13 @@
 # Over-Engineering Analysis: Dubber (Instant Dub / TTS Pipeline)
 
+> **Progress (2026-07-09):**
+> - ✅ **Phase 1 applied** — dead code deleted (~2,300 lines): `ActingDirector`, `F5TtsClient`, `XttsClient`, `AishaTtsDriver`, `LocalTranslationClient` + config/env entries, V2's dead `processSegment` path + 9 orphaned helpers, controller's legacy `{index}.aac` on-demand path + `.aac` alias routes, `$forceVoice`/local-translator/Uzbek-translator branches.
+> - ✅ **Phase 2a applied** — translation dedupe: 15 shared methods extracted to `app/Jobs/Concerns/ParsesInstantDubTranslation.php` (token-exact copies, parameterized via 3 hooks); Batch job 1,183→763 lines, MicroBatch 684→216 lines. Every translation parse fix is now made in one place.
+> - ⚠️ **Kept deliberately:** SSE `events` endpoint (production nginx logs show real traffic), `EmotionDSPProcessor`/`HybridUzbekDriver` (entangled with V2's voice-cloning path — revisit in Phase 3), `NaturalSpeechProcessor` (live on V2 path).
+> - ✅ **Phase 2b applied** — `SubtitleFetcher` service extracted from `PrepareInstantDubJob` (946→458 lines; HLS/VTT/YouTube subtitle scraping now reusable); `HlsMasterRewriter` service extracted from `InstantDubController` (1,561→1,314 lines; master-playlist rewriting is now unit-testable without HTTP).
+> - ⚠️ **Skipped deliberately:** `SegmentAudioService` — the remaining TTS jobs' audio helpers are *divergent implementations*, not copies (the literal duplication was V2 ↔ GenerateTtsForSegmentJob, resolved in Phase 1); unifying them would be redesign with behavior risk. Controller 3-way split — `HlsMasterRewriter` already delivered the testability win; the split would add churn without deleting code.
+> - ⏳ **Remaining:** Phase 4 (`Bus::batch` wave replacement — needs staging test).
+
 **Subject:** ~31,000 lines of app/view PHP whose core concept is simple: *take a video, fetch its subtitles, translate them with an LLM, synthesize speech, and serve the result as a switchable HLS audio track.*
 
 ## 1. Overall Simplification Strategy
