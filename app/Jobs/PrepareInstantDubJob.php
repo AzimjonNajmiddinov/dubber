@@ -6,6 +6,7 @@ use App\Jobs\DispatchWaveJob;
 use App\Models\InstantDub;
 use App\Services\SrtParser;
 use App\Services\SubtitleFetcher;
+use App\Services\WaveDispatcher;
 use App\Support\DubSession;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -158,7 +159,9 @@ class PrepareInstantDubJob implements ShouldQueue
         // ── Wave-based dispatch ─────────────────────────────────────────────────
         // Split segments into time-based waves (5 minutes each).
         // Wave 0 dispatches immediately for instant start; remaining waves are
-        // stored in Redis and dispatched progressively as playback progresses.
+        // stored in Redis and dispatched progressively: an initial lookahead now,
+        // then one wave at a time as the previous wave reaches 80% (the waterfall
+        // trigger in ProcessInstantDubSegmentJob).
         $WAVE_DURATION = 300.0; // 5 minutes per wave
         $waves = [];
         foreach ($segments as $i => $seg) {
@@ -169,11 +172,7 @@ class PrepareInstantDubJob implements ShouldQueue
         $waves = array_values($waves);
         $totalWaves = count($waves);
 
-        // Store wave metadata in session
-        $this->updateSession([
-            'total_waves'      => $totalWaves,
-            'waves_dispatched' => 1, // wave 0 dispatches now
-        ]);
+        $this->updateSession(['total_waves' => $totalWaves]);
 
         // Build voice map from ALL speakers (needed before any TTS)
         $allSpeakers = [];
@@ -183,132 +182,46 @@ class PrepareInstantDubJob implements ShouldQueue
         }
         $this->buildVoiceMap($allSpeakers);
 
-        // Store waves 1+ in Redis for later dispatch by DispatchWaveJob
+        // Store waves 1+ in Redis (offset embedded in the payload) for DispatchWaveJob
         $globalOffset = count($waves[0] ?? []);
         for ($w = 1; $w < $totalWaves; $w++) {
             Redis::setex(
                 DubSession::waveKey($this->sessionId, $w),
                 DubSession::TTL,
-                json_encode(array_values($waves[$w]))
-            );
-            // Track cumulative global offset for each wave
-            Redis::setex(
-                DubSession::waveKey($this->sessionId, $w) . ':offset',
-                DubSession::TTL,
-                $globalOffset
+                json_encode(['offset' => $globalOffset, 'segments' => array_values($waves[$w])])
             );
             $globalOffset += count($waves[$w]);
         }
-        // Initialize claimed-wave counter. Wave 0 is claimed now; later code
-        // raises this when it queues more waves up front.
-        Redis::setex(DubSession::wavesDispatchedKey($this->sessionId), DubSession::TTL, 1);
 
-        // Store wave 0 progress tracking
-        Redis::setex(
-            DubSession::waveProgressKey($this->sessionId, 0),
-            DubSession::TTL,
-            json_encode(['total' => count($waves[0] ?? []), 'ready' => 0])
+        // Without translation the pipeline is cheap — queue every wave up front.
+        // With translation, queue a small lookahead; the waterfall extends it.
+        $lookahead = $needsTranslation ? $this->initialTranslationWaveClaims($totalWaves) : $totalWaves;
+
+        // Claim the waves we queue now so the waterfall trigger can't double-dispatch them.
+        for ($w = 0; $w < min($lookahead, $totalWaves); $w++) {
+            Redis::setex(DubSession::waveClaimKey($this->sessionId, $w), DubSession::TTL, 1);
+        }
+
+        // Dispatch wave 0 in-process (no queue hop — audio must start immediately)
+        (new WaveDispatcher())->dispatch(
+            $this->sessionId,
+            0,
+            array_values($waves[0] ?? []),
+            0,
+            $this->language,
+            $needsTranslation ? $this->translateFrom : '',
+            ($totalWaves > 1 && !empty($waves[1])) ? (float) $waves[1][0]['start'] : null,
         );
 
-        // ── Dispatch wave 0 (same micro-batch + batch logic as before) ──────────
-        $wave0 = $waves[0] ?? [];
-
-        if (!$needsTranslation) {
-            // No translation — dispatch TTS directly for wave 0
-            foreach ($wave0 as $i => $seg) {
-                $text = trim($seg['text']);
-                $text = trim(preg_replace('/\[[^\]]*\]\s*/', '', $text));
-                $text = str_replace('`', '\'', $text);
-
-                $slotEnd = isset($wave0[$i + 1]) ? $wave0[$i + 1]['start'] : null;
-                // For last segment of wave 0, peek at wave 1's first segment
-                if ($slotEnd === null && $totalWaves > 1 && !empty($waves[1])) {
-                    $slotEnd = (float) $waves[1][0]['start'];
-                }
-
-                ProcessInstantDubSegmentJob::dispatch(
-                    $this->sessionId, $i, $text,
-                    $seg['start'], $seg['end'], $this->language,
-                    $seg['speaker'] ?? 'M1',
-                    $slotEnd,
-                    null,
-                    null,
-                    0,
-                )->onQueue('segment-generation');
-            }
-
-            // Dispatch remaining waves for no-translation path
-            for ($w = 1; $w < $totalWaves; $w++) {
-                $waveOffset = (int) Redis::get(DubSession::waveKey($this->sessionId, $w) . ':offset');
-                DispatchWaveJob::dispatch(
-                    $this->sessionId, $w, $this->language, $this->translateFrom, $waveOffset,
-                )->onQueue('segment-generation')->delay(now()->addSeconds(15 * $w));
-            }
-            Redis::setex(DubSession::wavesDispatchedKey($this->sessionId), DubSession::TTL, $totalWaves);
-            $this->updateSession(['waves_dispatched' => $totalWaves]);
-
-            Log::info("[DUB] [{$title}] Prepared (no translation): " . count($segments) . " segments in {$totalWaves} waves", [
-                'session' => $this->sessionId,
-            ]);
-            return;
+        // Queue the lookahead waves with a small stagger
+        for ($w = 1; $w < min($lookahead, $totalWaves); $w++) {
+            DispatchWaveJob::dispatch($this->sessionId, $w)
+                ->onQueue('segment-generation')
+                ->delay(now()->addSeconds(15 * $w));
         }
 
-        // 4. Micro-batch: dispatch first 3 segments of wave 0 for fast translation → immediate TTS
-        $microBatchSize = min(3, count($wave0));
-        $microSegments = array_slice($wave0, 0, $microBatchSize);
-        $remainingWave0 = array_slice($wave0, $microBatchSize);
-
-        $nextSegmentStart = !empty($remainingWave0) ? (float) $remainingWave0[0]['start'] : null;
-
-        TranslateInstantDubMicroBatchJob::dispatch(
-            $this->sessionId,
-            $microSegments,
-            $this->language,
-            $this->translateFrom,
-            $nextSegmentStart,
-        )->onQueue('segment-generation');
-
-        // 5. Store remaining wave 0 segments in batches for translation
-        $batches = array_chunk($remainingWave0, 15);
-        $totalBatches = count($batches);
-        foreach ($batches as $batchIdx => $batch) {
-            $batchKey = DubSession::batchKey($this->sessionId, $batchIdx);
-            Redis::setex($batchKey, DubSession::TTL, json_encode(array_values($batch)));
-        }
-
-        // 6. Dispatch wave 0 translation chain
-        if ($totalBatches > 0) {
-            Redis::setex("instant-dub:{$this->sessionId}:batches-remaining", DubSession::TTL, $totalBatches);
-
-            TranslateInstantDubBatchJob::dispatch(
-                $this->sessionId,
-                0,
-                $totalBatches,
-                $this->language,
-                $this->translateFrom,
-                $microBatchSize,
-            )->onQueue('segment-generation');
-        }
-
-        // 7. Schedule several waves ahead with a small stagger. Long movies must
-        // keep processing beyond the initial switch runway; the waterfall trigger
-        // still extends the pipeline once this lookahead is consumed.
-        $initialWaveClaims = $this->initialTranslationWaveClaims($totalWaves);
-        if ($initialWaveClaims > 1) {
-            Redis::setex(DubSession::wavesDispatchedKey($this->sessionId), DubSession::TTL, $initialWaveClaims);
-            $this->updateSession(['waves_dispatched' => $initialWaveClaims]);
-
-            for ($w = 1; $w < $initialWaveClaims; $w++) {
-                $waveOffset = (int) Redis::get(DubSession::waveKey($this->sessionId, $w) . ':offset');
-                DispatchWaveJob::dispatch(
-                    $this->sessionId, $w, $this->language, $this->translateFrom, $waveOffset,
-                )->onQueue('segment-generation')->delay(now()->addSeconds(15 * $w));
-            }
-        }
-
-        $wave0Count = count($wave0);
-        $otherCount = count($segments) - $wave0Count;
-        Log::info("[DUB] [{$title}] Prepared: wave 0 ({$wave0Count} segs: {$microBatchSize} micro + {$totalBatches} batches) + {$otherCount} in " . ($totalWaves - 1) . " future waves, {$this->translateFrom}->{$this->language}", [
+        Log::info("[DUB] [{$title}] Prepared: " . count($segments) . " segments in {$totalWaves} waves"
+            . " (lookahead {$lookahead}, " . ($needsTranslation ? "{$this->translateFrom}->{$this->language}" : 'no translation') . ")", [
             'session' => $this->sessionId,
         ]);
     }

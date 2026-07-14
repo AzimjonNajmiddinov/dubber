@@ -180,20 +180,12 @@ class TranslateInstantDubBatchJob implements ShouldQueue
 
     private function batchKey(int $batchIndex): string
     {
-        if ($this->waveIndex > 0) {
-            return "instant-dub:{$this->sessionId}:w{$this->waveIndex}:batch:{$batchIndex}";
-        }
-
-        return DubSession::batchKey($this->sessionId, $batchIndex);
+        return DubSession::batchKey($this->sessionId, $batchIndex, $this->waveIndex);
     }
 
     private function batchesRemainingKey(): string
     {
-        if ($this->waveIndex > 0) {
-            return "instant-dub:{$this->sessionId}:w{$this->waveIndex}:batches-remaining";
-        }
-
-        return "instant-dub:{$this->sessionId}:batches-remaining";
+        return DubSession::batchesRemainingKey($this->sessionId, $this->waveIndex);
     }
 
     private function translateBatchZero(array $batch, string $fullDialogueText): array

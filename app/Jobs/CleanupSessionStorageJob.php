@@ -81,10 +81,11 @@ class CleanupSessionStorageJob implements ShouldQueue
 
         for ($w = 0; $w < max($totalWaves, 50); $w++) {
             $keysToDelete[] = DubSession::waveKey($this->sessionId, $w);
-            $keysToDelete[] = DubSession::waveKey($this->sessionId, $w) . ':offset';
+            $keysToDelete[] = DubSession::waveKey($this->sessionId, $w) . ':offset'; // legacy sibling key
             $keysToDelete[] = DubSession::waveProgressKey($this->sessionId, $w);
             $keysToDelete[] = DubSession::waveProgressKey($this->sessionId, $w) . ':ready';
-            $keysToDelete[] = "instant-dub:{$this->sessionId}:w{$w}:batches-remaining";
+            $keysToDelete[] = DubSession::waveClaimKey($this->sessionId, $w);
+            $keysToDelete[] = DubSession::batchesRemainingKey($this->sessionId, $w);
         }
 
         if (!empty($keysToDelete)) {

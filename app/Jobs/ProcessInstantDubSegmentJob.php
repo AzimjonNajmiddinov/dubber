@@ -546,29 +546,14 @@ class ProcessInstantDubSegmentJob implements ShouldQueue
         $threshold = (int) ceil($waveTotal * 0.8);
         if ($newReady < $threshold) return;
 
-        // Only trigger once — check if next wave is already dispatched
         $nextWave = $waveIndex + 1;
         if ($nextWave >= $totalWaves) return;
 
-        // Atomic check-and-set: only dispatch if not already dispatched
-        $dispatched = (int) Redis::get(DubSession::wavesDispatchedKey($this->sessionId));
-        if ($dispatched > $nextWave) return; // already dispatched
+        // SET NX claim — exactly one segment job dispatches the next wave
+        $claimed = Redis::set(DubSession::waveClaimKey($this->sessionId, $nextWave), 1, 'EX', DubSession::TTL, 'NX');
+        if (!$claimed) return;
 
-        // Try to claim this dispatch (atomic increment prevents double dispatch)
-        $newDispatched = (int) Redis::incr(DubSession::wavesDispatchedKey($this->sessionId));
-        Redis::expire(DubSession::wavesDispatchedKey($this->sessionId), DubSession::TTL);
-        if ($newDispatched !== $nextWave + 1) return; // another segment already claimed it
-
-        // Read wave offset
-        $waveOffset = (int) Redis::get(DubSession::waveKey($this->sessionId, $nextWave) . ':offset');
-
-        // Read language info from session
-        $language = $session['language'] ?? 'uz';
-        $translateFrom = $session['translate_from'] ?? ($session['detected_language'] ?? '');
-
-        DispatchWaveJob::dispatch(
-            $this->sessionId, $nextWave, $language, $translateFrom, $waveOffset,
-        )->onQueue('segment-generation');
+        DispatchWaveJob::dispatch($this->sessionId, $nextWave)->onQueue('segment-generation');
 
         Log::info("[DUB] Wave {$waveIndex} at {$newReady}/{$waveTotal} ({$threshold} threshold) — dispatched wave {$nextWave}", [
             'session' => $this->sessionId,

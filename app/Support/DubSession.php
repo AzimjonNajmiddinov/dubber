@@ -55,9 +55,22 @@ class DubSession
         return "instant-dub:{$id}:full-dialogue";
     }
 
-    public static function batchKey(string $id, int $index): string
+    public static function batchKey(string $id, int $index, int $waveIndex = 0): string
     {
+        if ($waveIndex > 0) {
+            return "instant-dub:{$id}:w{$waveIndex}:batch:{$index}";
+        }
+
         return "instant-dub:{$id}:batch:{$index}";
+    }
+
+    public static function batchesRemainingKey(string $id, int $waveIndex = 0): string
+    {
+        if ($waveIndex > 0) {
+            return "instant-dub:{$id}:w{$waveIndex}:batches-remaining";
+        }
+
+        return "instant-dub:{$id}:batches-remaining";
     }
 
     public static function elevenLabsVoicesKey(string $id): string
@@ -129,6 +142,13 @@ class DubSession
         return "instant-dub:{$id}:wave-progress:{$waveIndex}";
     }
 
+    /** SET-NX claim that guards a wave against double dispatch. */
+    public static function waveClaimKey(string $id, int $waveIndex): string
+    {
+        return "instant-dub:{$id}:wave-claim:{$waveIndex}";
+    }
+
+    /** @deprecated Legacy counter key — kept only so cleanup deletes it for old sessions. */
     public static function wavesDispatchedKey(string $id): string
     {
         return "instant-dub:{$id}:waves-dispatched";
@@ -263,7 +283,11 @@ class DubSession
         $totalWaves = (int) ceil($totalSegments / 85); // ~85 segments per 5min wave
         for ($i = 0; $i < max($totalWaves, 50); $i++) {
             $keys[] = static::waveKey($id, $i);
+            $keys[] = static::waveKey($id, $i) . ':offset'; // legacy sibling key
             $keys[] = static::waveProgressKey($id, $i);
+            $keys[] = static::waveProgressKey($id, $i) . ':ready';
+            $keys[] = static::waveClaimKey($id, $i);
+            $keys[] = static::batchesRemainingKey($id, $i);
         }
         return $keys;
     }
