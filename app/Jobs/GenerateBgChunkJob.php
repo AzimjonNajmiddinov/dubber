@@ -114,23 +114,13 @@ class GenerateBgChunkJob implements ShouldQueue, ShouldBeUnique
             return;
         }
 
-        // Detect channel count of the bg audio chunk
-        $chanProbe = Process::timeout(5)->run([
-            'ffprobe', '-v', 'error', '-select_streams', 'a:0',
-            '-show_entries', 'stream=channels',
-            '-of', 'default=nw=1:nk=1', $bgAudioPath,
-        ]);
-        $bgChannels = (int) trim($chanProbe->output());
-
-        $bgFilter = $this->backgroundFilterForMix($bgChannels, (int) ($coverage['expected_speech'] ?? 0));
-
         $cmd = [
             'ffmpeg', '-y',
-            '-f', 'lavfi', '-t', (string) $chunkDur, '-i', 'anullsrc=r=44100:cl=stereo',
+            '-f', 'lavfi', '-t', (string) $chunkDur, '-i', 'anullsrc=r=44100:cl=mono',
             '-t', (string) $chunkDur, '-i', $bgAudioPath,
         ];
-        $filters   = [$bgFilter];
-        $mixInputs = ['[0:a]', '[bg]'];
+        $filters   = [];
+        $ttsLabels = [];
         $inputIdx  = 2;
 
         foreach (($coverage['ready_chunks'] ?? []) as $chunk) {
@@ -149,14 +139,29 @@ class GenerateBgChunkJob implements ShouldQueue, ShouldBeUnique
             $cmd[] = '-i';
             $cmd[] = $audioPath;
 
-            $filters[]   = "[{$inputIdx}:a]adelay={$ttsDelayMs}|{$ttsDelayMs},volume=3.0,aresample=44100[tts{$inputIdx}]";
-            $mixInputs[] = "[tts{$inputIdx}]";
+            $filters[]   = "[{$inputIdx}:a]adelay={$ttsDelayMs}|{$ttsDelayMs},volume=3.0,aresample=44100,aformat=channel_layouts=mono[tts{$inputIdx}]";
+            $ttsLabels[] = "[tts{$inputIdx}]";
             $inputIdx++;
         }
 
-        $filter = implode(';', $filters) . ';'
-            . implode('', $mixInputs)
-            . 'amix=inputs=' . count($mixInputs) . ':duration=first:normalize=0';
+        if (empty($ttsLabels)) {
+            // No speech in this window — original soundtrack passes through untouched.
+            $filters[] = '[1:a]aresample=44100,aformat=channel_layouts=mono,volume=1.0[bg]';
+            $filter = implode(';', $filters)
+                . ';[0:a][bg]amix=inputs=2:duration=first:normalize=0';
+        } else {
+            // Keep the original soundtrack (music/effects/ambience) near full level
+            // and duck it under the TTS with sidechain compression — studio-style
+            // dubbing. Center-channel cancellation is NOT used: it garbles music
+            // and leaves a phasey residue.
+            $filters[] = '[1:a]aresample=44100,aformat=channel_layouts=mono,volume=0.85[bgpre]';
+            $filters[] = implode('', $ttsLabels)
+                . 'amix=inputs=' . count($ttsLabels) . ':duration=longest:normalize=0[speech]';
+            $filters[] = '[speech]asplit=2[speechmix][speechkey]';
+            $filters[] = '[bgpre][speechkey]sidechaincompress=threshold=0.02:ratio=12:attack=30:release=400[bgduck]';
+            $filter = implode(';', $filters)
+                . ';[0:a][bgduck][speechmix]amix=inputs=3:duration=first:normalize=0';
+        }
 
         $cmd = array_merge($cmd, [
             '-filter_complex', $filter,
@@ -200,19 +205,6 @@ class GenerateBgChunkJob implements ShouldQueue, ShouldBeUnique
         foreach (glob("{$aacDir}/bg-{$this->chunkIndex}-from-*.ts") ?: [] as $sliceFile) {
             @unlink($sliceFile);
         }
-    }
-
-    private function backgroundFilterForMix(int $bgChannels, int $expectedSpeech): string
-    {
-        if ($expectedSpeech <= 0) {
-            return '[1:a]volume=1.0,aresample=44100[bg]';
-        }
-
-        if ($bgChannels >= 2) {
-            return '[1:a]pan=stereo|c0=c0-0.95*c1|c1=c1-0.95*c0,volume=0.18,aresample=44100[bg]';
-        }
-
-        return '[1:a]volume=0.0,aresample=44100[bg]';
     }
 
     private function checkPlayable(string $aacDir): void
