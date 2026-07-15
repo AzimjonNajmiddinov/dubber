@@ -155,8 +155,12 @@ class GenerateBgChunkJob implements ShouldQueue, ShouldBeUnique
             // dubbing. Center-channel cancellation is NOT used: it garbles music
             // and leaves a phasey residue.
             $filters[] = '[1:a]aresample=44100,aformat=channel_layouts=mono,volume=0.85[bgpre]';
+            // apad keeps the speech bus alive to the end of the chunk: when the
+            // sidechain key hits EOF the compressor stops emitting, which killed
+            // the background from the last spoken line until the chunk boundary.
             $filters[] = implode('', $ttsLabels)
-                . 'amix=inputs=' . count($ttsLabels) . ':duration=longest:normalize=0[speech]';
+                . 'amix=inputs=' . count($ttsLabels) . ':duration=longest:normalize=0'
+                . ',apad=whole_dur=' . $chunkDur . '[speech]';
             $filters[] = '[speech]asplit=2[speechmix][speechkey]';
             $filters[] = '[bgpre][speechkey]sidechaincompress=threshold=0.02:ratio=12:attack=30:release=400[bgduck]';
             $filter = implode(';', $filters)
