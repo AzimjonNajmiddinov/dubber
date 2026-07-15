@@ -30,6 +30,7 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
         public string  $language,
         public string  $translateFrom,
         public ?float  $nextSegmentStart = null,
+        public int     $retryCount = 0,
     ) {}
 
     public function handle(): void
@@ -43,6 +44,20 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
         try {
             $translated = $this->translateMicroBatch($this->segments, $fullDialogueText);
         } catch (\Throwable $e) {
+            // Transient rate-limit spike — retry once before erroring the session.
+            if ($this->retryCount < 1) {
+                self::dispatch(
+                    $this->sessionId, $this->segments, $this->language,
+                    $this->translateFrom, $this->nextSegmentStart, $this->retryCount + 1,
+                )->onQueue('segment-generation')->delay(now()->addSeconds(60));
+
+                DubSession::patch($this->sessionId, ['last_warning' => 'Translation rate-limited — retrying...']);
+                Log::warning("[DUB] [{$title}] Micro-batch translation failed (retrying in 60s): " . Str::limit($e->getMessage(), 200), [
+                    'session' => $this->sessionId,
+                ]);
+                return;
+            }
+
             DubSession::patch($this->sessionId, [
                 'status' => 'error',
                 'error' => 'Translation failed: ' . Str::limit($e->getMessage(), 500),
@@ -122,6 +137,14 @@ class TranslateInstantDubMicroBatchJob implements ShouldQueue
             $rawText = $seg['raw_text'] ?? $seg['text'];
             $maxChars = (int) round($duration * 12);
             $lines[] = ($i + 1) . '. [' . $duration . 's, max ' . $maxChars . ' chars] ' . $rawText;
+        }
+
+        // The micro-batch translates only the first ~3 lines — a short opening
+        // window of dialogue is enough context. Sending the full movie here blows
+        // the Anthropic input-tokens-per-minute limit on the very first request.
+        $dialogueLines = explode("\n", $fullDialogue);
+        if (count($dialogueLines) > 80) {
+            $fullDialogue = implode("\n", array_slice($dialogueLines, 0, 80)) . "\n(...later dialogue omitted...)";
         }
 
         $targetRules = $this->targetLanguageRules($toLang);

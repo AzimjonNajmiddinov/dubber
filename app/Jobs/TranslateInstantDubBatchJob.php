@@ -33,6 +33,7 @@ class TranslateInstantDubBatchJob implements ShouldQueue
         public string $translateFrom,
         public int    $segmentOffset = 0,
         public int    $waveIndex = 0,
+        public int    $retryCount = 0,
     ) {}
 
     public function handle(): void
@@ -82,6 +83,24 @@ class TranslateInstantDubBatchJob implements ShouldQueue
             $this->mergeVoiceMap($speakers);
 
         } catch (\Throwable $e) {
+            // Rate-limit spikes (429s) on big movies are transient — re-queue the
+            // batch with a long backoff instead of killing hours of work. Only
+            // after the retry budget is spent does the session error out.
+            if ($this->retryCount < 2) {
+                $delay = 90 * ($this->retryCount + 1);
+                self::dispatch(
+                    $this->sessionId, $this->batchIndex, $this->totalBatches,
+                    $this->language, $this->translateFrom, $this->segmentOffset,
+                    $this->waveIndex, $this->retryCount + 1,
+                )->onQueue('segment-generation')->delay(now()->addSeconds($delay));
+
+                $this->updateSession(['last_warning' => 'Translation rate-limited — retrying...']);
+                Log::warning("[DUB] [{$this->title}] Batch {$this->batchIndex} translation failed (retry " . ($this->retryCount + 1) . "/2 in {$delay}s): " . Str::limit($e->getMessage(), 200), [
+                    'session' => $this->sessionId,
+                ]);
+                return;
+            }
+
             $this->updateSession([
                 'status' => 'error',
                 'error' => 'Translation failed: ' . Str::limit($e->getMessage(), 500),
@@ -519,9 +538,21 @@ class TranslateInstantDubBatchJob implements ShouldQueue
 
     private function buildAnalysisPrompt(array $segments): array
     {
+        // Cap the sample: sending a whole movie (2000+ lines) blows the Anthropic
+        // input-tokens-per-minute limit in a single request. The main characters
+        // all appear in the opening act; later speakers are refined per batch.
+        $truncatedNote = '';
+        if (count($segments) > 300) {
+            $segments = array_slice($segments, 0, 300);
+            $truncatedNote = "\n(Only the opening ~300 lines are shown — identify the characters from these.)";
+        }
+
         $lines = [];
         foreach ($segments as $i => $seg) {
             $lines[] = ($i + 1) . '. ' . $seg['text'];
+        }
+        if ($truncatedNote !== '') {
+            $lines[] = $truncatedNote;
         }
 
         $sourceLangRules = '';
