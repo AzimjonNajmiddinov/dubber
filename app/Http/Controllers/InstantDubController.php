@@ -575,14 +575,12 @@ class InstantDubController extends Controller
             $m3u8 .= "#EXT-X-PLAYLIST-TYPE:EVENT\n";
         }
 
-        $wroteEntry = false;
+        // Segments are served with continuous absolute timestamps (shiftedTsResponse),
+        // so no EXT-X-DISCONTINUITY tags are needed. Safari's native HLS mutes audio
+        // renditions whose discontinuities don't align with the video rendition.
         foreach ($entries as $entry) {
-            if (!empty($wroteEntry)) {
-                $m3u8 .= "#EXT-X-DISCONTINUITY\n";
-            }
             $m3u8 .= "#EXTINF:{$entry['duration']},\n";
             $m3u8 .= "{$entry['uri']}\n";
-            $wroteEntry = true;
         }
 
         if ($timelinePlanned) {
@@ -696,16 +694,11 @@ class InstantDubController extends Controller
         $dur = round($this->frameAlignedDuration($cs, $ce), 6);
 
         if (InstantDubHlsReadiness::chunkHasVerifiedDub($sessionId, $session, $index, $bgChunk, $aacDir)) {
-            $status  = $session['status'] ?? 'processing';
-            return response()->file($aacFile, [
-                'Content-Type'              => $this->hlsAudioContentType($aacFile),
-                'Access-Control-Allow-Origin' => '*',
-                'Cache-Control'             => 'no-store',
-            ]);
+            return $this->shiftedTsResponse($aacFile, $cs, $dur);
         }
 
         // Never serve original audio under a dubbed URL after dub start; players cache it.
-        return $this->silentHlsAudioResponse($dur);
+        return $this->silentHlsAudioResponse($dur, $cs);
     }
 
     public function hlsBgSourceSegment(string $sessionId, int $index)
@@ -719,19 +712,15 @@ class InstantDubController extends Controller
         $dur = round($this->frameAlignedDuration($cs, $ce), 6);
 
         if ($cs >= $dubStartTime - 0.05) {
-            return $this->silentHlsAudioResponse($dur);
+            return $this->silentHlsAudioResponse($dur, $cs);
         }
 
         $rawFile = $bgChunk['path'] ?? null;
         if ($rawFile && file_exists($rawFile) && filesize($rawFile) > 10) {
-            return response()->file($rawFile, [
-                'Content-Type' => $this->hlsAudioContentType($rawFile),
-                'Access-Control-Allow-Origin' => '*',
-                'Cache-Control' => 'no-store',
-            ]);
+            return $this->shiftedTsResponse($rawFile, $cs, $dur);
         }
 
-        return $this->silentHlsAudioResponse($dur);
+        return $this->silentHlsAudioResponse($dur, $cs);
     }
 
     public function hlsBgSourceSliceSegment(string $sessionId, int $index, int $offsetMs)
@@ -745,15 +734,15 @@ class InstantDubController extends Controller
         $duration = round($this->frameAlignedDuration($cs, $cs + $offset), 6);
 
         if ($duration <= 0.1) {
-            return $this->silentHlsAudioResponse(0.1);
+            return $this->silentHlsAudioResponse(0.1, $cs);
         }
 
         $rawFile = $bgChunk['path'] ?? null;
         if ($rawFile && file_exists($rawFile) && filesize($rawFile) > 10) {
-            return $this->uncachedHlsAudioSliceResponse($rawFile, 0.0, $duration);
+            return $this->uncachedHlsAudioSliceResponse($rawFile, 0.0, $duration, $cs);
         }
 
-        return $this->silentHlsAudioResponse($duration);
+        return $this->silentHlsAudioResponse($duration, $cs);
     }
 
     public function hlsBgSliceSegment(string $sessionId, int $index, int $offsetMs)
@@ -770,12 +759,12 @@ class InstantDubController extends Controller
         $chunkDuration = round($this->frameAlignedDuration($cs, $ce), 6);
 
         if ($duration <= 0.1) {
-            return $this->silentHlsAudioResponse(0.1);
+            return $this->silentHlsAudioResponse(0.1, $cs + $offset);
         }
 
         $hasDub = InstantDubHlsReadiness::chunkHasVerifiedDub($sessionId, $session, $index, $bgChunk, $aacDir);
         if (!$hasDub) {
-            return $this->silentHlsAudioResponse($duration);
+            return $this->silentHlsAudioResponse($duration, $cs + $offset);
         }
 
         $sliceFile = "{$aacDir}/bg-{$index}-from-{$offsetMs}.ts";
@@ -797,15 +786,56 @@ class InstantDubController extends Controller
                 rename($tmpFile, $sliceFile);
             } else {
                 @unlink($tmpFile);
-                return $this->silentHlsAudioResponse($duration);
+                return $this->silentHlsAudioResponse($duration, $cs + $offset);
             }
         }
 
-        return response()->file($sliceFile, [
-            'Content-Type' => $this->hlsAudioContentType($sliceFile),
+        return $this->shiftedTsResponse($sliceFile, $cs + $offset, $duration);
+    }
+
+    /**
+     * Serve a 0-based MPEG-TS segment with its timestamps shifted to the
+     * segment's absolute position in the movie. All chunk files are encoded
+     * starting at PTS 0; a per-segment EXT-X-DISCONTINUITY used to bridge
+     * that, but Safari's native HLS (AppleCoreMedia / all iPhones) mutes an
+     * audio rendition whose discontinuities don't align with the video's.
+     * Continuous absolute timestamps need no discontinuities at all.
+     * The shift is a stream copy (no re-encode) cached next to the source.
+     */
+    private function shiftedTsResponse(string $file, float $absStart, float $fallbackDuration)
+    {
+        $offsetMs = (int) round($absStart * 1000);
+        $headers = [
+            'Content-Type' => 'video/mp2t',
             'Access-Control-Allow-Origin' => '*',
             'Cache-Control' => 'no-store',
-        ]);
+        ];
+
+        if ($offsetMs <= 0) {
+            return response()->file($file, $headers);
+        }
+
+        $shifted = preg_replace('/\.ts$/', ".pts{$offsetMs}.ts", $file);
+        if (!file_exists($shifted) || filesize($shifted) <= 10 || filemtime($shifted) < filemtime($file)) {
+            $tmpFile = "{$shifted}.tmp." . getmypid();
+            $result = Process::timeout(20)->run([
+                'ffmpeg', '-y',
+                '-i', $file,
+                '-c', 'copy',
+                '-muxdelay', '0', '-muxpreload', '0',
+                '-output_ts_offset', (string) round($absStart, 3),
+                '-f', 'mpegts', $tmpFile,
+            ]);
+
+            if ($result->successful() && file_exists($tmpFile) && filesize($tmpFile) > 10) {
+                rename($tmpFile, $shifted);
+            } else {
+                @unlink($tmpFile);
+                return $this->silentHlsAudioResponse($fallbackDuration, $absStart);
+            }
+        }
+
+        return response()->file($shifted, $headers);
     }
 
     private function hlsSliceNeedsRefresh(
@@ -1099,10 +1129,11 @@ class InstantDubController extends Controller
         return null;
     }
 
-    private function silentHlsAudioResponse(float $duration = 0.5): \Illuminate\Http\Response
+    private function silentHlsAudioResponse(float $duration = 0.5, float $absStart = 0.0): \Illuminate\Http\Response
     {
         $duration = max(0.1, round($duration, 3));
-        $destFile = sys_get_temp_dir() . '/silent-hls-' . (int) ($duration * 1000) . 'ms.ts';
+        $offsetMs = max(0, (int) round($absStart * 1000));
+        $destFile = sys_get_temp_dir() . '/silent-hls-' . (int) ($duration * 1000) . 'ms-pts' . $offsetMs . '.ts';
 
         if (!file_exists($destFile) || filesize($destFile) < 10) {
             $buildFile = $destFile . '.tmp.' . getmypid();
@@ -1111,6 +1142,7 @@ class InstantDubController extends Controller
                 '-t', (string) $duration,
                 '-c:a', 'aac', '-b:a', '32k',
                 '-muxdelay', '0', '-muxpreload', '0',
+                '-output_ts_offset', (string) round($offsetMs / 1000, 3),
                 '-f', 'mpegts', $buildFile,
             ]);
             if (file_exists($buildFile) && filesize($buildFile) > 10) {
@@ -1137,7 +1169,7 @@ class InstantDubController extends Controller
         ]);
     }
 
-    private function uncachedHlsAudioSliceResponse(string $sourceFile, float $offset, float $duration): \Illuminate\Http\Response
+    private function uncachedHlsAudioSliceResponse(string $sourceFile, float $offset, float $duration, float $absStart = 0.0): \Illuminate\Http\Response
     {
         $duration = max(0.1, round($duration, 3));
         $offset = max(0.0, round($offset, 3));
@@ -1151,6 +1183,7 @@ class InstantDubController extends Controller
             '-ac', '1', '-ar', '44100',
             '-c:a', 'aac', '-b:a', '96k',
             '-muxdelay', '0', '-muxpreload', '0',
+            '-output_ts_offset', (string) round($absStart, 3),
             '-f', 'mpegts', $tmpFile,
         ]);
 
@@ -1167,7 +1200,7 @@ class InstantDubController extends Controller
         }
 
         @unlink($tmpFile);
-        return $this->silentHlsAudioResponse($duration);
+        return $this->silentHlsAudioResponse($duration, $absStart);
     }
 
     private function buildSessionFromCache(InstantDub $dub, string $sessionId, string $videoUrl, string $videoBaseUrl, string $videoQuery, string $title, ?string $forceVoice = null): array
